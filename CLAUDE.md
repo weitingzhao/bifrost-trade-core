@@ -1,0 +1,56 @@
+# CLAUDE.md — bifrost-trade-core
+
+与本项目用户的所有对话一律使用中文。
+
+## 职责范围
+
+本 repo 包含两部分：
+
+1. **`bifrost-core` Python 包** (`src/bifrost_core/`) — 被所有其他 repo 安装和引用的共享库：
+   - `config/` — YAML 配置加载（Settings、环境合并）
+   - `core/` — 工具函数（日志、Redis URL 解析）
+   - `persistence/` — PostgreSQL sink、DDL、账户同步
+   - `portfolio/` — 持仓模型、Greeks 聚合、多账户
+   - `ib_operator/` — IB Operator RPC 客户端（client 侧）
+   - `monitor/` — 状态读取层（供 API 后端查询 DB）
+   - `daemon/` — 交易 daemon 核心（FSM、守卫、策略、执行）
+
+2. **交易 daemon 入口** (`scripts/run_engine.py`) — 启动 GsTrading 主进程
+
+## 命令
+
+```bash
+make install-dev    # pip install -e ".[dev]"
+make test           # pytest，跳过 ib/db 依赖测试
+make test-all       # 所有测试（需要 IB 和 PostgreSQL）
+make lint           # ruff check
+make db-init        # 初始化/刷新 PostgreSQL schema
+```
+
+## 架构关键点
+
+- `daemon/app/gs_trading.py: GsTrading` — 单进程 asyncio，所有状态通过三层 FSM 驱动
+- FSM 层级：`DaemonFSM → TradingFSM → HedgeFSM`
+- Daemon 不直接连接 IB，通过 Redis 读取行情和账户，通过 RPC 发单
+- `persistence/postgres_sink.py` — StatusSink 的唯一实现，写 daemon 状态快照
+- `portfolio/` 的模型被 API 后端 (`bifrost-trade-api`) 直接 import
+
+## 版本发布规范
+
+- 修改 `src/bifrost_core/` 中的共享库后，必须 bump `pyproject.toml` 中的 version
+- 其他 repo 通过 git tag 安装：`pip install git+https://github.com/ORG/bifrost-trade-core.git@v0.x.x`
+- 破坏性变更需要同步更新所有依赖 repo 的 pyproject.toml
+
+## 数据库规范
+
+- 开发库：`bifrost_dev`，生产库：`bifrost_prod`
+- 表命名前缀：`daemon_`、`account_`、`contract_`、`strategy_`、`gate_safety_`、`job_`、`preference_`
+- FK 列名与被引用 PK 名完全一致
+- `gate_safety_*` 表：标量列，不使用 jsonb
+- DDL 变更必须在 `docs/DATABASE.md` 的 §6 变更日志中记录
+
+## 测试标记
+
+- `@pytest.mark.ib` — 需要 IB 实时连接
+- `@pytest.mark.db` — 需要 PostgreSQL 连接
+- 默认 CI 跑：`pytest -m 'not ib and not db'`

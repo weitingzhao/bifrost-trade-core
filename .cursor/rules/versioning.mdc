@@ -1,0 +1,48 @@
+---
+description: Core package versioning — bump, tag, and downstream notification rules
+alwaysApply: true
+---
+
+# bifrost-core 版本管理规范
+
+`bifrost-core` 是所有其他 `bifrost-trade-*` Python repo 的基础依赖。版本变更直接影响下游 4 个仓库。
+
+## 何时 Bump 版本
+
+- **修改 `src/bifrost_core/` 中任何公开接口**（函数签名、类属性、模块导出）时，必须在同一 PR 中 bump `pyproject.toml` 的 `version` 字段。
+- **仅修改内部实现**（不改变公开接口）时，可选择性 bump（建议 patch 版本）。
+- **新增模块或子包**时，bump minor 版本。
+
+## 版本号规则
+
+采用 Semantic Versioning：`MAJOR.MINOR.PATCH`
+
+- **PATCH**：bug fix、内部实现优化、新增非破坏性功能
+- **MINOR**：新增模块、新增公开类/函数、新增数据库表
+- **MAJOR**：破坏性接口变更（函数签名变化、类重命名、模块路径变更）
+
+## 破坏性变更流程
+
+1. 在 core 的 PR 描述中**明确列出**受影响的下游 repo：
+   - `bifrost-trade-ib-edge`
+   - `bifrost-trade-api`
+   - `bifrost-trade-data`
+   - `bifrost-trade-research`
+2. Bump core 版本并打 tag（如 `v0.2.0`）
+3. 在各下游 repo 的 `pyproject.toml` 中更新 `bifrost-core` 依赖版本
+4. 在 `bifrost-trade-infra/.env` 中更新 `BIFROST_CORE_REF`
+
+## DDL 变更附加规则
+
+修改 `src/bifrost_core/persistence/postgres/ddl.py` 时：
+- 同步更新数据库文档
+- 确认 `bifrost-trade-api` 中相关 reader 模块兼容新 schema
+- 确认 `bifrost-trade-data` 中相关 task 兼容新 schema
+
+## Tag 与安装
+
+下游 repo 通过 git tag 安装 core：
+```
+pip install git+https://github.com/ORG/bifrost-trade-core.git@v0.x.x
+```
+Docker 构建时通过 `BIFROST_CORE_REF` 变量控制版本。

@@ -1,0 +1,180 @@
+# Gamma Scalping Engine — template for config/config.yaml (do not commit secrets).
+# Copy to config.yaml and merge with config.dev.yaml / config.prod.yaml per README.
+#
+# Gate defaults (Option 2): merged under runtime YAML and DB-loaded gates in the daemon.
+
+gates:
+  strategy:
+    structure:
+      min_dte: 21
+      max_dte: 35
+      atm_band_pct: 0.03
+    earnings:
+      blackout_days_before: 3
+      blackout_days_after: 1
+      dates: []
+    trading_hours_only: true
+  state:
+    delta:
+      epsilon_band: 10
+      threshold_hedge_shares: 25
+      max_delta_limit: 500
+    market:
+      vol_window_min: 5
+      stale_ts_threshold_ms: 5000
+    liquidity:
+      wide_spread_pct: 0.1
+      extreme_spread_pct: 0.5
+    system:
+      data_lag_threshold_ms: 1000
+  intent:
+    hedge:
+      min_hedge_shares: 10
+      cooldown_seconds: 60
+      max_hedge_shares_per_order: 500
+      min_price_move_pct: 0.2
+  guard:
+    risk:
+      max_daily_hedge_count: 50
+      max_position_shares: 2000
+      max_daily_loss_usd: 5000
+      max_net_delta_shares: 100
+      max_spread_pct: 0.05
+      paper_trade: true
+
+# PostgreSQL / Redis / IB live in config.dev.yaml / config.prod.yaml in a typical split.
+
+# IB Operator (shared): Redis cmd RPC. Start: scripts/run_ib_operator.py
+ib_operator:
+  enabled: true
+  stream: "ib:operator:cmd"
+  consumer_group: ib-operator
+  result_prefix: "ib:operator:result:"
+  health_key: "bifrost:health:ws_ib_operator"
+  result_ttl_sec: 300
+  request_timeout_sec: 120
+  bars_backfill_request_timeout_sec: 7200
+  health_refresh_sec: 30
+  max_result_bytes: 4194304
+  block_ms: 5000
+  use_for_celery_bars: false
+
+ib_connection:
+  reconnect_base_sec: 2
+  reconnect_max_sec: 60
+  reconnect_max_exp: 6
+  ib_probe_interval_sec: 15
+  ib_probe_stale_multiplier: 2.5
+
+# API listen ports (see CLAUDE.md / docs). Nginx: scripts/render_nginx_status_conf.py
+server:
+  architecture:
+    monitor_port: 8765
+    ops_port: 8768
+    docs_port: 8767
+  account:
+    trading_port: 8769
+    portfolio_port: 8771
+  research:
+    research_port: 8773
+    market_port: 8772
+    strategy_port: 8770
+  feed:
+    massive_port: 8766
+
+frontend:
+  port: 5173
+  dev_path: "http://127.0.0.1:5173"
+  prod_path: "http://127.0.0.1"
+
+ops:
+  celery_inspect_timeout_sec: 15
+  celery_inspect_wall_sec: 10
+  worker_list_mode: redis_presence
+  worker_list_fallback_inspect: true
+  worker_list_inspect_quick_timeout_sec: 10
+  worker_list_inspect_cache_ttl_sec: 20
+  auth:
+    allow_unauthenticated_reads: true
+  celery:
+    default_max_worker_instances: 1
+    massive_worker_concurrency: 1
+    massive_pending_dispatch_inflight_cap: 15
+    canonical_queue_order:
+      - stocks_ib
+      - stocks_massive_high
+      - stocks_massive
+      - options_massive_high
+      - options_massive
+    broker_queue_display_names:
+      stocks_ib: "Stocks IB"
+      options_massive: "Options Massive"
+      options_massive_high: "Massive Options (H)"
+      stocks_massive: "Stocks Massive"
+      stocks_massive_high: "Stocks Massive (H)"
+  worker_profiles:
+    stocks_ib:
+      queues: ["stocks_ib"]
+      max_worker_instances: 1
+    options_massive:
+      queues: ["options_massive"]
+      pool: solo
+      max_worker_instances: 4
+    options_massive_high:
+      queues: ["options_massive_high"]
+      pool: solo
+      max_worker_instances: 1
+    stocks_massive:
+      queues: ["stocks_massive"]
+      pool: solo
+      max_worker_instances: 2
+    stocks_massive_high:
+      queues: ["stocks_massive_high"]
+      pool: solo
+      max_worker_instances: 1
+
+history_backfill:
+  stock:
+    daily_years: 10
+    min_weeks: 1
+    5min_months: 1
+    1hour_months: 3
+
+greeks:
+  risk_free_rate: 0.05
+  volatility: 0.35
+
+order:
+  order_type: "market"
+
+engine:
+  use_ib_edge: false
+
+reference_indices:
+  - symbol: "^GSPC"
+    label: "S&P 500 (SPY)"
+    polygon_ticker: "SPY"
+  - symbol: "^DJI"
+    label: "Dow 30 (DIA)"
+    polygon_ticker: "DIA"
+  - symbol: "^IXIC"
+    label: "Nasdaq"
+    polygon_ticker: "I:COMP"
+  - symbol: "^VIX"
+    label: "VIX (VIXY)"
+    polygon_ticker: "VIXY"
+
+# Prefer env: MASSIVE_API_KEY or POLYGON_API_KEY
+massive:
+  api_key: ""
+  tier: "starter"
+  rest_base: "https://api.polygon.io"
+  ws_url: "wss://socket.polygon.io/options"
+  features:
+    trades_enabled: false
+  expiration_cache:
+    enabled: true
+    ttl_trading_sec: 3600
+    ttl_off_hours_sec: 43200
+    stale_while_revalidate: true
+    beat_batch_size: 12
