@@ -1,5 +1,7 @@
 # CLAUDE.md — bifrost-trade-core
 
+> 本项目是 bifrost-trader-engine 重构的一部分。迁移进度见 `bifrost-trade-infra/docs/MIGRATION_TRACKING.md`。
+
 与本项目用户的所有对话一律使用中文。
 
 ## 职责范围
