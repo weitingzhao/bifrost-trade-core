@@ -5,7 +5,7 @@ alwaysApply: true
 
 # bifrost-core 版本管理规范
 
-`bifrost-core` 是所有其他 `bifrost-trade-*` Python repo 的基础依赖。版本变更直接影响下游 4 个仓库。
+`bifrost-core` 是所有其他 `bifrost-trade-*` Python repo 的基础依赖。版本变更直接影响下游 3 个仓库。
 
 ## 何时 Bump 版本
 
@@ -25,9 +25,8 @@ alwaysApply: true
 
 1. 在 core 的 PR 描述中**明确列出**受影响的下游 repo：
    - `bifrost-trade-ib-edge`
+   - `bifrost-trade-worker`
    - `bifrost-trade-api`
-   - `bifrost-trade-data`
-   - `bifrost-trade-research`
 2. Bump core 版本并打 tag（如 `v0.2.0`）
 3. 在各下游 repo 的 `pyproject.toml` 中更新 `bifrost-core` 依赖版本
 4. 在 `bifrost-trade-infra/.env` 中更新 `BIFROST_CORE_REF`
@@ -37,7 +36,7 @@ alwaysApply: true
 修改 `src/bifrost_core/persistence/postgres/ddl.py` 时：
 - 同步更新数据库文档
 - 确认 `bifrost-trade-api` 中相关 reader 模块兼容新 schema
-- 确认 `bifrost-trade-data` 中相关 task 兼容新 schema
+- 确认 `bifrost-trade-worker` 中相关 data task 兼容新 schema
 
 ## Tag 与安装
 

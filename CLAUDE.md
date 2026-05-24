@@ -6,18 +6,16 @@
 
 ## 职责范围
 
-本 repo 包含两部分：
+本 repo 是 **`bifrost-core` Python 共享库** (`src/bifrost_core/`) — 被所有其他后端 repo pip install 后引用：
 
-1. **`bifrost-core` Python 包** (`src/bifrost_core/`) — 被所有其他 repo 安装和引用的共享库：
-   - `config/` — YAML 配置加载（Settings、环境合并）
-   - `core/` — 工具函数（日志、Redis URL 解析）
-   - `persistence/` — PostgreSQL sink、DDL、账户同步
-   - `portfolio/` — 持仓模型、Greeks 聚合、多账户
-   - `ib_operator/` — IB Operator RPC 客户端（client 侧）
-   - `monitor/` — 状态读取层（供 API 后端查询 DB）
-   - `daemon/` — 交易 daemon 核心（FSM、守卫、策略、执行）
+- `config/` — YAML 配置加载（Settings、环境合并）
+- `core/` — 工具函数（日志、Redis URL 解析）
+- `persistence/` — PostgreSQL sink、DDL、账户同步
+- `portfolio/` — 持仓模型、Greeks 聚合、多账户
+- `ib_operator/` — IB Operator RPC 客户端（client 侧）
+- `monitor/` — 状态读取层（供 API 后端查询 DB）
 
-2. **交易 daemon 入口** (`scripts/run_engine.py`) — 启动 GsTrading 主进程
+**本 repo 不包含任何业务进程或应用入口**。交易 daemon 归属 `bifrost-trade-worker`。
 
 ## 命令
 
@@ -31,11 +29,9 @@ make db-init        # 初始化/刷新 PostgreSQL schema
 
 ## 架构关键点
 
-- `daemon/app/gs_trading.py: GsTrading` — 单进程 asyncio，所有状态通过三层 FSM 驱动
-- FSM 层级：`DaemonFSM → TradingFSM → HedgeFSM`
-- Daemon 不直接连接 IB，通过 Redis 读取行情和账户，通过 RPC 发单
 - `persistence/postgres_sink.py` — StatusSink 的唯一实现，写 daemon 状态快照
 - `portfolio/` 的模型被 API 后端 (`bifrost-trade-api`) 直接 import
+- `ib_operator/` 仅是 RPC client 侧封装，实际执行在 `bifrost-trade-ib-edge` 的 Operator 进程
 
 ## 版本发布规范
 
