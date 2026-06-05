@@ -1,3 +1,9 @@
+"""Shared pytest fixtures for bifrost-core."""
+
+from __future__ import annotations
+
+from pathlib import Path
+
 import pytest
 
 
@@ -18,3 +24,13 @@ def sample_config():
             "volatility": 0.35,
         },
     }
+
+
+@pytest.fixture
+def project_root() -> Path:
+    return Path(__file__).resolve().parent.parent
+
+
+@pytest.fixture
+def sample_yaml(project_root: Path) -> Path:
+    return project_root / "config" / "config.yaml.example"
