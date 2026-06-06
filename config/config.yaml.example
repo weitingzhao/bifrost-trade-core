@@ -100,6 +100,10 @@ ops:
     default_max_worker_instances: 1
     massive_worker_concurrency: 1
     massive_pending_dispatch_inflight_cap: 15
+    # Hostnames (Celery nodename suffix) for Worker instance situation Dev/Prod columns when
+    # Redis presence lacks config_profile (legacy Linux prod workers). Example: server-app-ubt
+    prod_worker_hostnames: []
+    dev_worker_hostnames: []
     canonical_queue_order:
       - stocks_ib
       - stocks_massive_high
