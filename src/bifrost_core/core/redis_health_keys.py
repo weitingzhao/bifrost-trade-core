@@ -111,6 +111,14 @@ def hgetall_ib_account_agent_health(r: Any) -> Dict[str, str]:
     return dict(h or {})
 
 
+def hgetall_ib_operator_health(r: Any) -> Dict[str, str]:
+    """IB Operator health hash (cmd RPC + optional secondary slot)."""
+    h = r.hgetall(BIFROST_HEALTH_IB_OPERATOR)
+    if not h:
+        h = r.hgetall(LEGACY_BIFROST_IB_OPERATOR)
+    return dict(h or {})
+
+
 def hgetall_account_sync_daemon_health(r: Any) -> Dict[str, str]:
     """Account Sync Daemon health hash (canonical key, then legacy migration key)."""
     for key in (BIFROST_HEALTH_ACCOUNT_SYNC_DAEMON, LEGACY_BIFROST_HEALTH_ACCOUNT_SYNC_DAEMON):
