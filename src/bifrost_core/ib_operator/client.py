@@ -13,15 +13,12 @@ import redis
 from bifrost_core.config.startup import get_effective_ib_config
 from bifrost_core.ib_operator.config import effective_ib_operator_settings
 from bifrost_core.ib_operator.health_redis import (
-    jsonish_connected,
     normalize_operator_health_payload,
     operator_health_dict_from_redis_hash,
+    operator_health_dict_to_redis_hash,
 )
 from bifrost_core.ib_operator.protocol import PROTOCOL_VERSION, new_req_id, result_key
-from bifrost_core.ib_operator.ib_probe_derived import (
-    attach_ib_probe_derived,
-    attach_service_heartbeat_derived,
-)
+from bifrost_core.monitor.integrations.ib_socket_status import build_ib_socket_status
 
 logger = logging.getLogger(__name__)
 
@@ -177,121 +174,44 @@ def build_monitor_ib_status(
     if not s["enabled"] or not s["redis_url"]:
         return None
     ib = ib_cfg or {}
-    health = read_operator_health(s["redis_url"], s["health_key"])
-    if health:
-        health = normalize_operator_health_payload(health)
-    unreachable = "IB Operator unreachable (is scripts/systemd/run_ib_operator.py running?)"
     try:
         _eff = get_effective_ib_config(config)
-        _stale_m = float(_eff.get("ib_probe_stale_multiplier") or 2.5)
+        stale_m = float(_eff.get("ib_probe_stale_multiplier") or 2.5)
     except Exception:
-        _stale_m = 2.5
-    _now_ts = time.time()
+        stale_m = 2.5
 
-    def _slot_from_health_dict(h: dict, cid_i: int) -> Dict[str, Any]:
-        slot: Dict[str, Any] = {
-            "connected": jsonish_connected(h.get("connected")),
-            "client_id": int(h.get("client_id") or cid_i),
-            "last_error": h.get("last_error"),
-            "reconnects": int(h.get("reconnects") or 0),
-        }
-        attach_ib_probe_derived(
-            slot,
-            probe_at=float(h.get("ib_probe_at") or 0),
-            probe_interval=float(h.get("ib_probe_interval_sec") or 0),
-            probe_ok=jsonish_connected(h.get("ib_probe_ok")),
-            stale_mult=_stale_m,
-            now=_now_ts,
-        )
-        return slot
-
-    def _slot(
-        key: str,
-        cid_key: str,
-        *,
-        fallback_err: Optional[str],
-    ) -> Dict[str, Any]:
-        cid = ib.get(cid_key)
-        try:
-            cid_i = int(cid) if cid is not None else 0
-        except (TypeError, ValueError):
-            cid_i = 0
-        if health:
-            h = health.get(key)
-            if not isinstance(h, dict):
-                if key == "host" and isinstance(health.get("operator"), dict):
-                    h = health["operator"]
-                elif key == "secondary" and isinstance(health.get("account2"), dict):
-                    h = health["account2"]
-            if isinstance(h, dict):
-                return _slot_from_health_dict(h, cid_i)
-        return {
-            "connected": False,
-            "client_id": cid_i,
-            "last_error": unreachable if not health else fallback_err,
-            "reconnects": 0,
-        }
-
-    out: Dict[str, Any] = {
-        "host": _slot("host", "ib_client_id_operator", fallback_err=None),
-    }
-    ib2_host = ib.get("ib2_host") or ""
-    ib2_host = ib2_host.strip() if isinstance(ib2_host, str) else ""
+    redis_hash: Optional[Dict[str, Any]] = None
     try:
-        cid2 = int(ib.get("ib2_client_id_operator") or 102)
-    except (TypeError, ValueError):
-        cid2 = 102
-    if ib2_host or cid2 != 102:
-        sec = health.get("secondary") if health else None
-        if sec is None and health and isinstance(health.get("account2"), dict):
-            sec = health["account2"]
-        if health and sec is not None and isinstance(sec, dict):
-            a2 = sec
-            out["secondary"] = _slot_from_health_dict(a2, cid2)
-        else:
-            out["secondary"] = {
-                "connected": False,
-                "client_id": cid2,
-                "last_error": unreachable
-                if not health
-                else ("Set Second IB host in Settings to enable" if not ib2_host else None),
-                "reconnects": 0,
-            }
-    # Mirror ib_ingestor: top-level `connected` = Host slot (primary cmd RPC).
-    out["connected"] = jsonish_connected(out["host"]["connected"])
-    if health:
-        out["service_alive"] = jsonish_connected(health.get("service_alive", True))
-        out["operator_alive"] = out["service_alive"]
+        r = redis.from_url(s["redis_url"], decode_responses=True)
         try:
-            out["msg_count"] = int(health.get("msg_count") or 0)
-        except (TypeError, ValueError):
-            out["msg_count"] = 0
-        try:
-            lm = float(health.get("last_msg_ts") or 0)
-            out["last_msg_age_s"] = max(0.0, time.time() - lm) if lm > 0 else None
-        except (TypeError, ValueError):
-            out["last_msg_age_s"] = None
-        out["reconnects"] = int(out["host"].get("reconnects") or 0)
-        try:
-            _sh_iv = float(health.get("service_heartbeat_interval_sec") or 0)
-            _sh_last = float(health.get("last_service_heartbeat_at") or 0)
-        except (TypeError, ValueError):
-            _sh_iv = 0.0
-            _sh_last = 0.0
-        if _sh_iv > 0:
-            attach_service_heartbeat_derived(
-                out,
-                interval_sec=_sh_iv,
-                last_heartbeat_at=_sh_last,
-                now=_now_ts,
-            )
-        _shr = (health.get("service_heartbeat_reconnect_in_progress") or "").strip()
-        out["service_heartbeat_reconnect_in_progress"] = _shr if _shr else None
-    else:
-        out["service_alive"] = False
-        out["operator_alive"] = False
-        out["msg_count"] = 0
-        out["last_msg_age_s"] = None
-        out["reconnects"] = 0
-        out["service_heartbeat_reconnect_in_progress"] = None
-    return out
+            kt = r.type(s["health_key"])
+            if kt == "hash":
+                redis_hash = r.hgetall(s["health_key"]) or {}
+            elif kt == "string":
+                raw = r.get(s["health_key"])
+                if raw:
+                    loaded = json.loads(raw)
+                    if isinstance(loaded, dict):
+                        nested = normalize_operator_health_payload(loaded)
+                        from bifrost_core.ib_operator.health_redis import (
+                            operator_health_dict_to_redis_hash,
+                        )
+
+                        redis_hash = operator_health_dict_to_redis_hash(nested)
+        finally:
+            r.close()
+    except Exception:
+        redis_hash = None
+
+    if not redis_hash:
+        health = read_operator_health(s["redis_url"], s["health_key"])
+        if health:
+            redis_hash = operator_health_dict_to_redis_hash(normalize_operator_health_payload(health))
+
+    return build_ib_socket_status(
+        "ib_operator",
+        redis_hash,
+        ib,
+        stale_mult=stale_m,
+        unreachable="IB Operator unreachable (is scripts/systemd/run_ib_operator.py running?)",
+    )

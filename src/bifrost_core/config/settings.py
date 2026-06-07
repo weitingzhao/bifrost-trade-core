@@ -5,6 +5,7 @@ Defaults: loaded from config/config.yaml.example (single source of truth, no cod
 """
 
 import logging
+import os
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -18,11 +19,19 @@ from bifrost_core.core.dict_merge import deep_merge
 _EXAMPLE_CONFIG: Optional[Dict[str, Any]] = None
 
 
+def _config_defaults_dir() -> Path:
+    """Directory holding config.yaml / config.yaml.example (Docker: /app/config)."""
+    env_cfg = (os.environ.get("BIFROST_CONFIG") or "").strip()
+    if env_cfg:
+        return Path(env_cfg).resolve().parent
+    return Path(__file__).resolve().parents[3] / "config"
+
+
 def _load_example_config() -> Dict[str, Any]:
     """Load config.yaml.example as defaults. No code-level defaults."""
     global _EXAMPLE_CONFIG
     if _EXAMPLE_CONFIG is None:
-        cfg_dir = Path(__file__).resolve().parents[3] / "config"
+        cfg_dir = _config_defaults_dir()
         example_path = cfg_dir / "config.yaml.example"
         fallback_path = cfg_dir / "config.yaml"
         path = example_path if example_path.is_file() else fallback_path

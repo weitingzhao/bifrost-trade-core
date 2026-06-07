@@ -46,6 +46,18 @@ IB_SERVICE_LABELS = {
     "portfolio_flex": "Portfolio (Flex)",
 }
 
+# Shared disconnect reasons for IB socket services (ingestor / account_agent / operator).
+IB_DISCONNECT_REASON_SESSION_ENDED = "Session ended"
+IB_DISCONNECT_REASON_SERVICE_STOPPED = "Service stopped"
+
+# Ops market-ingest service_id → message center ``service`` field.
+INGEST_SERVICE_ID_TO_MC_SERVICE: Dict[str, str] = {
+    "ib_ingestor": "ib_ingestor",
+    "ib_market": "ib_ingestor",
+    "ib_account_agent": "ib_account_agent",
+    "ib_operator": "ib_operator",
+}
+
 
 @dataclass(frozen=True)
 class SystemMessageEvent:
@@ -96,6 +108,18 @@ def _status_label(status: str) -> str:
 def _sanitize_slot(slot: Optional[str]) -> str:
     s = str(slot or "host").strip().lower()
     return s or "host"
+
+
+IB_SLOT_DISPLAY_LABELS = {
+    "host": "HOST",
+    "secondary": "SECONDARY",
+}
+
+
+def slot_display_label(slot: Optional[str]) -> str:
+    """Uppercase UI label for IB connection slot (HOST / SECONDARY)."""
+    key = _sanitize_slot(slot)
+    return IB_SLOT_DISPLAY_LABELS.get(key, key.upper())
 
 
 def _coerce_int(raw: Any) -> Optional[int]:
@@ -190,16 +214,20 @@ def build_ib_connection_event(
     occurred_at: Optional[float] = None,
 ) -> SystemMessageEvent:
     slot_name = _sanitize_slot(slot)
+    slot_label = slot_display_label(slot_name)
     service_label = _service_label(service)
     from_label = _status_label(status_from)
     to_label = _status_label(status_to)
-    client_part = f", client_id={client_id}" if client_id is not None else ""
+    client_part = f", client {client_id}" if client_id is not None else ""
     account_part = f", account={account}" if account else ""
     reason_part = f" ({reason})" if reason else ""
-    title = f"{service_label} {slot_name} connection changed"
+    title = f"{service_label} — {slot_label} disconnected" if status_to == "disconnected" else (
+        f"{service_label} — {slot_label} connected" if status_to == "connected" else
+        f"{service_label} — {slot_label} connection changed"
+    )
     message = (
-        f"{service_label} ({slot_name}{client_part}{account_part}) changed: "
-        f"{from_label} -> {to_label}{reason_part}"
+        f"{service_label} {slot_label}{client_part}{account_part}: "
+        f"{from_label} → {to_label}{reason_part}"
     )
     return SystemMessageEvent(
         message_id=uuid.uuid4().hex,
@@ -217,6 +245,128 @@ def build_ib_connection_event(
         occurred_at=float(occurred_at or time.time()),
         dedupe_key=f"{MESSAGE_CENTER_TOPIC_IB_CONNECTION}:{service}:{slot_name}:{client_id or 0}:{status_to}",
     )
+
+
+def publish_ib_connection_transition(
+    r: Any,
+    *,
+    service: str,
+    slot: str,
+    client_id: Optional[int],
+    status_from: str,
+    status_to: str,
+    reason: Optional[str] = None,
+    occurred_at: Optional[float] = None,
+) -> Optional[str]:
+    """Publish one IB connection transition without an in-process :class:`IbConnectionStatusTracker`.
+
+    Used when the publisher has no tracker state (e.g. Ops stop clears Redis before the
+    socket process exits).
+    """
+    event = build_ib_connection_event(
+        service=service,
+        slot=slot,
+        client_id=client_id,
+        account=None,
+        status_from=status_from,
+        status_to=status_to,
+        reason=reason,
+        occurred_at=occurred_at,
+    )
+    return publish_system_message_event(r, event)
+
+
+def _connected_slots_from_ingest_health_hash(
+    service_id: str,
+    health_hash: Dict[str, Any],
+) -> List[tuple[str, Optional[int]]]:
+    """Return ``(slot, client_id)`` for IB slots that look connected in a Redis health hash."""
+    from bifrost_core.core.redis_health_keys import redis_hash_field_truthy
+
+    sid = (service_id or "").strip()
+    m = health_hash or {}
+    out: List[tuple[str, Optional[int]]] = []
+
+    def _cid(*keys: str) -> Optional[int]:
+        for k in keys:
+            v = m.get(k)
+            if v is None or str(v).strip() == "":
+                continue
+            try:
+                n = int(v)
+                return n if n > 0 else None
+            except (TypeError, ValueError):
+                continue
+        return None
+
+    if sid in ("ib_ingestor", "ib_market"):
+        if redis_hash_field_truthy(m, "connected"):
+            cid = _cid("client_id")
+            if cid is not None:
+                out.append(("host", cid))
+    elif sid == "ib_account_agent":
+        host_live = (
+            redis_hash_field_truthy(m, "host_connected")
+            or redis_hash_field_truthy(m, "connected")
+            or redis_hash_field_truthy(m, "host_alive")
+        )
+        if host_live:
+            cid = _cid("host_client_id", "client_id")
+            if cid is not None:
+                out.append(("host", cid))
+        sec_live = redis_hash_field_truthy(m, "secondary_connected") or (
+            redis_hash_field_truthy(m, "secondary_present")
+            and _cid("secondary_client_id") is not None
+        )
+        if sec_live:
+            cid = _cid("secondary_client_id")
+            if cid is not None:
+                out.append(("secondary", cid))
+    elif sid == "ib_operator":
+        host_live = (
+            redis_hash_field_truthy(m, "host_connected")
+            or redis_hash_field_truthy(m, "connected")
+            or redis_hash_field_truthy(m, "host_alive")
+            or redis_hash_field_truthy(m, "operator_connected")
+        )
+        if host_live:
+            cid = _cid("host_client_id", "client_id", "operator_client_id")
+            if cid is not None:
+                out.append(("host", cid))
+        sec_live = redis_hash_field_truthy(m, "secondary_connected") or (
+            redis_hash_field_truthy(m, "secondary_present")
+            and _cid("secondary_client_id") is not None
+        )
+        if sec_live:
+            cid = _cid("secondary_client_id")
+            if cid is not None:
+                out.append(("secondary", cid))
+    return out
+
+
+def publish_ib_service_stopped_messages(
+    r: Any,
+    *,
+    service_id: str,
+    health_hash: Dict[str, Any],
+    occurred_at: Optional[float] = None,
+) -> None:
+    """Publish ``disconnected`` toasts for connected IB slots when Ops stops a socket service."""
+    mc_service = INGEST_SERVICE_ID_TO_MC_SERVICE.get((service_id or "").strip())
+    if not mc_service:
+        return
+    ts = float(occurred_at or time.time())
+    for slot, client_id in _connected_slots_from_ingest_health_hash(service_id, health_hash):
+        publish_ib_connection_transition(
+            r,
+            service=mc_service,
+            slot=slot,
+            client_id=client_id,
+            status_from="connected",
+            status_to="disconnected",
+            reason=IB_DISCONNECT_REASON_SERVICE_STOPPED,
+            occurred_at=ts,
+        )
 
 
 def build_portfolio_tws_executions_fetch_event(
