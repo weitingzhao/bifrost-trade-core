@@ -52,3 +52,20 @@ def redis_url_from_config(config: Dict[str, Any]) -> Optional[str]:
     if not enabled:
         return None
     return format_redis_url(effective_redis_dict(config, default_db=0))
+
+
+def celery_redis_url_from_config(config: Optional[Dict[str, Any]] = None) -> str:
+    """Celery broker/backend URL — prefers ``redis_queue`` when set (phase ⑥ split).
+
+    Falls back to ``redis`` host with db=1 (legacy single-instance embedded redis).
+    """
+    config = config or {}
+    queue = config.get("redis_queue") or {}
+    if (queue.get("host") or "").strip():
+        base = dict(config.get("redis") or {})
+        for key in ("host", "port", "db", "password", "enabled"):
+            if key in queue and queue[key] not in (None, ""):
+                base[key] = queue[key]
+        default_db = int(base.get("db", 0) if base.get("db") not in (None, "") else 0)
+        return format_redis_url(effective_redis_dict({"redis": base}, default_db=default_db))
+    return format_redis_url(effective_redis_dict(config, default_db=1))
