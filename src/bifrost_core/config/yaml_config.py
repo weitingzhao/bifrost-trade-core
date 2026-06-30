@@ -347,6 +347,17 @@ def _flatten_host_secondary_ib(ib: dict) -> Dict[str, Any]:
     hc = h.get("client_id") if isinstance(h.get("client_id"), dict) else {}
     sc = s.get("client_id") if isinstance(s.get("client_id"), dict) else {}
 
+    def _market_gateway_cid(client_ids: dict) -> int:
+        if client_ids.get("market_gateway") is not None:
+            return int(client_ids["market_gateway"])
+        for key in ("ingestor", "ib_market_ingest"):
+            if client_ids.get(key) is not None:
+                return int(client_ids[key])
+        return 150
+
+    market_cid = _market_gateway_cid(hc)
+    merged_market = hc.get("market_gateway") is not None
+
     host = str(h.get("ip") or "127.0.0.1").strip()
     ptp = str(h.get("port_type") or "tws_paper").strip().lower()
     # Optional: market data / IB ingestor use this port (host IB only). Empty = same as port_type.
@@ -362,12 +373,13 @@ def _flatten_host_secondary_ib(ib: dict) -> Dict[str, Any]:
         "ib2_port_type": ib2_pt,
         "connect_timeout": ib.get("connect_timeout"),
         "client_id_daemon": int(hc.get("daemon") or 1),
-        "client_id_listener": int(hc.get("listener") or 2),
+        "client_id_market_gateway": market_cid,
+        "client_id_listener": market_cid if merged_market else int(hc.get("listener") or 2),
         # Host IB Operator (cmd RPC): YAML key `operator`; legacy `account` accepted for migration.
         "client_id_operator": int(hc.get("operator") or hc.get("account") or 100),
-        "client_id_worker_market": int(hc.get("worker_market") or 500),
-        # IB ingestor (run_ib_ingestor.py): YAML `ingestor`; legacy `ib_market_ingest` accepted.
-        "client_id_ib_ingestor": int(hc.get("ingestor") or hc.get("ib_market_ingest") or 150),
+        "client_id_worker_market": market_cid if merged_market else int(hc.get("worker_market") or 500),
+        # IB market gateway (W6): YAML `market_gateway`; legacy `ingestor` / `ib_market_ingest`.
+        "client_id_ib_ingestor": market_cid,
         # IB Account Agent (run_ib_account_agent.py): account-domain IB events → Redis only.
         "client_id_account_agent": int(hc.get("account_agent") or 151),
         "ib2_client_id_listener": int(sc.get("listener") or 3),
@@ -423,10 +435,11 @@ def get_effective_ib_config(config: dict) -> Dict[str, Any]:
     port_market_data = IB_PORT_MAP[ptm]
 
     cid_d = int(ib.get("client_id_daemon") or 1)
+    cid_mg = int(ib.get("client_id_market_gateway") or ib.get("client_id_ib_ingestor") or 150)
     cid_l = int(ib.get("client_id_listener") or 2)
     cid_op = int(ib.get("client_id_operator") or 100)
     cid_w = int(ib.get("client_id_worker_market") or 500)
-    cid_mi = int(ib.get("client_id_ib_ingestor") or 150)
+    cid_mi = int(ib.get("client_id_ib_ingestor") or cid_mg)
     cid_aa = int(ib.get("client_id_account_agent") or 151)
 
     out: Dict[str, Any] = {
@@ -437,6 +450,7 @@ def get_effective_ib_config(config: dict) -> Dict[str, Any]:
         "port_market_data": port_market_data,
         "connect_timeout": float(ib.get("connect_timeout") or 60.0),
         "client_id_daemon": cid_d,
+        "client_id_market_gateway": cid_mg,
         "client_id_listener": cid_l,
         "client_id_operator": cid_op,
         "client_id_worker_market": cid_w,
@@ -449,6 +463,7 @@ def get_effective_ib_config(config: dict) -> Dict[str, Any]:
         "ib_port_type_market_data": ptm,
         "ib_port_market_data": port_market_data,
         "ib_client_id_daemon": cid_d,
+        "ib_client_id_market_gateway": cid_mg,
         "ib_client_id_listener": cid_l,
         "ib_client_id_operator": cid_op,
         "ib_client_id_worker_market": cid_w,

@@ -151,7 +151,13 @@ def secondary_slot_configured(
 
 def _default_client_id(service_id: IbBrokerServiceId, ib_cfg: Dict[str, Any], slot: str) -> int:
     if service_id == "ib_ingestor":
-        return _safe_int(ib_cfg.get("client_id_ib_ingestor") or ib_cfg.get("ib_client_id_ib_ingestor"), 150)
+        return _safe_int(
+            ib_cfg.get("client_id_market_gateway")
+            or ib_cfg.get("ib_client_id_market_gateway")
+            or ib_cfg.get("client_id_ib_ingestor")
+            or ib_cfg.get("ib_client_id_ib_ingestor"),
+            150,
+        )
     if service_id == "ib_account_agent":
         if slot == "secondary":
             return _safe_int(ib_cfg.get("ib2_client_id_account_agent"), 152)

@@ -62,6 +62,10 @@ def ib_client_for_api(merged: Dict[str, Any]) -> Dict[str, Any]:
             "listener_secondary": _int_merge(m, "ib2_client_id_listener", default=3),
             "operator_host": _int_merge(m, "client_id_operator", "ib_client_id_operator", default=100),
             "operator_secondary": _int_merge(m, "ib2_client_id_operator", default=102),
+            "market_gateway": _int_merge(
+                m, "client_id_market_gateway", "ib_client_id_market_gateway",
+                "client_id_ib_ingestor", "ib_client_id_ib_ingestor", default=150,
+            ),
             "ingestor": _int_merge(m, "client_id_ib_ingestor", "ib_client_id_ib_ingestor", default=150),
             "account_agent": _int_merge(
                 m, "client_id_account_agent", "ib_client_id_account_agent", default=151
@@ -99,6 +103,7 @@ def ib_client_public_defaults() -> Dict[str, Any]:
             "listener_secondary": 3,
             "operator_host": 100,
             "operator_secondary": 102,
+            "market_gateway": 150,
             "ingestor": 150,
             "account_agent": 151,
             "account_agent_secondary": 152,
