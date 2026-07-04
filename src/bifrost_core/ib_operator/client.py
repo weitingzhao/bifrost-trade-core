@@ -213,5 +213,5 @@ def build_monitor_ib_status(
         redis_hash,
         ib,
         stale_mult=stale_m,
-        unreachable="IB Operator unreachable (is scripts/systemd/run_ib_operator.py running?)",
+        unreachable="IB Operator unreachable (Platform IB Gateway @ redis-ib — check data/ib-gateway)",
     )

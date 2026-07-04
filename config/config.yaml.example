@@ -57,7 +57,7 @@ ib_operator:
   health_refresh_sec: 30
   max_result_bytes: 4194304
   block_ms: 5000
-  use_for_celery_bars: false
+  use_for_celery_bars: true
 
 ib_connection:
   reconnect_base_sec: 2

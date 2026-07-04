@@ -83,9 +83,13 @@ def effective_ib_operator_settings(config: Dict[str, Any]) -> Dict[str, Any]:
         # Large range backfills return many bar rows in one RPC; default 4 MiB (override in YAML if needed).
         "max_result_bytes": int(raw.get("max_result_bytes") or (4 * 1024 * 1024)),
         "block_ms": int(raw.get("block_ms") or 5000),
-        # When False (default), Celery bars workers use MarketIbClient to TWS directly.
-        # Set True only when the worker cannot reach TWS (e.g. Linux worker, IB on another host).
-        "use_for_celery_bars": bool(raw.get("use_for_celery_bars")),
+        # TIBM3: default True — Celery bars use Platform IB Gateway fetch_bars_range RPC.
+        # Explicit false is deprecated (direct TWS removed from worker); still honored as False.
+        "use_for_celery_bars": (
+            bool(raw["use_for_celery_bars"])
+            if "use_for_celery_bars" in raw
+            else True
+        ),
     }
 
 
