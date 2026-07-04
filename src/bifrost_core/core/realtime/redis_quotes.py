@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from bifrost_core.core.realtime.ib_ingestor_keys import IB_INGESTER_TICK_PREFIX
+from bifrost_core.core.redis_url import effective_ib_redis_dict, ib_redis_url_from_config
 
 from .redis_keys import (
     PUB_CHANNEL,
@@ -213,9 +214,11 @@ class RedisQuotesWriter:
 class RedisQuotesReader:
     """Thread-safe Redis client for reading quotes and subscription set (monitor / API)."""
 
-    def __init__(self, params: RedisRealtimeParams):
+    def __init__(self, params: RedisRealtimeParams, config: Optional[Dict[str, Any]] = None):
         self._params = params
+        self._config = config
         self._client: Any = None
+        self._ib_client: Any = None
         self._available = False
 
     @property
@@ -245,6 +248,7 @@ class RedisQuotesReader:
             )
             self._client.ping()
             self._available = True
+            self._connect_ib_client()
             logger.info(
                 "Redis quotes reader connected: host=%s port=%s db=%s subscribe_channel=%s",
                 self._params.host,
@@ -260,8 +264,46 @@ class RedisQuotesReader:
         except Exception as e:
             logger.warning("Redis reader connect failed: %s", e)
             self._client = None
+            self._ib_client = None
             self._available = False
             return False
+
+    def _connect_ib_client(self) -> None:
+        """Separate client for IB bus keys when ``redis_ib`` is configured."""
+        cfg = self._config or {}
+        ib_url = ib_redis_url_from_config(cfg) if cfg else None
+        main_url = None
+        if cfg:
+            from bifrost_core.core.redis_url import redis_url_from_config
+
+            main_url = redis_url_from_config(cfg)
+        if not ib_url or ib_url == main_url:
+            self._ib_client = self._client
+            return
+        try:
+            import redis
+
+            eff = effective_ib_redis_dict(cfg, default_db=0)
+            self._ib_client = redis.Redis(
+                host=eff["host"],
+                port=int(eff["port"]),
+                db=int(eff["db"]),
+                username=(eff.get("username") or None) or None,
+                password=(eff.get("password") or None) or None,
+                socket_connect_timeout=self._params.socket_connect_timeout,
+                socket_timeout=self._params.socket_connect_timeout,
+                decode_responses=True,
+            )
+            self._ib_client.ping()
+            logger.info(
+                "Redis IB bus reader connected: host=%s port=%s user=%s",
+                eff["host"],
+                eff["port"],
+                eff.get("username") or "(default)",
+            )
+        except Exception as e:
+            logger.warning("Redis IB bus reader connect failed: %s", e)
+            self._ib_client = self._client
 
     @property
     def available(self) -> bool:
@@ -269,8 +311,13 @@ class RedisQuotesReader:
 
     @property
     def redis_client(self) -> Any:
-        """Raw Redis client, or None if not connected. Used for health-hash writes."""
+        """Raw Redis client for env-local keys (massive health, quote cache)."""
         return self._client
+
+    @property
+    def ib_redis_client(self) -> Any:
+        """Raw Redis client for IB bus keys (ingestor ticks, health hashes)."""
+        return self._ib_client or self._client
 
     def get_quote(self, symbol: str) -> Optional[Dict[str, Any]]:
         """Latest STK quote: prefer IB Ingestor tick key, then legacy ``quote:{symbol}``."""
@@ -304,14 +351,15 @@ class RedisQuotesReader:
 
     def get_ingester_tick(self, contract_key: str) -> Optional[Dict[str, Any]]:
         """Latest quote JSON from IB ingestor (``ib:ingester:tick:{contract_key}``)."""
-        if not self._client:
+        client = self._ib_client or self._client
+        if not client:
             return None
         ck = (contract_key or "").strip()
         if not ck:
             return None
         key = IB_INGESTER_TICK_PREFIX + ck
         try:
-            val = self._client.get(key)
+            val = client.get(key)
             if val is None:
                 return None
             return json.loads(val)
@@ -383,7 +431,7 @@ def create_reader_from_config(config: Dict[str, Any]) -> Optional[RedisQuotesRea
     p = parse_redis_realtime_params(config)
     if not p:
         return None
-    r = RedisQuotesReader(p)
+    r = RedisQuotesReader(p, config)
     if r.connect():
         return r
     logger.warning(

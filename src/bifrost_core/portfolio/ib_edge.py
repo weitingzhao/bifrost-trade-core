@@ -15,9 +15,9 @@ _ACCOUNT_SYNC_DAEMON_ENABLED = os.environ.get("ACCOUNT_SYNC_DAEMON_ENABLED", "")
 def _redis_sync_client(cfg: dict):
     import redis
 
-    from bifrost_core.core.redis_url import effective_redis_dict, format_redis_url
+    from bifrost_core.core.redis_url import effective_ib_redis_dict, format_redis_url
 
-    url = format_redis_url(effective_redis_dict(cfg, default_db=0))
+    url = format_redis_url(effective_ib_redis_dict(cfg, default_db=0))
     return redis.from_url(url, decode_responses=True)
 
 

@@ -10,7 +10,12 @@ from bifrost_core.core.redis_health_keys import (
     LEGACY_BIFROST_IB_OPERATOR,
     LEGACY_IB_OPERATOR_META_HEALTH,
 )
-from bifrost_core.core.redis_url import format_redis_url, redis_url_from_config, effective_redis_dict
+from bifrost_core.core.redis_url import (
+    effective_redis_dict,
+    format_redis_url,
+    ib_redis_url_from_config,
+    redis_url_from_config,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -31,7 +36,7 @@ def effective_ib_operator_settings(config: Dict[str, Any]) -> Dict[str, Any]:
         )
         raw = config.get("ib_gateway")
     raw = raw if isinstance(raw, dict) else {}
-    rurl = redis_url_from_config(config)
+    rurl = ib_redis_url_from_config(config)
     explicit_enabled = raw.get("enabled")
     if explicit_enabled is False:
         enabled = False
@@ -85,8 +90,9 @@ def effective_ib_operator_settings(config: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def redis_client_kwargs_from_config(config: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    """Sync redis.from_url kwargs when redis is enabled; else None."""
-    if not redis_url_from_config(config):
+    """Sync redis.from_url kwargs for IB bus when redis_ib or redis is enabled; else None."""
+    rurl = ib_redis_url_from_config(config)
+    if not rurl:
         return None
-    eff = effective_redis_dict(config, default_db=0)
+    eff = effective_ib_redis_dict(config, default_db=0)
     return {"url": format_redis_url(eff), "decode_responses": True}
