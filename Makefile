@@ -1,4 +1,4 @@
-.PHONY: install install-dev test test-all lint clean db-init
+.PHONY: install install-dev test test-all lint clean db-init seed-call-spread-templates
 
 install:
 	pip install -e .
@@ -23,6 +23,9 @@ lint-fix:
 
 db-init:
 	python scripts/db/db_refresh_schema.py
+
+seed-call-spread-templates:
+	python scripts/db/seed_call_spread_templates.py
 
 clean:
 	find . -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null; true

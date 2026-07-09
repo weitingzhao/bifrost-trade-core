@@ -10,6 +10,8 @@ from typing import Any, Dict, List, Optional
 STRUCTURE_TYPES = (
     "covered_call",
     "cash_secured_put",
+    "bull_call_spread",
+    "bear_call_spread",
     "iron_condor",
     "straddle_strangle",
     "leaps",
@@ -49,10 +51,22 @@ _CALENDAR_SPREAD_LEGS = [
     {"role": "call", "direction": "long", "option_right": "C", "quantity": 1, "strike": None, "expiration": ""},
 ]
 
+_BULL_CALL_SPREAD_LEGS = [
+    {"role": "call", "direction": "long", "option_right": "C", "quantity": 1, "strike": None, "expiration": ""},
+    {"role": "call", "direction": "short", "option_right": "C", "quantity": 1, "strike": None, "expiration": ""},
+]
+
+_BEAR_CALL_SPREAD_LEGS = [
+    {"role": "call", "direction": "short", "option_right": "C", "quantity": 1, "strike": None, "expiration": ""},
+    {"role": "call", "direction": "long", "option_right": "C", "quantity": 1, "strike": None, "expiration": ""},
+]
+
 _TYPE_DEFAULT_LEGS: Dict[str, List[Dict[str, Any]]] = {
     "straddle_strangle": _STRADDLE_STRANGLE_LEGS,
     "cash_secured_put": _CASH_SECURED_PUT_LEGS,
     "covered_call": _COVERED_CALL_LEGS,
+    "bull_call_spread": _BULL_CALL_SPREAD_LEGS,
+    "bear_call_spread": _BEAR_CALL_SPREAD_LEGS,
     "iron_condor": _IRON_CONDOR_LEGS,
     "leaps": _LEAPS_LEGS,
     "calendar_spread": _CALENDAR_SPREAD_LEGS,
