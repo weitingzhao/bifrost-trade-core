@@ -234,38 +234,95 @@ class RedisQuotesReader:
             except Exception:
                 self._client = None
                 self._available = False
-        try:
-            import redis
 
-            self._client = redis.Redis(
-                host=self._params.host,
-                port=self._params.port,
-                db=self._params.db,
-                password=self._params.password if self._params.password else None,
-                socket_connect_timeout=self._params.socket_connect_timeout,
-                socket_timeout=self._params.socket_connect_timeout,
-                decode_responses=True,
-            )
-            self._client.ping()
-            self._available = True
-            self._connect_ib_client()
-            logger.info(
-                "Redis quotes reader connected: host=%s port=%s db=%s subscribe_channel=%s",
-                self._params.host,
-                self._params.port,
-                self._params.db,
-                self._params.subscribe_channel,
-            )
-            return True
+        last_err: Optional[Exception] = None
+        try:
+            import time
+
+            import redis
         except ImportError:
             logger.warning("redis package not installed; realtime quotes read disabled")
             self._available = False
             return False
+
+        # Retry primary redis — new pods often hit brief Connection refused before CNI/kube-proxy is ready.
+        attempts = 8
+        for i in range(attempts):
+            try:
+                self._client = redis.Redis(
+                    host=self._params.host,
+                    port=self._params.port,
+                    db=self._params.db,
+                    password=self._params.password if self._params.password else None,
+                    socket_connect_timeout=self._params.socket_connect_timeout,
+                    socket_timeout=self._params.socket_connect_timeout,
+                    decode_responses=True,
+                )
+                self._client.ping()
+                self._available = True
+                self._connect_ib_client()
+                logger.info(
+                    "Redis quotes reader connected: host=%s port=%s db=%s subscribe_channel=%s",
+                    self._params.host,
+                    self._params.port,
+                    self._params.db,
+                    self._params.subscribe_channel,
+                )
+                return True
+            except Exception as e:
+                last_err = e
+                self._client = None
+                self._available = False
+                if i + 1 < attempts:
+                    time.sleep(1.0)
+
+        logger.warning(
+            "Redis reader connect failed after %s attempts to %s:%s: %s",
+            attempts,
+            self._params.host,
+            self._params.port,
+            last_err,
+        )
+
+        # TIBM: IB ticks live on redis_ib — prefer bus over failing live redis so Market quotes stay up.
+        if self._try_connect_via_ib_bus():
+            return True
+
+        self._ib_client = None
+        self._available = False
+        return False
+
+    def _try_connect_via_ib_bus(self) -> bool:
+        """Use redis_ib as the primary quotes client when live redis is unreachable."""
+        cfg = self._config or {}
+        ib_cfg = cfg.get("redis_ib") or {}
+        if not ib_cfg.get("enabled") and not ib_cfg.get("host"):
+            return False
+        try:
+            import redis
+
+            eff = effective_ib_redis_dict(cfg, default_db=0)
+            client = redis.Redis(
+                host=eff["host"],
+                port=int(eff["port"]),
+                db=int(eff["db"]),
+                username=(eff.get("username") or None) or None,
+                password=(eff.get("password") or None) or None,
+                socket_connect_timeout=self._params.socket_connect_timeout,
+                socket_timeout=self._params.socket_connect_timeout,
+                decode_responses=True,
+            )
+            client.ping()
+            self._client = client
+            self._ib_client = client
+            self._available = True
+            logger.warning(
+                "Redis quotes reader falling back to redis_ib host=%s (live redis unreachable)",
+                eff["host"],
+            )
+            return True
         except Exception as e:
-            logger.warning("Redis reader connect failed: %s", e)
-            self._client = None
-            self._ib_client = None
-            self._available = False
+            logger.warning("Redis IB bus fallback connect failed: %s", e)
             return False
 
     def _connect_ib_client(self) -> None:
