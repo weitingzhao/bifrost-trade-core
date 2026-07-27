@@ -9,6 +9,7 @@ from bifrost_core.core.realtime.on_demand_stk import (
     ensure_on_demand_stk,
     list_fresh_on_demand_stk,
     normalize_stk_symbols,
+    remove_on_demand_stk,
 )
 from bifrost_core.core.realtime.redis_keys import (
     PUB_CHANNEL,
@@ -40,6 +41,7 @@ __all__ = [
     "ensure_on_demand_stk",
     "list_fresh_on_demand_stk",
     "normalize_stk_symbols",
+    "remove_on_demand_stk",
     "RedisQuotesReader",
     "RedisQuotesWriter",
     "RedisRealtimeParams",

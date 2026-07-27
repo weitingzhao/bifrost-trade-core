@@ -6,6 +6,8 @@ Redis contract:
 
 Market API refreshes heartbeats on ``GET /quotes``; Gateway/Ingestor merges
 fresh symbols into Host ``reqMktData`` and prunes stale ones.
+``remove_on_demand_stk`` / ``POST /quotes/cleanup`` explicitly unsubscribe
+(SREM + HDEL + DEL tick keys).
 """
 
 from __future__ import annotations
@@ -17,6 +19,7 @@ from typing import Any, Iterable, List, Optional, Sequence
 from bifrost_core.core.realtime.ib_ingestor_keys import (
     IB_INGESTER_ON_DEMAND_STK,
     IB_INGESTER_ON_DEMAND_STK_TS,
+    IB_INGESTER_TICK_PREFIX,
     ON_DEMAND_STK_DEFAULT_MAX_AGE_SEC,
 )
 
@@ -62,6 +65,26 @@ def ensure_on_demand_stk(
     pipe.hset(IB_INGESTER_ON_DEMAND_STK_TS, mapping=mapping)
     pipe.execute()
     return syms
+
+
+def remove_on_demand_stk(client: Any, symbols: Sequence[str]) -> int:
+    """Explicit unsubscribe: SREM + HDEL heartbeat + DEL tick keys.
+
+    Returns the number of normalized symbols processed for removal.
+    No-op on empty list or ``client is None``.
+    """
+    if client is None:
+        return 0
+    syms = normalize_stk_symbols(symbols)
+    if not syms:
+        return 0
+    pipe = client.pipeline(transaction=False)
+    pipe.srem(IB_INGESTER_ON_DEMAND_STK, *syms)
+    pipe.hdel(IB_INGESTER_ON_DEMAND_STK_TS, *syms)
+    for sym in syms:
+        pipe.delete(f"{IB_INGESTER_TICK_PREFIX}{sym}|STK|||")
+    pipe.execute()
+    return len(syms)
 
 
 def list_fresh_on_demand_stk(
