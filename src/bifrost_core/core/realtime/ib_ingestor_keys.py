@@ -13,3 +13,7 @@ IB_INGESTER_TICK_PREFIX = "ib:ingester:tick:"
 IB_INGESTER_TICK_TTL_SEC = 300
 # Redis SET of additional STK symbols (uppercase) for reqMktData beyond watchlist; merged into ingestor subscription budget.
 IB_INGESTER_ON_DEMAND_STK = "ib:ingester:control:on_demand_stk"
+# Heartbeat HASH field=SYM → unix ts; Gateway/Ingestor prune via list_fresh_on_demand_stk.
+IB_INGESTER_ON_DEMAND_STK_TS = "ib:ingester:control:on_demand_stk_ts"
+# Default max age for on-demand heartbeats (Market Live polls ~8s; allow brief idle).
+ON_DEMAND_STK_DEFAULT_MAX_AGE_SEC = 120

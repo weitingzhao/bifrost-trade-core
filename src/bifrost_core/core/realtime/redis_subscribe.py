@@ -21,6 +21,52 @@ _MIN_BROADCAST_INTERVAL_SEC = 0.2
 _RECONNECT_DELAY_SEC = 3.0
 
 
+def _subscribe_connection_kwargs(reader: RedisQuotesReader) -> Dict[str, Any]:
+    """Prefer IB bus (redis_ib) for pub/sub — Gateway publishes only there."""
+    cfg = getattr(reader, "_config", None) or {}
+    timeout = float(reader.realtime_params.socket_connect_timeout)
+    channel = reader.realtime_params.subscribe_channel
+    try:
+        import os
+
+        from bifrost_core.core.redis_url import effective_ib_redis_dict
+
+        ib = cfg.get("redis_ib") or {}
+        has_ib_host = bool(
+            (ib.get("host") or "").strip() or (os.environ.get("REDIS_IB_HOST") or "").strip()
+        )
+        if has_ib_host and ib.get("enabled") is not False:
+            eff = effective_ib_redis_dict(cfg, default_db=0)
+            return {
+                "host": eff["host"],
+                "port": int(eff["port"]),
+                "db": int(eff["db"]),
+                "username": (eff.get("username") or None) or None,
+                "password": (eff.get("password") or None) or None,
+                "socket_connect_timeout": timeout,
+                "socket_timeout": timeout,
+                "decode_responses": True,
+                "subscribe_channel": channel,
+                "via": "redis_ib",
+            }
+    except Exception as e:
+        logger.debug("IB bus subscribe params fallback to live redis: %s", e)
+
+    p = reader.realtime_params
+    return {
+        "host": p.host,
+        "port": p.port,
+        "db": p.db,
+        "username": None,
+        "password": p.password if p.password else None,
+        "socket_connect_timeout": timeout,
+        "socket_timeout": timeout,
+        "decode_responses": True,
+        "subscribe_channel": channel,
+        "via": "redis",
+    }
+
+
 def run_subscribe_loop(
     reader: RedisQuotesReader,
     on_quote: Callable[[Dict[str, Any]], None],
@@ -29,8 +75,9 @@ def run_subscribe_loop(
 ) -> None:
     """Run Redis SUBSCRIBE in a thread; on each message load full quote and call on_quote.
 
-    Subscribes to ``subscribe_channel`` (default ``ib:ingester:channel``). Expects IB ingestor
-    publish payload ``{contract_key, ts}`` and loads ``ib:ingester:tick:{contract_key}``.
+    Subscribes to ``subscribe_channel`` (default ``ib:ingester:channel``) on the **IB bus**
+    when ``redis_ib`` is configured (Gateway publishes only there). Expects publish payload
+    ``{contract_key, ts}`` and loads ``ib:ingester:tick:{contract_key}``.
 
     Resilience:
     - ``socket_timeout`` on the sub_client prevents blocking forever on stale TCP connections.
@@ -44,7 +91,6 @@ def run_subscribe_loop(
         logger.warning("redis package not installed; SSE quote stream disabled")
         return
 
-    p = reader.realtime_params
     # last_broadcast_ts[contract_key] = epoch time of most recent broadcast
     last_broadcast_ts: Dict[str, float] = {}
 
@@ -52,20 +98,17 @@ def run_subscribe_loop(
         sub_client = None
         pubsub = None
         try:
-            sub_client = redis_pkg.Redis(
-                host=p.host,
-                port=p.port,
-                db=p.db,
-                password=p.password if p.password else None,
-                socket_connect_timeout=p.socket_connect_timeout,
-                socket_timeout=p.socket_connect_timeout,
-                decode_responses=True,
-            )
+            conn = _subscribe_connection_kwargs(reader)
+            channel = conn.pop("subscribe_channel")
+            via = conn.pop("via", "redis")
+            sub_client = redis_pkg.Redis(**conn)
             pubsub = sub_client.pubsub()
-            pubsub.subscribe(p.subscribe_channel)
+            pubsub.subscribe(channel)
             logger.info(
-                "Redis quotes subscribe loop started on channel=%s",
-                p.subscribe_channel,
+                "Redis quotes subscribe loop started on channel=%s via=%s host=%s",
+                channel,
+                via,
+                conn.get("host"),
             )
 
             while not stop_event.is_set():
@@ -100,7 +143,11 @@ def run_subscribe_loop(
                     break  # reconnect
 
         except Exception as e:
-            logger.warning("Redis subscribe loop connection error: %s — reconnecting in %.0fs", e, _RECONNECT_DELAY_SEC)
+            logger.warning(
+                "Redis subscribe loop connection error: %s — reconnecting in %.0fs",
+                e,
+                _RECONNECT_DELAY_SEC,
+            )
         finally:
             if pubsub is not None:
                 try:

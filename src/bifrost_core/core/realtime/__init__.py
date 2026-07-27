@@ -1,5 +1,15 @@
 """Redis-backed real-time quotes."""
 
+from bifrost_core.core.realtime.ib_ingestor_keys import (
+    IB_INGESTER_ON_DEMAND_STK,
+    IB_INGESTER_ON_DEMAND_STK_TS,
+    ON_DEMAND_STK_DEFAULT_MAX_AGE_SEC,
+)
+from bifrost_core.core.realtime.on_demand_stk import (
+    ensure_on_demand_stk,
+    list_fresh_on_demand_stk,
+    normalize_stk_symbols,
+)
 from bifrost_core.core.realtime.redis_keys import (
     PUB_CHANNEL,
     QUOTE_KEY_PREFIX,
@@ -24,6 +34,12 @@ __all__ = [
     "QUOTE_KEY_PREFIX",
     "QUOTE_TTL_SEC",
     "TICKER_SUBSCRIBED_KEY",
+    "IB_INGESTER_ON_DEMAND_STK",
+    "IB_INGESTER_ON_DEMAND_STK_TS",
+    "ON_DEMAND_STK_DEFAULT_MAX_AGE_SEC",
+    "ensure_on_demand_stk",
+    "list_fresh_on_demand_stk",
+    "normalize_stk_symbols",
     "RedisQuotesReader",
     "RedisQuotesWriter",
     "RedisRealtimeParams",
