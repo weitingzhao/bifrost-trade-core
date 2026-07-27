@@ -17,3 +17,12 @@ IB_INGESTER_ON_DEMAND_STK = "ib:ingester:control:on_demand_stk"
 IB_INGESTER_ON_DEMAND_STK_TS = "ib:ingester:control:on_demand_stk_ts"
 # Default max age for on-demand heartbeats (Market Live polls ~8s; allow brief idle).
 ON_DEMAND_STK_DEFAULT_MAX_AGE_SEC = 120
+
+# OPT on-demand cache — must match bifrost-platform-plugin ib_gateway.redis_keys.
+IB_OPTION_CACHE_PREFIX = "ib:option:cache:"
+IB_OPTION_CACHE_TTL_SEC = 300
+IB_OPTION_ON_DEMAND_SET = "ib:option:control:on_demand_opt"
+IB_OPTION_ON_DEMAND_TS = "ib:option:control:on_demand_opt_ts"
+IB_OPTION_CACHE_META_REFRESH_TS = "ib:option:cache:meta:last_refresh_ts"
+# Default max age for OPT on-demand heartbeats (Gateway one-shot loop; FE polls ~8s).
+ON_DEMAND_OPT_DEFAULT_MAX_AGE_SEC = 180

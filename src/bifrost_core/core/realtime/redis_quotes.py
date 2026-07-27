@@ -8,7 +8,7 @@ import time
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Set, Tuple
 
-from bifrost_core.core.realtime.ib_ingestor_keys import IB_INGESTER_TICK_PREFIX
+from bifrost_core.core.realtime.ib_ingestor_keys import IB_INGESTER_TICK_PREFIX, IB_OPTION_CACHE_PREFIX
 from bifrost_core.core.redis_url import effective_ib_redis_dict, ib_redis_url_from_config
 
 from .redis_keys import (
@@ -422,6 +422,29 @@ class RedisQuotesReader:
             return json.loads(val)
         except Exception as e:
             logger.debug("Redis get_ingester_tick failed contract_key=%s: %s", ck, e)
+            return None
+
+    def get_option_cache(self, contract_key: str) -> Optional[Dict[str, Any]]:
+        """Latest OPT quote JSON from Gateway cache (``ib:option:cache:{contract_key}``)."""
+        client = self._ib_client or self._client
+        if not client:
+            return None
+        ck = (contract_key or "").strip()
+        if not ck:
+            return None
+        key = IB_OPTION_CACHE_PREFIX + ck
+        try:
+            val = client.get(key)
+            if val is None:
+                return None
+            data = json.loads(val)
+            if isinstance(data, dict):
+                # Prefer updated_ts for FE merge freshness when ts absent.
+                if data.get("ts") is None and data.get("updated_ts") is not None:
+                    data = {**data, "ts": data["updated_ts"]}
+            return data
+        except Exception as e:
+            logger.debug("Redis get_option_cache failed contract_key=%s: %s", ck, e)
             return None
 
     def get_subscribed_symbols(self) -> Set[str]:
