@@ -126,6 +126,21 @@ def secondary_slot_configured(
     redis_hash: Optional[Dict[str, Any]] = None,
 ) -> bool:
     """Whether Monitor should expose a ``secondary`` slot for this service."""
+    if redis_hash is not None:
+        presence = _field_first(redis_hash, "secondary_present", "account2_present")
+        if presence is not None:
+            return _truthy_field(presence)
+        # Early Platform Gateway hashes predate secondary_present but still provide
+        # enough authoritative slot evidence to avoid falling back to Trade config.
+        if _field_first(
+            redis_hash,
+            "secondary_connected",
+            "account2_connected",
+            "secondary_client_id",
+            "account2_client_id",
+        ) is not None:
+            return True
+
     ib2_host = str(ib_cfg.get("ib2_host") or "").strip()
     if service_id == "ib_operator":
         try:
@@ -140,11 +155,6 @@ def secondary_slot_configured(
             cid2 = 152
         if ib2_host:
             return True
-        if redis_hash is not None:
-            if redis_hash.get("secondary_present") == "1":
-                return True
-            if _field_first(redis_hash, "secondary_client_id") is not None:
-                return True
         return cid2 != 152
     return False
 

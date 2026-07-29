@@ -184,7 +184,16 @@ def operator_health_dict_from_redis_hash(m: Dict[str, str]) -> Optional[Dict[str
     except (TypeError, ValueError):
         out["last_msg_ts"] = 0.0
 
-    sec_on = m.get("secondary_present") == "1" or m.get("account2_present") == "1"
+    secondary_present = _field_map(m, "secondary_present", "account2_present")
+    if secondary_present is None:
+        # Platform Gateway releases before the canonical presence marker wrote the
+        # connected/client-id fields directly. Preserve that valid slot evidence.
+        sec_on = (
+            _field_map(m, "secondary_connected", "account2_connected") is not None
+            or _field_map(m, "secondary_client_id", "account2_client_id") is not None
+        )
+    else:
+        sec_on = _truthy_field(secondary_present)
     if sec_on:
         out["secondary"] = {
             "connected": _truthy_field(_field_map(m, "secondary_connected", "account2_connected")),

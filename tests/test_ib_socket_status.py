@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import time
-
 from bifrost_core.monitor.integrations.ib_socket_status import (
     build_ib_socket_status,
     ib_slot_probe_unhealthy,
@@ -112,6 +110,35 @@ def test_operator_build_from_flat_hash() -> None:
     assert out["service_alive"] is True
     assert out["host"]["client_id"] == 20
     assert out["secondary"] is not None
+
+
+def test_operator_platform_hash_infers_secondary_without_presence_marker() -> None:
+    h = {
+        "plugin": "ib-gateway",
+        "mode": "live",
+        "host_connected": "1",
+        "host_client_id": "20",
+        "host_alive": "1",
+        "host_ib_probe_at": str(_NOW - 2),
+        "host_ib_probe_ok": "1",
+        "host_ib_probe_interval_sec": "15",
+        "secondary_connected": "1",
+        "secondary_client_id": "21",
+        "secondary_ib_probe_at": str(_NOW - 2),
+        "secondary_ib_probe_ok": "1",
+        "secondary_ib_probe_interval_sec": "15",
+        "last_msg_ts": str(_NOW - 2),
+    }
+    out = build_ib_socket_status(
+        "ib_operator",
+        h,
+        {"client_id_operator": 20},
+        now=_NOW,
+    )
+    assert out["secondary"] is not None
+    assert out["secondary"]["connected"] is True
+    assert out["secondary"]["client_id"] == 21
+    assert rollup_ib_broker_lamp(out)["lamp"] == "green"
 
 
 def test_rollup_lamp_host_probe_stale_is_red() -> None:
