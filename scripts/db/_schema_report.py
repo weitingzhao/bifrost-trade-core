@@ -45,7 +45,7 @@ EXPECTED_TABLES_BY_CATEGORY: Dict[str, List[str]] = {
         "gate_safety_strategy_earnings_dates",
     ],
     "job": ["job_bars_backfill", "job_ticker_reference_state"],
-    "option": ["option_contracts", "option_day", "option_min", "option_snapshots"],
+    "option": ["option_trades"],
     "preference": [
         "preference_market_streams_symbol_order",
         "preference_position_categories",
@@ -55,12 +55,10 @@ EXPECTED_TABLES_BY_CATEGORY: Dict[str, List[str]] = {
     "reference": ["reference_us_holidays"],
     "settings": ["settings", "settings_ib_flex"],
     "stock": [
-        "stock_day",
-        "stock_min",
-        "tickers",
-        "ticker_overview",
         "ticker_types",
         "ticker_related_tickers",
+        "stock_readiness_daily",
+        "cache_stock_snapshot",
     ],
     "strategy": [
         "strategy_allocation",

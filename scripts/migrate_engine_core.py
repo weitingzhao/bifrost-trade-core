@@ -34,7 +34,6 @@ COPY_MAP: list[tuple[str, str]] = [
     ("src/persistence/postgres/postgres_sink.py", "persistence/postgres/postgres_sink.py"),
     ("src/persistence/postgres/accounts_sync.py", "persistence/postgres/accounts_sync.py"),
     ("src/persistence/postgres/ticker_reference.py", "persistence/postgres/ticker_reference.py"),
-    ("src/persistence/postgres/stock_ohlc_massive.py", "persistence/postgres/stock_ohlc_massive.py"),
     # ib_operator client (core)
     ("src/ib_operator/client.py", "ib_operator/client.py"),
     ("src/ib_operator/protocol.py", "ib_operator/protocol.py"),

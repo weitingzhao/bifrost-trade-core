@@ -584,7 +584,19 @@ def get_bars_coverage(conn: Any, symbols: Optional[List[str]] = None) -> List[Di
 # ----- Module-level (status_config) for re-export -----
 
 def write_ohlc_bars_to_db(status_config: dict, rows: List[Dict[str, Any]]) -> bool:
-    """Write OHLC bars to stock_day (1 D) or stock_min. UPSERT by (symbol, bar_time) or (symbol, period, bar_time)."""
+    """Write OHLC bars to market.stock_daily (1 D) or market.stock_minute.
+
+    UPSERT last-writer-wins on PK ``(symbol, bar_date)`` or ``(symbol, period, bar_time)``.
+    No ``source`` column — IB and Polygon share the same rows.
+
+    Minute ``period`` values match reader/Polygon convention via ``_minute_period_db``
+    (e.g. ``1 min`` → ``1 minute``).
+
+    Partitions: ``market.stock_daily`` is RANGE by year on ``bar_date``;
+    ``market.stock_minute`` is RANGE by month on ``bar_time``. Inserts fail if the
+    target partition is missing — create via market-data plugin DDL
+    (``data_ops.ensure_year_partitions`` / ``ensure_month_partitions``).
+    """
     if not rows or not status_config or (status_config.get("sink") != "postgres" and not status_config.get("postgres")):
         return False
     try:
@@ -608,7 +620,7 @@ def write_ohlc_bars_to_db(status_config: dict, rows: List[Dict[str, Any]]) -> bo
                     close = r.get("close")
                     volume = r.get("volume")
                     if period.upper() == "1 D":
-                        # stock_day.bar_time is DATE — use original local date to
+                        # market.stock_daily.bar_date is DATE — use original local date to
                         # avoid UTC date shift (e.g. 18:00-0600 → next day in UTC)
                         bar_date_str = r.get("bar_date")
                         if bar_date_str:
@@ -622,27 +634,34 @@ def write_ohlc_bars_to_db(status_config: dict, rows: List[Dict[str, Any]]) -> bo
                             bar_d = bar_dt
                         cur.execute(
                             """
-                            INSERT INTO stock_day (symbol, bar_time, open, high, low, close, volume, source)
-                            VALUES (%s, %s, %s, %s, %s, %s, %s, 'ib')
-                            ON CONFLICT (symbol, bar_time, source)
+                            INSERT INTO market.stock_daily
+                                (symbol, bar_date, open, high, low, close, volume, fetched_at)
+                            VALUES (%s, %s, %s, %s, %s, %s, %s, now())
+                            ON CONFLICT (symbol, bar_date)
                             DO UPDATE SET open = EXCLUDED.open, high = EXCLUDED.high, low = EXCLUDED.low,
-                                          close = EXCLUDED.close, volume = EXCLUDED.volume
+                                          close = EXCLUDED.close, volume = EXCLUDED.volume,
+                                          fetched_at = now()
                             """,
                             (symbol, bar_d, open_, high, low, close, volume),
                         )
                     else:
                         cur.execute(
                             """
-                            INSERT INTO stock_min (symbol, period, bar_time, open, high, low, close, volume, source)
-                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 'ib')
-                            ON CONFLICT (symbol, period, bar_time, source)
+                            INSERT INTO market.stock_minute
+                                (symbol, period, bar_time, open, high, low, close, volume, fetched_at)
+                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, now())
+                            ON CONFLICT (symbol, period, bar_time)
                             DO UPDATE SET open = EXCLUDED.open, high = EXCLUDED.high, low = EXCLUDED.low,
-                                          close = EXCLUDED.close, volume = EXCLUDED.volume
+                                          close = EXCLUDED.close, volume = EXCLUDED.volume,
+                                          fetched_at = now()
                             """,
-                            (symbol, period, bar_dt, open_, high, low, close, volume),
+                            (symbol, _minute_period_db(period), bar_dt, open_, high, low, close, volume),
                         )
             conn.commit()
-            logger.info("[R-A3] write_ohlc_bars_to_db: wrote %s rows to stock_day/stock_min", len(rows))
+            logger.info(
+                "[R-A3] write_ohlc_bars_to_db: wrote %s rows to market.stock_daily/stock_minute",
+                len(rows),
+            )
             return True
         finally:
             conn.close()
@@ -673,7 +692,11 @@ def delete_stock_bars_for_symbol(
     symbol: str,
     periods: Optional[list] = None,
 ) -> Dict[str, Any]:
-    """Delete stock_day and/or stock_min rows for the given symbol. Returns {ok, deleted_day, deleted_min} or {ok: False, error}."""
+    """Delete market.stock_daily and/or market.stock_minute rows for the given symbol.
+
+    Returns ``{ok, deleted_day, deleted_min}`` or ``{ok: False, error}``.
+    Minute periods are mapped with ``_minute_period_db`` to match stored values.
+    """
     if not status_config or (status_config.get("sink") != "postgres" and not status_config.get("postgres")):
         return {"ok": False, "error": "No postgres config"}
     sym = (symbol or "").strip()
@@ -692,12 +715,13 @@ def delete_stock_bars_for_symbol(
                 deleted_day = 0
                 deleted_min = 0
                 if delete_day:
-                    cur.execute("DELETE FROM stock_day WHERE symbol = %s", (sym,))
+                    cur.execute("DELETE FROM market.stock_daily WHERE symbol = %s", (sym,))
                     deleted_day = cur.rowcount
                 if min_periods:
+                    db_min_periods = [_minute_period_db(p) for p in min_periods]
                     cur.execute(
-                        "DELETE FROM stock_min WHERE symbol = %s AND period = ANY(%s)",
-                        (sym, min_periods),
+                        "DELETE FROM market.stock_minute WHERE symbol = %s AND period = ANY(%s)",
+                        (sym, db_min_periods),
                     )
                     deleted_min = cur.rowcount
             conn.commit()

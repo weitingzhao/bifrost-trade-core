@@ -210,11 +210,16 @@ def test_list_tickers_missing_overview_page_respects_limit():
 
 def test_count_ticker_related_coverage_maps_row():
     class _Cur:
+        def __init__(self):
+            self._n = 0
+
         def execute(self, *_a, **_k):
             return None
 
         def fetchone(self):
-            return (5000, 800, 4200)
+            # 1) COUNT(*) FROM market.ticker  2) COUNT filled via related join
+            self._n += 1
+            return (5000,) if self._n == 1 else (800,)
 
     assert count_ticker_related_coverage(_Cur()) == {
         "total_tickers": 5000,

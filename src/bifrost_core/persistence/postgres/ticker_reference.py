@@ -1,4 +1,8 @@
-"""PostgreSQL helpers for Massive reference tickers (All Tickers → tickers; Overview → ticker_overview)."""
+"""PostgreSQL helpers for Massive reference tickers → ``market.ticker``.
+
+Legacy ``public.tickers`` + ``public.ticker_overview`` are merged into one row per symbol.
+Function names kept for API / Celery compat; ``tickers_id`` is no longer a real FK.
+"""
 
 from __future__ import annotations
 
@@ -13,7 +17,7 @@ logger = logging.getLogger(__name__)
 
 SYNC_KIND_UNIVERSE = "universe_tickers"
 
-# Columns stored only on ``tickers`` (All Tickers + internal timestamps).
+# Mapper output fields (API-shaped); persisted via ``_cols_to_market_ticker``.
 _TICKERS_UPSERT_FIELDS = [
     "ticker",
     "name",
@@ -35,7 +39,7 @@ _TICKERS_UPSERT_FIELDS = [
     "updated_at",
 ]
 
-# Overview-only columns on ``ticker_overview``.
+# Overview-shaped fields from detail API (subset maps onto market.ticker).
 _OVERVIEW_UPSERT_FIELDS = [
     "sector",
     "industry",
@@ -64,6 +68,87 @@ _OVERVIEW_UPSERT_FIELDS = [
     "overview_api_count",
     "overview_updated_at",
 ]
+
+# Columns that exist on market.ticker (PK = symbol).
+_MARKET_TICKER_COLS = (
+    "symbol",
+    "name",
+    "market",
+    "locale",
+    "primary_exchange",
+    "instrument_type",
+    "active",
+    "currency",
+    "cik",
+    "composite_figi",
+    "sic_code",
+    "sector",
+    "industry",
+    "market_cap",
+    "list_date",
+    "homepage_url",
+    "total_employees",
+    "description",
+    "updated_at",
+)
+
+
+def _attach_last_symbol(cur: Any, symbol: str) -> None:
+    """Stash symbol on cursor for sequential overview upsert (no tickers_id FK)."""
+    try:
+        setattr(cur, "_last_market_ticker_symbol", symbol)
+    except Exception:
+        pass
+
+
+def _last_symbol(cur: Any) -> Optional[str]:
+    try:
+        s = getattr(cur, "_last_market_ticker_symbol", None)
+        return str(s).strip().upper() if s else None
+    except Exception:
+        return None
+
+
+def _currency_from_cols(cols: Dict[str, Any]) -> Optional[str]:
+    for key in ("currency", "currency_name", "currency_symbol"):
+        v = cols.get(key)
+        if v is not None and str(v).strip():
+            return str(v).strip()
+    return None
+
+
+def _cols_to_market_ticker(cols: Dict[str, Any], *, overview: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Map legacy tickers/overview column dicts → market.ticker row."""
+    merged = dict(cols)
+    if overview:
+        merged.update({k: v for k, v in overview.items() if v is not None})
+    sym = (merged.get("symbol") or merged.get("ticker") or "").strip().upper()
+    if not sym:
+        return {}
+    now = datetime.now(timezone.utc)
+    sector = merged.get("sector")
+    industry = merged.get("industry")
+    return {
+        "symbol": sym,
+        "name": merged.get("name"),
+        "market": merged.get("market"),
+        "locale": merged.get("locale"),
+        "primary_exchange": merged.get("primary_exchange") or merged.get("exchange"),
+        "instrument_type": merged.get("instrument_type"),
+        "active": merged.get("active"),
+        "currency": _currency_from_cols(merged),
+        "cik": merged.get("cik"),
+        "composite_figi": merged.get("composite_figi"),
+        "sic_code": merged.get("sic_code"),
+        "sector": "" if sector is None else sector,
+        "industry": "" if industry is None else industry,
+        "market_cap": merged.get("market_cap"),
+        "list_date": merged.get("list_date"),
+        "homepage_url": merged.get("homepage_url"),
+        "total_employees": merged.get("total_employees"),
+        "description": merged.get("description"),
+        "updated_at": merged.get("updated_at") or merged.get("overview_updated_at") or now,
+    }
 
 
 def next_cursor_from_api_response(data: Dict[str, Any]) -> Optional[str]:
@@ -258,94 +343,115 @@ def row_from_ticker_detail(body: Dict[str, Any]) -> Tuple[Dict[str, Any], Dict[s
 
 
 def upsert_ticker_row(cur: Any, cols: Dict[str, Any]) -> int:
-    """Insert or update ``tickers`` by ``ticker``; returns ``tickers_id``."""
-    tk = cols.get("ticker")
-    if not tk:
-        raise ValueError("upsert_ticker_row: ticker required")
+    """Insert or update ``market.ticker`` by ``symbol``.
+
+    Returns ``1`` when a row was written (no ``tickers_id`` in market schema).
+    Stashes symbol on ``cur`` for a following ``upsert_ticker_overview_row`` call.
+    """
+    row = _cols_to_market_ticker(cols)
+    if not row.get("symbol"):
+        raise ValueError("upsert_ticker_row: ticker/symbol required")
+    sym = row["symbol"]
+    _attach_last_symbol(cur, sym)
     now = datetime.now(timezone.utc)
-    cols = dict(cols)
-    cols["updated_at"] = now
-    if "created_at" not in cols or cols.get("created_at") is None:
-        cols["created_at"] = now
-    values = []
-    for f in _TICKERS_UPSERT_FIELDS:
-        values.append(cols.get(f))
-    placeholders = ", ".join(["%s"] * len(_TICKERS_UPSERT_FIELDS))
+    row["updated_at"] = now
+    # Universe sync must not wipe overview fields with NULLs.
     update_parts = [
-        "name = COALESCE(EXCLUDED.name, tickers.name)",
-        "market = COALESCE(EXCLUDED.market, tickers.market)",
-        "locale = COALESCE(EXCLUDED.locale, tickers.locale)",
-        "primary_exchange = COALESCE(EXCLUDED.primary_exchange, tickers.primary_exchange)",
-        "instrument_type = COALESCE(EXCLUDED.instrument_type, tickers.instrument_type)",
-        "active = COALESCE(EXCLUDED.active, tickers.active)",
-        "currency_name = COALESCE(EXCLUDED.currency_name, tickers.currency_name)",
-        "currency_symbol = COALESCE(EXCLUDED.currency_symbol, tickers.currency_symbol)",
-        "base_currency_name = COALESCE(EXCLUDED.base_currency_name, tickers.base_currency_name)",
-        "base_currency_symbol = COALESCE(EXCLUDED.base_currency_symbol, tickers.base_currency_symbol)",
-        "cik = COALESCE(EXCLUDED.cik, tickers.cik)",
-        "composite_figi = COALESCE(EXCLUDED.composite_figi, tickers.composite_figi)",
-        "share_class_figi = COALESCE(EXCLUDED.share_class_figi, tickers.share_class_figi)",
-        "last_updated_utc = COALESCE(EXCLUDED.last_updated_utc, tickers.last_updated_utc)",
-        "delisted_utc = COALESCE(EXCLUDED.delisted_utc, tickers.delisted_utc)",
+        "name = COALESCE(EXCLUDED.name, market.ticker.name)",
+        "market = COALESCE(EXCLUDED.market, market.ticker.market)",
+        "locale = COALESCE(EXCLUDED.locale, market.ticker.locale)",
+        "primary_exchange = COALESCE(EXCLUDED.primary_exchange, market.ticker.primary_exchange)",
+        "instrument_type = COALESCE(EXCLUDED.instrument_type, market.ticker.instrument_type)",
+        "active = COALESCE(EXCLUDED.active, market.ticker.active)",
+        "currency = COALESCE(EXCLUDED.currency, market.ticker.currency)",
+        "cik = COALESCE(EXCLUDED.cik, market.ticker.cik)",
+        "composite_figi = COALESCE(EXCLUDED.composite_figi, market.ticker.composite_figi)",
         "updated_at = EXCLUDED.updated_at",
     ]
+    col_names = [c for c in _MARKET_TICKER_COLS]
+    values = [row.get(c) for c in col_names]
+    placeholders = ", ".join(["%s"] * len(col_names))
     sql = f"""
-        INSERT INTO tickers ({", ".join(_TICKERS_UPSERT_FIELDS)})
+        INSERT INTO market.ticker ({", ".join(col_names)})
         VALUES ({placeholders})
-        ON CONFLICT (ticker) DO UPDATE SET
+        ON CONFLICT (symbol) DO UPDATE SET
         {", ".join(update_parts)}
-        RETURNING tickers_id
     """
     cur.execute(sql, values)
-    r = cur.fetchone()
-    return int(r[0])
+    return 1
 
 
 def upsert_ticker_overview_row(cur: Any, tickers_id: int, cols: Dict[str, Any]) -> None:
-    """Insert or update ``ticker_overview`` for ``tickers_id``."""
+    """Merge overview fields into ``market.ticker`` for the stashed / resolved symbol.
+
+    ``tickers_id`` is ignored (no FK); symbol comes from the prior ``upsert_ticker_row``
+    or ``get_tickers_id_for_ticker`` call on the same cursor.
+    """
+    _ = tickers_id
     cols = dict(cols)
     if cols.get("sector") is None:
         cols["sector"] = ""
     if cols.get("industry") is None:
         cols["industry"] = ""
-    vals = [tickers_id] + [cols.get(f) for f in _OVERVIEW_UPSERT_FIELDS]
-    ph = ", ".join(["%s"] * (1 + len(_OVERVIEW_UPSERT_FIELDS)))
-    overview_cols_sql = ", ".join(["tickers_id"] + _OVERVIEW_UPSERT_FIELDS)
-    upd = [
-        "sector = COALESCE(NULLIF(EXCLUDED.sector, ''), ticker_overview.sector)",
-        "industry = COALESCE(NULLIF(EXCLUDED.industry, ''), ticker_overview.industry)",
-        "exchange = COALESCE(EXCLUDED.exchange, ticker_overview.exchange)",
-        "list_date = COALESCE(EXCLUDED.list_date, ticker_overview.list_date)",
-        "ticker_root = COALESCE(EXCLUDED.ticker_root, ticker_overview.ticker_root)",
-        "ticker_suffix = COALESCE(EXCLUDED.ticker_suffix, ticker_overview.ticker_suffix)",
-        "sic_code = COALESCE(EXCLUDED.sic_code, ticker_overview.sic_code)",
-        "sic_description = COALESCE(EXCLUDED.sic_description, ticker_overview.sic_description)",
-        "market_cap = COALESCE(EXCLUDED.market_cap, ticker_overview.market_cap)",
-        "total_employees = COALESCE(EXCLUDED.total_employees, ticker_overview.total_employees)",
-        "address_line1 = COALESCE(EXCLUDED.address_line1, ticker_overview.address_line1)",
-        "address_city = COALESCE(EXCLUDED.address_city, ticker_overview.address_city)",
-        "address_state = COALESCE(EXCLUDED.address_state, ticker_overview.address_state)",
-        "postal_code = COALESCE(EXCLUDED.postal_code, ticker_overview.postal_code)",
-        "phone = COALESCE(EXCLUDED.phone, ticker_overview.phone)",
-        "description = COALESCE(EXCLUDED.description, ticker_overview.description)",
-        "homepage_url = COALESCE(EXCLUDED.homepage_url, ticker_overview.homepage_url)",
-        "icon_url = COALESCE(EXCLUDED.icon_url, ticker_overview.icon_url)",
-        "logo_url = COALESCE(EXCLUDED.logo_url, ticker_overview.logo_url)",
-        "round_lot = COALESCE(EXCLUDED.round_lot, ticker_overview.round_lot)",
-        "share_class_shares_outstanding = COALESCE(EXCLUDED.share_class_shares_outstanding, ticker_overview.share_class_shares_outstanding)",
-        "weighted_shares_outstanding = COALESCE(EXCLUDED.weighted_shares_outstanding, ticker_overview.weighted_shares_outstanding)",
-        "overview_api_request_id = COALESCE(EXCLUDED.overview_api_request_id, ticker_overview.overview_api_request_id)",
-        "overview_api_status = COALESCE(EXCLUDED.overview_api_status, ticker_overview.overview_api_status)",
-        "overview_api_count = COALESCE(EXCLUDED.overview_api_count, ticker_overview.overview_api_count)",
-        "overview_updated_at = COALESCE(EXCLUDED.overview_updated_at, ticker_overview.overview_updated_at)",
-    ]
-    sql = f"""
-        INSERT INTO ticker_overview ({overview_cols_sql})
-        VALUES ({ph})
-        ON CONFLICT (tickers_id) DO UPDATE SET
-        {", ".join(upd)}
-    """
-    cur.execute(sql, vals)
+    sym = _last_symbol(cur) or (cols.get("symbol") or cols.get("ticker") or "").strip().upper()
+    if not sym:
+        logger.warning("upsert_ticker_overview_row: no symbol on cursor; skip")
+        return
+    _attach_last_symbol(cur, sym)
+    now = datetime.now(timezone.utc)
+    cur.execute(
+        """
+        UPDATE market.ticker SET
+          sector = COALESCE(NULLIF(%s, ''), sector),
+          industry = COALESCE(NULLIF(%s, ''), industry),
+          primary_exchange = COALESCE(%s, primary_exchange),
+          list_date = COALESCE(%s, list_date),
+          sic_code = COALESCE(%s, sic_code),
+          market_cap = COALESCE(%s, market_cap),
+          total_employees = COALESCE(%s, total_employees),
+          description = COALESCE(%s, description),
+          homepage_url = COALESCE(%s, homepage_url),
+          updated_at = COALESCE(%s, now())
+        WHERE symbol = %s
+        """,
+        (
+            cols.get("sector") or "",
+            cols.get("industry") or "",
+            cols.get("exchange") or cols.get("primary_exchange"),
+            cols.get("list_date"),
+            cols.get("sic_code"),
+            cols.get("market_cap"),
+            cols.get("total_employees"),
+            cols.get("description"),
+            cols.get("homepage_url"),
+            cols.get("overview_updated_at") or now,
+            sym,
+        ),
+    )
+    if cur.rowcount == 0:
+        # Ensure a stub row exists (e.g. NOT_FOUND stub after universe sync race).
+        stub = _cols_to_market_ticker({"ticker": sym}, overview=cols)
+        stub["updated_at"] = cols.get("overview_updated_at") or now
+        col_names = list(_MARKET_TICKER_COLS)
+        values = [stub.get(c) for c in col_names]
+        placeholders = ", ".join(["%s"] * len(col_names))
+        cur.execute(
+            f"""
+            INSERT INTO market.ticker ({", ".join(col_names)})
+            VALUES ({placeholders})
+            ON CONFLICT (symbol) DO UPDATE SET
+              sector = COALESCE(NULLIF(EXCLUDED.sector, ''), market.ticker.sector),
+              industry = COALESCE(NULLIF(EXCLUDED.industry, ''), market.ticker.industry),
+              market_cap = COALESCE(EXCLUDED.market_cap, market.ticker.market_cap),
+              description = COALESCE(EXCLUDED.description, market.ticker.description),
+              homepage_url = COALESCE(EXCLUDED.homepage_url, market.ticker.homepage_url),
+              list_date = COALESCE(EXCLUDED.list_date, market.ticker.list_date),
+              sic_code = COALESCE(EXCLUDED.sic_code, market.ticker.sic_code),
+              total_employees = COALESCE(EXCLUDED.total_employees, market.ticker.total_employees),
+              updated_at = EXCLUDED.updated_at
+            """,
+            values,
+        )
 
 
 def overview_stub_cols_api_not_found() -> Dict[str, Any]:
@@ -450,7 +556,29 @@ def replace_related_for_tickers_id(
     related_items: List[Dict[str, Any]],
     fetched_at: datetime,
 ) -> int:
-    cur.execute("DELETE FROM ticker_related_tickers WHERE from_tickers_id = %s", (from_tickers_id,))
+    """Write peers into ``ticker_related_tickers`` keyed by ``from_symbol``.
+
+    Callers should invoke ``get_tickers_id_for_ticker`` first so the symbol is
+    stashed on the cursor. ``from_tickers_id`` is a compat arg (ignored for writes
+    when the stashed symbol is present; legacy numeric ids may still resolve via
+    ``public.tickers`` if that table remains).
+    """
+    sym = _last_symbol(cur)
+    if not sym and from_tickers_id and int(from_tickers_id) != 1:
+        try:
+            cur.execute(
+                "SELECT ticker FROM tickers WHERE tickers_id = %s",
+                (int(from_tickers_id),),
+            )
+            row = cur.fetchone()
+            if row and row[0]:
+                sym = str(row[0]).strip().upper()
+        except Exception:
+            sym = None
+    if not sym:
+        logger.warning("replace_related_for_tickers_id: no symbol; skip")
+        return 0
+    cur.execute("DELETE FROM ticker_related_tickers WHERE from_symbol = %s", (sym,))
     n = 0
     for idx, item in enumerate(related_items):
         if not isinstance(item, dict):
@@ -460,29 +588,44 @@ def replace_related_for_tickers_id(
             continue
         cur.execute(
             """
-            INSERT INTO ticker_related_tickers (from_tickers_id, to_symbol, rank, fetched_at)
+            INSERT INTO ticker_related_tickers (from_symbol, to_symbol, rank, fetched_at)
             VALUES (%s, %s, %s, %s)
-            ON CONFLICT (from_tickers_id, to_symbol) DO UPDATE SET
+            ON CONFLICT (from_symbol, to_symbol) DO UPDATE SET
               rank = EXCLUDED.rank,
               fetched_at = EXCLUDED.fetched_at
             """,
-            (from_tickers_id, tsym, idx, fetched_at),
+            (sym, tsym, idx, fetched_at),
         )
         n += 1
     return n
 
 
 def get_tickers_id_for_ticker(cur: Any, ticker: str) -> Optional[int]:
+    """Compat id for overview/related callers.
+
+    Prefers real ``public.tickers.tickers_id`` when that table still exists; otherwise
+    returns ``1`` if the symbol exists in ``market.ticker`` (overview path only).
+    """
     sym = (ticker or "").strip().upper()
     if not sym:
         return None
-    cur.execute("SELECT tickers_id FROM tickers WHERE ticker = %s", (sym,))
+    _attach_last_symbol(cur, sym)
+    try:
+        cur.execute("SELECT tickers_id FROM tickers WHERE ticker = %s", (sym,))
+        row = cur.fetchone()
+        if row:
+            return int(row[0])
+    except Exception:
+        pass
+    cur.execute("SELECT 1 FROM market.ticker WHERE symbol = %s", (sym,))
     row = cur.fetchone()
-    return int(row[0]) if row else None
+    if not row:
+        return None
+    return 1
 
 
 def search_tickers(cur: Any, q: str, limit: int = 20) -> List[Dict[str, Any]]:
-    """Prefix match on ticker preferred; also match name ILIKE. ``q`` trimmed."""
+    """Prefix match on symbol preferred; also match name ILIKE. ``q`` trimmed."""
     raw = (q or "").strip()
     if not raw:
         return []
@@ -490,16 +633,15 @@ def search_tickers(cur: Any, q: str, limit: int = 20) -> List[Dict[str, Any]]:
     sym_prefix = raw.upper()
     cur.execute(
         """
-        SELECT t.tickers_id, t.ticker, t.name,
-               COALESCE(t.primary_exchange, d.exchange) AS exchange,
+        SELECT NULL::bigint AS tickers_id, t.symbol, t.name,
+               t.primary_exchange AS exchange,
                t.primary_exchange, t.instrument_type, t.active
-        FROM tickers t
-        LEFT JOIN ticker_overview d ON d.tickers_id = t.tickers_id
-        WHERE t.ticker ILIKE %s
+        FROM market.ticker t
+        WHERE t.symbol ILIKE %s
            OR (t.name IS NOT NULL AND t.name ILIKE %s)
         ORDER BY
-          CASE WHEN t.ticker ILIKE %s THEN 0 ELSE 1 END,
-          t.ticker
+          CASE WHEN t.symbol ILIKE %s THEN 0 ELSE 1 END,
+          t.symbol
         LIMIT %s
         """,
         (f"{sym_prefix}%", f"%{raw}%", f"{sym_prefix}%", lim),
@@ -523,22 +665,18 @@ def search_tickers(cur: Any, q: str, limit: int = 20) -> List[Dict[str, Any]]:
 
 
 def fetch_ticker_detail_merged(cur: Any, ticker: str) -> Optional[Dict[str, Any]]:
-    """Single merged dict: ``tickers`` + ``ticker_overview`` (+ ``symbol`` alias)."""
+    """Single dict from ``market.ticker`` (+ legacy key aliases for FE compat)."""
     sym = (ticker or "").strip().upper()
     if not sym:
         return None
     cur.execute(
         """
-        SELECT t.*, d.sector, d.industry, d.exchange AS detail_exchange, d.list_date, d.ticker_root,
-               d.ticker_suffix, d.sic_code, d.sic_description, d.market_cap, d.total_employees,
-               d.address_line1, d.address_city, d.address_state, d.postal_code,
-               d.phone, d.description, d.homepage_url, d.icon_url, d.logo_url,
-               d.round_lot, d.share_class_shares_outstanding, d.weighted_shares_outstanding,
-               d.overview_api_request_id, d.overview_api_status, d.overview_api_count,
-               d.overview_updated_at
-        FROM tickers t
-        LEFT JOIN ticker_overview d ON d.tickers_id = t.tickers_id
-        WHERE t.ticker = %s
+        SELECT
+          symbol, name, market, locale, primary_exchange, instrument_type, active,
+          currency, cik, composite_figi, sic_code, sector, industry, market_cap,
+          list_date, homepage_url, total_employees, description, updated_at
+        FROM market.ticker
+        WHERE symbol = %s
         """,
         (sym,),
     )
@@ -550,37 +688,31 @@ def fetch_ticker_detail_merged(cur: Any, ticker: str) -> Optional[Dict[str, Any]
     colnames = [desc[i].name for i in range(len(desc))]
     for i, name in enumerate(colnames):
         dct[name] = row[i]
-    # Prefer display exchange from detail if tickers.primary_exchange null
-    if dct.get("detail_exchange"):
-        dct["exchange"] = dct["detail_exchange"]
-    elif dct.get("primary_exchange"):
-        dct["exchange"] = dct["primary_exchange"]
-    dct.pop("detail_exchange", None)
-    dct["symbol"] = dct.get("ticker")
+    dct["ticker"] = dct.get("symbol")
+    dct["currency_name"] = dct.get("currency")
+    dct["exchange"] = dct.get("primary_exchange")
+    dct["overview_updated_at"] = dct.get("updated_at")
     return dct
 
 
 def fetch_related_with_names(cur: Any, ticker: str) -> Tuple[Optional[int], List[Dict[str, Any]]]:
-    """Return ``(from_tickers_id | None, [{ticker, name?, rank}, ...])``."""
+    """Return ``(1 | None, [{ticker, name?, rank}, ...])`` via ``from_symbol`` + market.ticker names."""
     sym = (ticker or "").strip().upper()
     if not sym:
         return None, []
-    cur.execute("SELECT tickers_id FROM tickers WHERE ticker = %s", (sym,))
-    row = cur.fetchone()
-    if not row:
+    if get_tickers_id_for_ticker(cur, sym) is None:
         return None, []
-    tid = int(row[0])
+    out: List[Dict[str, Any]] = []
     cur.execute(
         """
         SELECT r.to_symbol, r.rank, r.fetched_at, p.name AS peer_name
         FROM ticker_related_tickers r
-        LEFT JOIN tickers p ON p.ticker = r.to_symbol
-        WHERE r.from_tickers_id = %s
+        LEFT JOIN market.ticker p ON p.symbol = r.to_symbol
+        WHERE r.from_symbol = %s
         ORDER BY r.rank ASC, r.to_symbol
         """,
-        (tid,),
+        (sym,),
     )
-    out: List[Dict[str, Any]] = []
     for rec in cur.fetchall():
         out.append(
             {
@@ -590,7 +722,7 @@ def fetch_related_with_names(cur: Any, ticker: str) -> Tuple[Optional[int], List
                 "name": rec[3],
             }
         )
-    return tid, out
+    return 1, out
 
 
 def list_ticker_types(cur: Any) -> List[Dict[str, Any]]:
@@ -609,16 +741,15 @@ def list_ticker_types(cur: Any) -> List[Dict[str, Any]]:
 
 
 def symbols_needing_overview(cur: Any, stale_hours: int = 720) -> List[str]:
-    """Tickers with missing or stale ``ticker_overview``."""
+    """Symbols in ``market.ticker`` with sparse overview fields or stale ``updated_at``."""
     h = max(1, int(stale_hours))
     cur.execute(
         """
-        SELECT t.ticker FROM tickers t
-        LEFT JOIN ticker_overview d ON d.tickers_id = t.tickers_id
-        WHERE d.tickers_id IS NULL
-           OR d.overview_updated_at IS NULL
-           OR d.overview_updated_at < (now() - (%s * interval '1 hour'))
-        ORDER BY t.ticker
+        SELECT t.symbol FROM market.ticker t
+        WHERE (t.description IS NULL AND t.market_cap IS NULL)
+           OR t.updated_at IS NULL
+           OR t.updated_at < (now() - (%s * interval '1 hour'))
+        ORDER BY t.symbol
         """,
         (h,),
     )
@@ -626,51 +757,50 @@ def symbols_needing_overview(cur: Any, stale_hours: int = 720) -> List[str]:
 
 
 def symbols_missing_overview_only(cur: Any) -> List[str]:
-    """Tickers in ``tickers`` with no row in ``ticker_overview`` (``tickers`` vs ``ticker_overview`` gap)."""
+    """Symbols in ``market.ticker`` with neither description nor market_cap filled."""
     cur.execute(
         """
-        SELECT t.ticker FROM tickers t
-        LEFT JOIN ticker_overview d ON d.tickers_id = t.tickers_id
-        WHERE d.tickers_id IS NULL
-        ORDER BY t.ticker
+        SELECT t.symbol FROM market.ticker t
+        WHERE t.description IS NULL AND t.market_cap IS NULL
+        ORDER BY t.symbol
         """
     )
     return [str(r[0]) for r in cur.fetchall() if r and r[0]]
 
 
 def count_ticker_overview_coverage(cur: Any) -> Dict[str, int]:
-    """Row counts for ``tickers`` vs ``ticker_overview`` (missing = no overview row; filled = has row)."""
+    """Coverage on merged ``market.ticker``: filled = description OR market_cap present."""
     cur.execute(
         """
         SELECT
-          (SELECT COUNT(*)::bigint FROM tickers) AS total_tickers,
-          (SELECT COUNT(*)::bigint FROM tickers t
-            INNER JOIN ticker_overview d ON d.tickers_id = t.tickers_id) AS filled,
-          (SELECT COUNT(*)::bigint FROM tickers t
-            LEFT JOIN ticker_overview d ON d.tickers_id = t.tickers_id
-            WHERE d.tickers_id IS NULL) AS missing
+          COUNT(*)::bigint AS total_tickers,
+          COUNT(*) FILTER (
+            WHERE description IS NOT NULL OR market_cap IS NOT NULL
+          )::bigint AS filled
+        FROM market.ticker
         """
     )
     row = cur.fetchone()
     if not row:
         return {"total_tickers": 0, "filled": 0, "missing": 0}
+    total = int(row[0] or 0)
+    filled = int(row[1] or 0)
     return {
-        "total_tickers": int(row[0] or 0),
-        "filled": int(row[1] or 0),
-        "missing": int(row[2] or 0),
+        "total_tickers": total,
+        "filled": filled,
+        "missing": total - filled,
     }
 
 
 def list_tickers_missing_overview_page(cur: Any, limit: int, offset: int) -> List[str]:
-    """Paged tickers in ``tickers`` with no ``ticker_overview`` row (ordered by ticker)."""
+    """Paged symbols missing overview fields (description and market_cap both null)."""
     lim = max(1, min(int(limit), 2000))
     off = max(0, int(offset))
     cur.execute(
         """
-        SELECT t.ticker FROM tickers t
-        LEFT JOIN ticker_overview d ON d.tickers_id = t.tickers_id
-        WHERE d.tickers_id IS NULL
-        ORDER BY t.ticker
+        SELECT t.symbol FROM market.ticker t
+        WHERE t.description IS NULL AND t.market_cap IS NULL
+        ORDER BY t.symbol
         LIMIT %s OFFSET %s
         """,
         (lim, off),
@@ -679,60 +809,60 @@ def list_tickers_missing_overview_page(cur: Any, limit: int, offset: int) -> Lis
 
 
 def count_ticker_related_coverage(cur: Any) -> Dict[str, int]:
-    """Counts for ``tickers`` vs ``ticker_related_tickers`` (missing = no rows as from_tickers_id)."""
+    """Universe = ``market.ticker``; related keyed by ``from_symbol``."""
+    cur.execute("SELECT COUNT(*)::bigint FROM market.ticker")
+    total_row = cur.fetchone()
+    total = int(total_row[0] or 0) if total_row else 0
     cur.execute(
         """
-        SELECT
-          (SELECT COUNT(*)::bigint FROM tickers) AS total_tickers,
-          (SELECT COUNT(*)::bigint FROM tickers t
-            WHERE EXISTS (
-              SELECT 1 FROM ticker_related_tickers r WHERE r.from_tickers_id = t.tickers_id
-            )) AS filled,
-          (SELECT COUNT(*)::bigint FROM tickers t
-            WHERE NOT EXISTS (
-              SELECT 1 FROM ticker_related_tickers r WHERE r.from_tickers_id = t.tickers_id
-            )) AS missing
+        SELECT COUNT(*)::bigint FROM market.ticker mt
+        WHERE EXISTS (
+          SELECT 1
+          FROM ticker_related_tickers r
+          WHERE r.from_symbol = mt.symbol
+        )
         """
     )
-    row = cur.fetchone()
-    if not row:
-        return {"total_tickers": 0, "filled": 0, "missing": 0}
+    fr = cur.fetchone()
+    filled = int(fr[0] or 0) if fr else 0
     return {
-        "total_tickers": int(row[0] or 0),
-        "filled": int(row[1] or 0),
-        "missing": int(row[2] or 0),
+        "total_tickers": total,
+        "filled": filled,
+        "missing": max(0, total - filled),
     }
 
 
 def symbols_missing_related_only(cur: Any) -> List[str]:
-    """Tickers in ``tickers`` with no ``ticker_related_tickers`` rows as ``from_tickers_id``."""
+    """Symbols in ``market.ticker`` with no related rows."""
     cur.execute(
         """
-        SELECT t.ticker FROM tickers t
+        SELECT mt.symbol FROM market.ticker mt
         WHERE NOT EXISTS (
-            SELECT 1 FROM ticker_related_tickers r WHERE r.from_tickers_id = t.tickers_id
+          SELECT 1
+          FROM ticker_related_tickers r
+          WHERE r.from_symbol = mt.symbol
         )
-        ORDER BY t.ticker
+        ORDER BY mt.symbol
         """
     )
     return [str(r[0]) for r in cur.fetchall() if r and r[0]]
 
 
 def symbols_needing_related_stale(cur: Any, stale_hours: int = 720) -> List[str]:
-    """Tickers missing related rows, or whose latest ``fetched_at`` is older than ``stale_hours``."""
+    """Symbols missing related rows, or whose latest ``fetched_at`` is older than ``stale_hours``."""
     h = max(1, int(stale_hours))
     cur.execute(
         """
-        SELECT t.ticker FROM tickers t
+        SELECT mt.symbol FROM market.ticker mt
         LEFT JOIN (
-            SELECT from_tickers_id, MAX(fetched_at) AS last_fetch
+            SELECT from_symbol, MAX(fetched_at) AS last_fetch
             FROM ticker_related_tickers
-            GROUP BY from_tickers_id
-        ) r ON r.from_tickers_id = t.tickers_id
-        WHERE r.from_tickers_id IS NULL
+            GROUP BY from_symbol
+        ) r ON r.from_symbol = mt.symbol
+        WHERE r.from_symbol IS NULL
            OR r.last_fetch IS NULL
            OR r.last_fetch < (now() - (%s * interval '1 hour'))
-        ORDER BY t.ticker
+        ORDER BY mt.symbol
         """,
         (h,),
     )
@@ -740,16 +870,18 @@ def symbols_needing_related_stale(cur: Any, stale_hours: int = 720) -> List[str]
 
 
 def list_tickers_missing_related_page(cur: Any, limit: int, offset: int) -> List[str]:
-    """Paged tickers with no ``ticker_related_tickers`` rows for ``from_tickers_id``."""
+    """Paged symbols with no related rows."""
     lim = max(1, min(int(limit), 2000))
     off = max(0, int(offset))
     cur.execute(
         """
-        SELECT t.ticker FROM tickers t
+        SELECT mt.symbol FROM market.ticker mt
         WHERE NOT EXISTS (
-          SELECT 1 FROM ticker_related_tickers r WHERE r.from_tickers_id = t.tickers_id
+          SELECT 1
+          FROM ticker_related_tickers r
+          WHERE r.from_symbol = mt.symbol
         )
-        ORDER BY t.ticker
+        ORDER BY mt.symbol
         LIMIT %s OFFSET %s
         """,
         (lim, off),
@@ -758,14 +890,14 @@ def list_tickers_missing_related_page(cur: Any, limit: int, offset: int) -> List
 
 
 def list_tickers_filled_related_page(cur: Any, limit: int, offset: int) -> List[str]:
-    """Distinct tickers that have at least one related peer row (ordered by ticker)."""
+    """Distinct symbols that have at least one related peer row."""
     lim = max(1, min(int(limit), 2000))
     off = max(0, int(offset))
     cur.execute(
         """
-        SELECT DISTINCT t.ticker FROM tickers t
-        INNER JOIN ticker_related_tickers r ON r.from_tickers_id = t.tickers_id
-        ORDER BY t.ticker
+        SELECT DISTINCT mt.symbol FROM market.ticker mt
+        INNER JOIN ticker_related_tickers r ON r.from_symbol = mt.symbol
+        ORDER BY mt.symbol
         LIMIT %s OFFSET %s
         """,
         (lim, off),
@@ -774,8 +906,8 @@ def list_tickers_filled_related_page(cur: Any, limit: int, offset: int) -> List[
 
 
 def count_tickers_rows(cur: Any) -> int:
-    """Total rows in ``tickers`` (universe table)."""
-    cur.execute("SELECT COUNT(*)::bigint FROM tickers")
+    """Total rows in ``market.ticker`` (universe table)."""
+    cur.execute("SELECT COUNT(*)::bigint FROM market.ticker")
     row = cur.fetchone()
     return int(row[0] or 0) if row else 0
 
@@ -788,7 +920,7 @@ def count_ticker_types_rows(cur: Any) -> int:
 
 
 def all_ticker_symbols(cur: Any) -> List[str]:
-    cur.execute("SELECT ticker FROM tickers ORDER BY ticker")
+    cur.execute("SELECT symbol FROM market.ticker ORDER BY symbol")
     return [str(r[0]) for r in cur.fetchall() if r and r[0]]
 
 

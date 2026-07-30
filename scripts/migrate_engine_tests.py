@@ -15,7 +15,6 @@ TESTS = [
     "test_sse_queue_utils.py",
     "test_redis_quotes_ingester.py",
     "test_stock_reference.py",
-    "test_stock_ohlc_massive.py",
     "test_portfolio.py",
     "test_portfolio_model.py",
     "test_option_stock_link.py",

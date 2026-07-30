@@ -6,7 +6,7 @@ import math
 import os
 import time
 from datetime import date, datetime, timezone
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 import psycopg2
 
@@ -149,7 +149,7 @@ class PostgreSQLSink(StatusSink):
             # R-A1: sync multi-account snapshot into normalized tables (account + account_positions)
             # When Account Sync Daemon is enabled, it handles this persistence independently.
             if isinstance(raw_accounts, list) and raw_accounts:
-                if not os.environ.get("ACCOUNT_SYNC_DAEMON_ENABLED", "").strip().lower() in ("1", "true", "yes"):
+                if os.environ.get("ACCOUNT_SYNC_DAEMON_ENABLED", "").strip().lower() not in ("1", "true", "yes"):
                     sync_accounts_snapshot_to_tables(self._conn, raw_accounts)
             self._conn.commit()
         except Exception as e:
@@ -738,11 +738,22 @@ class PostgreSQLSink(StatusSink):
             logger.warning("write_open_orders failed: %s", e, exc_info=True)
 
     def write_ohlc_bars(self, rows: Any) -> None:
-        """R-A3 扩展：写入股票 K 线到 stock_day（1 D）或 stock_min（1 min, 5 mins, 1 hour）。按 (symbol, bar_time) 或 (symbol, period, bar_time) UPSERT。"""
+        """Write stock OHLC to market.stock_daily (1 D) or market.stock_minute.
+
+        UPSERT last-writer-wins on PK ``(symbol, bar_date)`` /
+        ``(symbol, period, bar_time)``. No ``source`` column.
+
+        Minute periods use the same mapping as ``get_bars`` (e.g. ``1 min`` →
+        ``1 minute``). Target year/month partitions must already exist
+        (market-data plugin ``ensure_*_partitions``); this method does not create them.
+        """
         if not rows:
             return
         if not self._ensure_conn():
             return
+        # Local import avoids persistence → monitor package cycle at module load.
+        from bifrost_core.monitor.reader.market import _minute_period_db
+
         try:
             with self._conn.cursor() as cur:
                 for r in rows:
@@ -761,7 +772,7 @@ class PostgreSQLSink(StatusSink):
                     else:
                         bar_dt = bar_time
                     if period.upper() == "1 D":
-                        # stock_day.bar_time is DATE — use original local date to
+                        # market.stock_daily.bar_date is DATE — use original local date to
                         # avoid UTC date shift (e.g. 18:00-0600 → next day in UTC)
                         bar_date_str = r.get("bar_date")
                         if bar_date_str:
@@ -775,27 +786,34 @@ class PostgreSQLSink(StatusSink):
                             bar_d = bar_dt
                         cur.execute(
                             """
-                            INSERT INTO stock_day (symbol, bar_time, open, high, low, close, volume, source)
-                            VALUES (%s, %s, %s, %s, %s, %s, %s, 'ib')
-                            ON CONFLICT (symbol, bar_time, source)
+                            INSERT INTO market.stock_daily
+                                (symbol, bar_date, open, high, low, close, volume, fetched_at)
+                            VALUES (%s, %s, %s, %s, %s, %s, %s, now())
+                            ON CONFLICT (symbol, bar_date)
                             DO UPDATE SET open = EXCLUDED.open, high = EXCLUDED.high, low = EXCLUDED.low,
-                                          close = EXCLUDED.close, volume = EXCLUDED.volume
+                                          close = EXCLUDED.close, volume = EXCLUDED.volume,
+                                          fetched_at = now()
                             """,
                             (symbol, bar_d, open_, high, low, close, volume),
                         )
                     else:
                         cur.execute(
                             """
-                            INSERT INTO stock_min (symbol, period, bar_time, open, high, low, close, volume, source)
-                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 'ib')
-                            ON CONFLICT (symbol, period, bar_time, source)
+                            INSERT INTO market.stock_minute
+                                (symbol, period, bar_time, open, high, low, close, volume, fetched_at)
+                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, now())
+                            ON CONFLICT (symbol, period, bar_time)
                             DO UPDATE SET open = EXCLUDED.open, high = EXCLUDED.high, low = EXCLUDED.low,
-                                          close = EXCLUDED.close, volume = EXCLUDED.volume
+                                          close = EXCLUDED.close, volume = EXCLUDED.volume,
+                                          fetched_at = now()
                             """,
-                            (symbol, period, bar_dt, open_, high, low, close, volume),
+                            (symbol, _minute_period_db(period), bar_dt, open_, high, low, close, volume),
                         )
             self._conn.commit()
-            logger.info("[R-A3] write_ohlc_bars: wrote %s rows to stock_day/stock_min", len(rows))
+            logger.info(
+                "[R-A3] write_ohlc_bars: wrote %s rows to market.stock_daily/stock_minute",
+                len(rows),
+            )
         except Exception as e:
             self._conn.rollback()
             logger.warning("write_ohlc_bars failed: %s", e, exc_info=True)

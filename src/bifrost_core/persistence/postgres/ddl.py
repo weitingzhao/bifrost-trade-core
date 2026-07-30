@@ -368,448 +368,16 @@ def _ensure_tables(conn, log=None, log_table=None) -> None:
         cur.execute(
             "CREATE INDEX IF NOT EXISTS account_transactions_account_ts ON account_transactions (account_id, ts DESC)"
         )
-        _log("stock_day table + index (may block if API/worker use stock_day)")
-        _log_table("stock_day", "Stock daily OHLC bars")
-        cur.execute(
-            """
-            CREATE TABLE IF NOT EXISTS stock_day (
-                symbol text NOT NULL,
-                bar_time date NOT NULL,
-                open double precision,
-                high double precision,
-                low double precision,
-                close double precision,
-                volume double precision,
-                created_at timestamptz DEFAULT now(),
-                source text NOT NULL DEFAULT 'ib',
-                CONSTRAINT stock_day_symbol_bar_time_source_key PRIMARY KEY (symbol, bar_time, source)
-            ) PARTITION BY RANGE (bar_time)
-        """
-        )
-        # Migrate: if bar_time is still timestamptz from an older schema, convert to date.
+        # Market feed tables (stock_day/min, option_*, tickers/ticker_overview, fundamentals,
+        # job_massive_backfill, etc.) are owned by bifrost-platform-plugin-market-data
+        # (market.* / data_ops.*). Core DDL no longer creates those public tables.
+
+        _log("ticker_types, ticker_related_tickers, job_ticker_reference_state")
+        # Rename legacy ticker_types table (idempotent; fresh DBs use CREATE below).
         cur.execute(
             """
             DO $$
             BEGIN
-                IF EXISTS (
-                    SELECT 1 FROM information_schema.columns
-                    WHERE table_name = 'stock_day'
-                      AND column_name = 'bar_time'
-                      AND data_type = 'timestamp with time zone'
-                ) THEN
-                    TRUNCATE stock_day;
-                    ALTER TABLE stock_day ALTER COLUMN bar_time TYPE date USING bar_time::date;
-                END IF;
-            END $$
-            """
-        )
-        cur.execute(
-            "CREATE INDEX IF NOT EXISTS stock_day_symbol_time ON stock_day (symbol, bar_time DESC)"
-        )
-        # R-A3 + Massive: source dimension (ib / tv / massive), extended OHLC fields
-        cur.execute(
-            """
-            DO $$
-            BEGIN
-              IF EXISTS (
-                SELECT 1 FROM information_schema.tables
-                WHERE table_schema = 'public' AND table_name = 'stock_day'
-              ) THEN
-                IF NOT EXISTS (
-                  SELECT 1 FROM information_schema.columns
-                  WHERE table_schema = 'public' AND table_name = 'stock_day' AND column_name = 'source'
-                ) THEN
-                  ALTER TABLE stock_day ADD COLUMN source text;
-                  UPDATE stock_day SET source = 'ib' WHERE source IS NULL;
-                  ALTER TABLE stock_day ALTER COLUMN source SET NOT NULL;
-                  ALTER TABLE stock_day ALTER COLUMN source SET DEFAULT 'ib';
-                END IF;
-                IF NOT EXISTS (
-                  SELECT 1 FROM information_schema.columns
-                  WHERE table_schema = 'public' AND table_name = 'stock_day' AND column_name = 'vwap'
-                ) THEN
-                  ALTER TABLE stock_day ADD COLUMN vwap double precision;
-                END IF;
-                IF NOT EXISTS (
-                  SELECT 1 FROM information_schema.columns
-                  WHERE table_schema = 'public' AND table_name = 'stock_day' AND column_name = 'trade_count'
-                ) THEN
-                  ALTER TABLE stock_day ADD COLUMN trade_count bigint;
-                END IF;
-                IF NOT EXISTS (
-                  SELECT 1 FROM information_schema.columns
-                  WHERE table_schema = 'public' AND table_name = 'stock_day' AND column_name = 'adjusted'
-                ) THEN
-                  ALTER TABLE stock_day ADD COLUMN adjusted boolean;
-                END IF;
-                IF NOT EXISTS (
-                  SELECT 1 FROM information_schema.columns
-                  WHERE table_schema = 'public' AND table_name = 'stock_day' AND column_name = 'extras'
-                ) THEN
-                  ALTER TABLE stock_day ADD COLUMN extras jsonb;
-                END IF;
-                IF EXISTS (
-                  SELECT 1 FROM pg_constraint
-                  WHERE conname = 'stock_day_symbol_bar_time_key'
-                ) THEN
-                  ALTER TABLE stock_day DROP CONSTRAINT stock_day_symbol_bar_time_key;
-                END IF;
-                IF NOT EXISTS (
-                  SELECT 1 FROM pg_constraint WHERE conname = 'stock_day_symbol_bar_time_source_key'
-                ) THEN
-                  ALTER TABLE stock_day ADD CONSTRAINT stock_day_symbol_bar_time_source_key
-                    UNIQUE (symbol, bar_time, source);
-                END IF;
-              END IF;
-            END $$
-            """
-        )
-        cur.execute(
-            "CREATE INDEX IF NOT EXISTS stock_day_symbol_source_time ON stock_day (symbol, source, bar_time DESC)"
-        )
-        cur.execute(
-            """
-            DO $stock_day_part$
-            DECLARE
-              rk char;
-              m_start date;
-              m_end date;
-              part_name text;
-              r record;
-              min_bt date;
-              max_bt date;
-            BEGIN
-              SELECT c.relkind INTO rk FROM pg_class c
-              JOIN pg_namespace n ON n.oid = c.relnamespace
-              WHERE n.nspname = 'public' AND c.relname = 'stock_day';
-              IF rk IS NULL THEN
-                RETURN;
-              END IF;
-
-              IF rk = 'p' THEN
-                SELECT date_trunc('month', COALESCE((SELECT MIN(bar_time) FROM public.stock_day), CURRENT_DATE))::date
-                  INTO m_start;
-                max_bt := COALESCE((SELECT MAX(bar_time) FROM public.stock_day), CURRENT_DATE);
-                m_end := (date_trunc('month', GREATEST(max_bt, CURRENT_DATE))::date + interval '4 months')::date;
-                WHILE m_start < m_end LOOP
-                  part_name := 'stock_day_y' || to_char(m_start, 'YYYY') || 'm' || to_char(m_start, 'MM');
-                  IF to_regclass('public.' || part_name) IS NULL THEN
-                    EXECUTE format(
-                      'CREATE TABLE %I PARTITION OF public.stock_day FOR VALUES FROM (%L) TO (%L)',
-                      part_name, m_start, (m_start + interval '1 month')::date
-                    );
-                  END IF;
-                  m_start := (m_start + interval '1 month')::date;
-                END LOOP;
-                IF to_regclass('public.stock_day_default') IS NULL THEN
-                  CREATE TABLE stock_day_default PARTITION OF public.stock_day DEFAULT;
-                END IF;
-                RETURN;
-              END IF;
-
-              RAISE NOTICE 'Migrating stock_day heap to RANGE partitions on bar_time (date) ...';
-              DROP VIEW IF EXISTS public.option_snapshots_with_underlying_day;
-
-              CREATE TABLE stock_day_new (
-                symbol text NOT NULL,
-                bar_time date NOT NULL,
-                open double precision,
-                high double precision,
-                low double precision,
-                close double precision,
-                volume double precision,
-                created_at timestamptz DEFAULT now(),
-                source text NOT NULL DEFAULT 'ib',
-                vwap double precision,
-                trade_count bigint,
-                adjusted boolean,
-                extras jsonb,
-                CONSTRAINT stock_day_mig_pkey PRIMARY KEY (symbol, bar_time, source)
-              ) PARTITION BY RANGE (bar_time);
-
-              SELECT MIN(bar_time), MAX(bar_time) INTO min_bt, max_bt FROM public.stock_day;
-              m_start := date_trunc('month', COALESCE(min_bt, CURRENT_DATE))::date;
-              IF max_bt IS NULL THEN
-                max_bt := COALESCE(min_bt, CURRENT_DATE);
-              END IF;
-              m_end := (date_trunc('month', GREATEST(max_bt, CURRENT_DATE))::date + interval '4 months')::date;
-              WHILE m_start < m_end LOOP
-                part_name := 'stock_day_new_y' || to_char(m_start, 'YYYY') || 'm' || to_char(m_start, 'MM');
-                EXECUTE format(
-                  'CREATE TABLE %I PARTITION OF stock_day_new FOR VALUES FROM (%L) TO (%L)',
-                  part_name, m_start, (m_start + interval '1 month')::date
-                );
-                m_start := (m_start + interval '1 month')::date;
-              END LOOP;
-              CREATE TABLE stock_day_new_default PARTITION OF stock_day_new DEFAULT;
-
-              INSERT INTO stock_day_new (
-                symbol, bar_time, open, high, low, close, volume, created_at,
-                source, vwap, trade_count, adjusted, extras
-              )
-              SELECT
-                symbol, bar_time::date, open, high, low, close, volume, created_at,
-                COALESCE(source, 'ib'), vwap, trade_count, adjusted, extras
-              FROM public.stock_day;
-
-              DROP TABLE public.stock_day;
-              ALTER TABLE stock_day_new RENAME TO stock_day;
-
-              FOR r IN
-                SELECT c.relname AS tname FROM pg_class c
-                JOIN pg_namespace n ON n.oid = c.relnamespace
-                WHERE n.nspname = 'public' AND c.relname LIKE 'stock_day_new_y%'
-              LOOP
-                EXECUTE format(
-                  'ALTER TABLE %I RENAME TO %I',
-                  r.tname,
-                  replace(r.tname, 'stock_day_new_', 'stock_day_')
-                );
-              END LOOP;
-              IF to_regclass('public.stock_day_new_default') IS NOT NULL THEN
-                ALTER TABLE stock_day_new_default RENAME TO stock_day_default;
-              END IF;
-
-              ALTER TABLE public.stock_day RENAME CONSTRAINT stock_day_mig_pkey TO stock_day_symbol_bar_time_source_key;
-
-              CREATE INDEX IF NOT EXISTS stock_day_symbol_time ON public.stock_day (symbol, bar_time DESC);
-              CREATE INDEX IF NOT EXISTS stock_day_symbol_source_time ON public.stock_day (symbol, source, bar_time DESC);
-              RAISE NOTICE 'stock_day: RANGE partition migration complete.';
-            END
-            $stock_day_part$;
-            """
-        )
-        _log("stock_min table + index")
-        _log_table("stock_min", "Stock minute OHLC bars")
-        cur.execute(
-            """
-            CREATE TABLE IF NOT EXISTS stock_min (
-                symbol text NOT NULL,
-                period text NOT NULL,
-                bar_time timestamptz NOT NULL,
-                open double precision,
-                high double precision,
-                low double precision,
-                close double precision,
-                volume double precision,
-                created_at timestamptz DEFAULT now(),
-                source text NOT NULL DEFAULT 'ib',
-                CONSTRAINT stock_min_symbol_period_bar_time_source_key PRIMARY KEY (symbol, period, bar_time, source)
-            ) PARTITION BY RANGE (bar_time)
-        """
-        )
-        cur.execute(
-            "CREATE INDEX IF NOT EXISTS stock_min_symbol_period_time ON stock_min (symbol, period, bar_time DESC)"
-        )
-        cur.execute(
-            """
-            DO $$
-            BEGIN
-              IF EXISTS (
-                SELECT 1 FROM information_schema.tables
-                WHERE table_schema = 'public' AND table_name = 'stock_min'
-              ) THEN
-                IF NOT EXISTS (
-                  SELECT 1 FROM information_schema.columns
-                  WHERE table_schema = 'public' AND table_name = 'stock_min' AND column_name = 'source'
-                ) THEN
-                  ALTER TABLE stock_min ADD COLUMN source text;
-                  UPDATE stock_min SET source = 'ib' WHERE source IS NULL;
-                  ALTER TABLE stock_min ALTER COLUMN source SET NOT NULL;
-                  ALTER TABLE stock_min ALTER COLUMN source SET DEFAULT 'ib';
-                END IF;
-                IF NOT EXISTS (
-                  SELECT 1 FROM information_schema.columns
-                  WHERE table_schema = 'public' AND table_name = 'stock_min' AND column_name = 'vwap'
-                ) THEN
-                  ALTER TABLE stock_min ADD COLUMN vwap double precision;
-                END IF;
-                IF NOT EXISTS (
-                  SELECT 1 FROM information_schema.columns
-                  WHERE table_schema = 'public' AND table_name = 'stock_min' AND column_name = 'trade_count'
-                ) THEN
-                  ALTER TABLE stock_min ADD COLUMN trade_count bigint;
-                END IF;
-                IF NOT EXISTS (
-                  SELECT 1 FROM information_schema.columns
-                  WHERE table_schema = 'public' AND table_name = 'stock_min' AND column_name = 'adjusted'
-                ) THEN
-                  ALTER TABLE stock_min ADD COLUMN adjusted boolean;
-                END IF;
-                IF NOT EXISTS (
-                  SELECT 1 FROM information_schema.columns
-                  WHERE table_schema = 'public' AND table_name = 'stock_min' AND column_name = 'extras'
-                ) THEN
-                  ALTER TABLE stock_min ADD COLUMN extras jsonb;
-                END IF;
-                IF EXISTS (
-                  SELECT 1 FROM pg_constraint
-                  WHERE conname = 'stock_min_symbol_period_bar_time_key'
-                ) THEN
-                  ALTER TABLE stock_min DROP CONSTRAINT stock_min_symbol_period_bar_time_key;
-                END IF;
-                IF NOT EXISTS (
-                  SELECT 1 FROM pg_constraint WHERE conname = 'stock_min_symbol_period_bar_time_source_key'
-                ) THEN
-                  ALTER TABLE stock_min ADD CONSTRAINT stock_min_symbol_period_bar_time_source_key
-                    UNIQUE (symbol, period, bar_time, source);
-                END IF;
-              END IF;
-            END $$
-            """
-        )
-        cur.execute(
-            "CREATE INDEX IF NOT EXISTS stock_min_sym_per_src_time ON stock_min (symbol, period, source, bar_time DESC)"
-        )
-        cur.execute(
-            """
-            DO $stock_min_part$
-            DECLARE
-              rk char;
-              m_start date;
-              m_end date;
-              part_name text;
-              r record;
-              min_bt timestamptz;
-              max_bt timestamptz;
-            BEGIN
-              SELECT c.relkind INTO rk FROM pg_class c
-              JOIN pg_namespace n ON n.oid = c.relnamespace
-              WHERE n.nspname = 'public' AND c.relname = 'stock_min';
-              IF rk IS NULL THEN
-                RETURN;
-              END IF;
-
-              IF rk = 'p' THEN
-                SELECT date_trunc('month', COALESCE((SELECT MIN(bar_time) FROM public.stock_min), now()))::date
-                  INTO m_start;
-                max_bt := COALESCE((SELECT MAX(bar_time) FROM public.stock_min), now());
-                m_end := (date_trunc('month', GREATEST(max_bt, now()))::date + interval '4 months')::date;
-                WHILE m_start < m_end LOOP
-                  part_name := 'stock_min_y' || to_char(m_start, 'YYYY') || 'm' || to_char(m_start, 'MM');
-                  IF to_regclass('public.' || part_name) IS NULL THEN
-                    EXECUTE format(
-                      'CREATE TABLE %I PARTITION OF public.stock_min FOR VALUES FROM (%L) TO (%L)',
-                      part_name, m_start, (m_start + interval '1 month')::date
-                    );
-                  END IF;
-                  m_start := (m_start + interval '1 month')::date;
-                END LOOP;
-                IF to_regclass('public.stock_min_default') IS NULL THEN
-                  CREATE TABLE stock_min_default PARTITION OF public.stock_min DEFAULT;
-                END IF;
-                RETURN;
-              END IF;
-
-              RAISE NOTICE 'Migrating stock_min heap to RANGE partitions on bar_time ...';
-
-              CREATE TABLE stock_min_new (
-                symbol text NOT NULL,
-                period text NOT NULL,
-                bar_time timestamptz NOT NULL,
-                open double precision,
-                high double precision,
-                low double precision,
-                close double precision,
-                volume double precision,
-                created_at timestamptz DEFAULT now(),
-                source text NOT NULL DEFAULT 'ib',
-                vwap double precision,
-                trade_count bigint,
-                adjusted boolean,
-                extras jsonb,
-                CONSTRAINT stock_min_mig_pkey PRIMARY KEY (symbol, period, bar_time, source)
-              ) PARTITION BY RANGE (bar_time);
-
-              SELECT MIN(bar_time), MAX(bar_time) INTO min_bt, max_bt FROM public.stock_min;
-              m_start := date_trunc('month', COALESCE(min_bt, now()))::date;
-              IF max_bt IS NULL THEN
-                max_bt := COALESCE(min_bt, now());
-              END IF;
-              m_end := (date_trunc('month', GREATEST(max_bt, now()))::date + interval '4 months')::date;
-              WHILE m_start < m_end LOOP
-                part_name := 'stock_min_new_y' || to_char(m_start, 'YYYY') || 'm' || to_char(m_start, 'MM');
-                EXECUTE format(
-                  'CREATE TABLE %I PARTITION OF stock_min_new FOR VALUES FROM (%L) TO (%L)',
-                  part_name, m_start, (m_start + interval '1 month')::date
-                );
-                m_start := (m_start + interval '1 month')::date;
-              END LOOP;
-              CREATE TABLE stock_min_new_default PARTITION OF stock_min_new DEFAULT;
-
-              INSERT INTO stock_min_new (
-                symbol, period, bar_time, open, high, low, close, volume, created_at,
-                source, vwap, trade_count, adjusted, extras
-              )
-              SELECT
-                symbol, period, bar_time, open, high, low, close, volume, created_at,
-                COALESCE(source, 'ib'), vwap, trade_count, adjusted, extras
-              FROM public.stock_min;
-
-              DROP TABLE public.stock_min;
-              ALTER TABLE stock_min_new RENAME TO stock_min;
-
-              FOR r IN
-                SELECT c.relname AS tname FROM pg_class c
-                JOIN pg_namespace n ON n.oid = c.relnamespace
-                WHERE n.nspname = 'public' AND c.relname LIKE 'stock_min_new_y%'
-              LOOP
-                EXECUTE format(
-                  'ALTER TABLE %I RENAME TO %I',
-                  r.tname,
-                  replace(r.tname, 'stock_min_new_', 'stock_min_')
-                );
-              END LOOP;
-              IF to_regclass('public.stock_min_new_default') IS NOT NULL THEN
-                ALTER TABLE stock_min_new_default RENAME TO stock_min_default;
-              END IF;
-
-              ALTER TABLE public.stock_min RENAME CONSTRAINT stock_min_mig_pkey TO stock_min_symbol_period_bar_time_source_key;
-
-              CREATE INDEX IF NOT EXISTS stock_min_symbol_period_time ON public.stock_min (symbol, period, bar_time DESC);
-              CREATE INDEX IF NOT EXISTS stock_min_sym_per_src_time ON public.stock_min (symbol, period, source, bar_time DESC);
-              RAISE NOTICE 'stock_min: RANGE partition migration complete.';
-            END
-            $stock_min_part$;
-            """
-        )
-        _log("tickers table (Massive reference universe)")
-        _log_table("tickers", "Ticker symbol reference (All Tickers)")
-        cur.execute(
-            """
-            CREATE TABLE IF NOT EXISTS tickers (
-                tickers_id bigserial PRIMARY KEY,
-                ticker text NOT NULL UNIQUE,
-                name text,
-                market text,
-                locale text,
-                primary_exchange text,
-                instrument_type text,
-                active boolean,
-                currency_name text,
-                currency_symbol text,
-                base_currency_name text,
-                base_currency_symbol text,
-                cik text,
-                composite_figi text,
-                share_class_figi text,
-                last_updated_utc timestamptz,
-                delisted_utc timestamptz,
-                created_at timestamptz DEFAULT now(),
-                updated_at timestamptz DEFAULT now()
-            )
-            """
-        )
-        cur.execute("CREATE INDEX IF NOT EXISTS tickers_ticker ON tickers (ticker)")
-        # Rename legacy Massive reference tables (idempotent; fresh DBs use CREATE below).
-        cur.execute(
-            """
-            DO $$
-            BEGIN
-              IF to_regclass('public.ticker_reference_details') IS NOT NULL
-                 AND to_regclass('public.ticker_overview') IS NULL THEN
-                ALTER TABLE ticker_reference_details RENAME TO ticker_overview;
-              END IF;
               IF to_regclass('public.ticker_instrument_types') IS NOT NULL
                  AND to_regclass('public.ticker_types') IS NULL THEN
                 ALTER TABLE ticker_instrument_types RENAME TO ticker_types;
@@ -827,64 +395,7 @@ def _ensure_tables(conn, log=None, log_table=None) -> None:
             END $$;
             """
         )
-        cur.execute(
-            """
-            CREATE TABLE IF NOT EXISTS ticker_overview (
-                tickers_id bigint PRIMARY KEY REFERENCES tickers(tickers_id) ON DELETE CASCADE,
-                sector text NOT NULL DEFAULT '',
-                industry text NOT NULL DEFAULT '',
-                exchange text,
-                list_date date,
-                ticker_root text,
-                ticker_suffix text,
-                sic_code text,
-                sic_description text,
-                market_cap double precision,
-                total_employees integer,
-                address_line1 text,
-                address_city text,
-                address_state text,
-                postal_code text,
-                phone text,
-                description text,
-                homepage_url text,
-                icon_url text,
-                logo_url text,
-                round_lot bigint,
-                share_class_shares_outstanding double precision,
-                weighted_shares_outstanding double precision,
-                overview_api_request_id text,
-                overview_api_status text,
-                overview_api_count integer,
-                overview_updated_at timestamptz
-            )
-            """
-        )
-        cur.execute(
-            "ALTER TABLE ticker_overview ADD COLUMN IF NOT EXISTS ticker_suffix text"
-        )
-        cur.execute("ALTER TABLE ticker_overview ADD COLUMN IF NOT EXISTS sic_code text")
-        cur.execute(
-            "ALTER TABLE ticker_overview ADD COLUMN IF NOT EXISTS homepage_url text"
-        )
-        cur.execute(
-            "ALTER TABLE ticker_overview ADD COLUMN IF NOT EXISTS round_lot bigint"
-        )
-        cur.execute(
-            "ALTER TABLE ticker_overview ADD COLUMN IF NOT EXISTS share_class_shares_outstanding double precision"
-        )
-        cur.execute(
-            "ALTER TABLE ticker_overview ADD COLUMN IF NOT EXISTS weighted_shares_outstanding double precision"
-        )
-        cur.execute(
-            "ALTER TABLE ticker_overview ADD COLUMN IF NOT EXISTS overview_api_request_id text"
-        )
-        cur.execute(
-            "ALTER TABLE ticker_overview ADD COLUMN IF NOT EXISTS overview_api_status text"
-        )
-        cur.execute(
-            "ALTER TABLE ticker_overview ADD COLUMN IF NOT EXISTS overview_api_count integer"
-        )
+        _log_table("ticker_types", "Massive ticker instrument type codes (Trade reference)")
         cur.execute(
             """
             CREATE TABLE IF NOT EXISTS ticker_types (
@@ -901,24 +412,69 @@ def _ensure_tables(conn, log=None, log_table=None) -> None:
         cur.execute(
             "CREATE INDEX IF NOT EXISTS ticker_types_code ON ticker_types (code)"
         )
+        _log_table("ticker_related_tickers", "Related tickers by from_symbol (no FK to public.tickers)")
         cur.execute(
             """
             CREATE TABLE IF NOT EXISTS ticker_related_tickers (
                 ticker_related_tickers_id bigserial PRIMARY KEY,
-                from_tickers_id bigint NOT NULL REFERENCES tickers(tickers_id) ON DELETE CASCADE,
+                from_symbol text NOT NULL,
                 to_symbol text NOT NULL,
                 rank integer NOT NULL DEFAULT 0,
                 fetched_at timestamptz NOT NULL DEFAULT now(),
-                UNIQUE (from_tickers_id, to_symbol)
+                UNIQUE (from_symbol, to_symbol)
             )
             """
         )
+        # Existing DBs: migrate from_tickers_id FK → symbol-keyed (P9 drops public.tickers).
         cur.execute(
-            "CREATE INDEX IF NOT EXISTS ticker_related_from ON ticker_related_tickers (from_tickers_id)"
+            """
+            DO $$
+            BEGIN
+              IF EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_schema = 'public'
+                  AND table_name = 'ticker_related_tickers'
+                  AND column_name = 'from_tickers_id'
+              ) AND NOT EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_schema = 'public'
+                  AND table_name = 'ticker_related_tickers'
+                  AND column_name = 'from_symbol'
+              ) THEN
+                ALTER TABLE ticker_related_tickers ADD COLUMN from_symbol text;
+
+                IF to_regclass('public.tickers') IS NOT NULL THEN
+                  UPDATE ticker_related_tickers r
+                  SET from_symbol = t.ticker
+                  FROM tickers t
+                  WHERE t.tickers_id = r.from_tickers_id;
+                END IF;
+
+                DELETE FROM ticker_related_tickers WHERE from_symbol IS NULL;
+
+                ALTER TABLE ticker_related_tickers
+                  ALTER COLUMN from_symbol SET NOT NULL;
+
+                -- DROP COLUMN removes FK / UNIQUE / indexes that depend on from_tickers_id
+                ALTER TABLE ticker_related_tickers DROP COLUMN from_tickers_id;
+
+                ALTER TABLE ticker_related_tickers
+                  ADD CONSTRAINT ticker_related_tickers_from_symbol_to_symbol_key
+                  UNIQUE (from_symbol, to_symbol);
+
+                CREATE INDEX IF NOT EXISTS ticker_related_from
+                  ON ticker_related_tickers (from_symbol);
+              END IF;
+            END $$;
+            """
+        )
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS ticker_related_from ON ticker_related_tickers (from_symbol)"
         )
         cur.execute(
             "CREATE INDEX IF NOT EXISTS ticker_related_to_symbol ON ticker_related_tickers (to_symbol)"
         )
+        _log_table("job_ticker_reference_state", "Ticker reference sync cursors / status")
         cur.execute(
             """
             CREATE TABLE IF NOT EXISTS job_ticker_reference_state (
@@ -929,14 +485,8 @@ def _ensure_tables(conn, log=None, log_table=None) -> None:
             )
             """
         )
-        cur.execute(
-            "CREATE INDEX IF NOT EXISTS tickers_active ON tickers (active) WHERE active IS NOT NULL"
-        )
-        cur.execute(
-            "CREATE INDEX IF NOT EXISTS tickers_primary_exchange ON tickers (primary_exchange)"
-        )
-        cur.execute("CREATE INDEX IF NOT EXISTS tickers_instrument_type ON tickers (instrument_type)")
-        # One-time: migrate legacy ``stocks`` / ``stock_related_tickers`` / ``job_stock_reference_state`` → new tables.
+        # One-time: migrate legacy stocks / stock_related_tickers / job_stock_reference_state
+        # without recreating public.tickers / ticker_overview.
         cur.execute(
             """
             DO $$
@@ -944,73 +494,13 @@ def _ensure_tables(conn, log=None, log_table=None) -> None:
               IF to_regclass('public.stocks') IS NULL THEN
                 RETURN;
               END IF;
-              IF EXISTS (SELECT 1 FROM tickers LIMIT 1) THEN
-                DROP TABLE IF EXISTS stock_related_tickers CASCADE;
-                DROP TABLE IF EXISTS stocks CASCADE;
-                DROP TABLE IF EXISTS job_stock_reference_state CASCADE;
-                RETURN;
-              END IF;
-
-              INSERT INTO tickers (
-                ticker, name, market, locale, primary_exchange, instrument_type, active,
-                currency_name, currency_symbol, base_currency_name, base_currency_symbol,
-                cik, composite_figi, share_class_figi, last_updated_utc, delisted_utc,
-                created_at, updated_at
-              )
-              SELECT
-                upper(trim(symbol)),
-                name,
-                market,
-                locale,
-                primary_exchange,
-                instrument_type,
-                active,
-                currency_name,
-                NULL,
-                NULL,
-                NULL,
-                cik,
-                composite_figi,
-                share_class_figi,
-                NULL,
-                NULL,
-                COALESCE(created_at, now()),
-                COALESCE(reference_updated_at, created_at, now())
-              FROM stocks;
-
-              INSERT INTO ticker_overview (
-                tickers_id, sector, industry, exchange, list_date, ticker_root, sic_description,
-                market_cap, total_employees, address_line1, address_city, address_state, postal_code,
-                phone, description, icon_url, logo_url, overview_updated_at
-              )
-              SELECT
-                t.tickers_id,
-                '',
-                '',
-                s.exchange,
-                s.list_date,
-                s.ticker_root,
-                s.sic_description,
-                s.market_cap,
-                s.total_employees,
-                s.address_line1,
-                s.address_city,
-                s.address_state,
-                s.postal_code,
-                s.phone,
-                s.description,
-                s.icon_url,
-                s.logo_url,
-                COALESCE(s.reference_updated_at, now())
-              FROM tickers t
-              INNER JOIN stocks s ON t.ticker = upper(trim(s.symbol));
 
               IF to_regclass('public.stock_related_tickers') IS NOT NULL THEN
-                INSERT INTO ticker_related_tickers (from_tickers_id, to_symbol, rank, fetched_at)
-                SELECT t.tickers_id, r.to_symbol, r.rank, r.fetched_at
+                INSERT INTO ticker_related_tickers (from_symbol, to_symbol, rank, fetched_at)
+                SELECT upper(trim(s.symbol)), r.to_symbol, r.rank, r.fetched_at
                 FROM stock_related_tickers r
                 INNER JOIN stocks s ON s.stocks_id = r.from_stocks_id
-                INNER JOIN tickers t ON t.ticker = upper(trim(s.symbol));
+                ON CONFLICT (from_symbol, to_symbol) DO NOTHING;
               END IF;
 
               IF to_regclass('public.job_stock_reference_state') IS NOT NULL THEN
@@ -1030,961 +520,7 @@ def _ensure_tables(conn, log=None, log_table=None) -> None:
             END $$;
             """
         )
-        _log("option_day, option_min tables + indexes")
-        _log_table("option_day", "Option daily OHLC bars")
-        cur.execute("CREATE SEQUENCE IF NOT EXISTS option_day_option_day_id_seq AS bigint")
-        cur.execute(
-            """
-            CREATE TABLE IF NOT EXISTS option_day (
-                option_day_id bigint NOT NULL DEFAULT nextval('option_day_option_day_id_seq'),
-                symbol text NOT NULL,
-                expiry text NOT NULL,
-                strike double precision NOT NULL,
-                option_right text NOT NULL,
-                bar_time timestamptz NOT NULL,
-                open double precision,
-                high double precision,
-                low double precision,
-                close double precision,
-                volume double precision,
-                vwap double precision,
-                source text NOT NULL DEFAULT 'ib',
-                created_at timestamptz DEFAULT now(),
-                CONSTRAINT option_day_bar_uidx PRIMARY KEY (symbol, expiry, strike, option_right, bar_time, source)
-            ) PARTITION BY RANGE (bar_time)
-        """
-        )
-        cur.execute(
-            "ALTER SEQUENCE option_day_option_day_id_seq OWNED BY option_day.option_day_id"
-        )
-        cur.execute(
-            "CREATE INDEX IF NOT EXISTS option_day_symbol_expiry_strike_right_time ON option_day (symbol, expiry, strike, option_right, bar_time DESC)"
-        )
-        _log_table("option_min", "Option minute OHLC bars")
-        cur.execute("CREATE SEQUENCE IF NOT EXISTS option_min_option_min_id_seq AS bigint")
-        cur.execute(
-            """
-            CREATE TABLE IF NOT EXISTS option_min (
-                option_min_id bigint NOT NULL DEFAULT nextval('option_min_option_min_id_seq'),
-                symbol text NOT NULL,
-                expiry text NOT NULL,
-                strike double precision NOT NULL,
-                option_right text NOT NULL,
-                period text NOT NULL,
-                bar_time timestamptz NOT NULL,
-                open double precision,
-                high double precision,
-                low double precision,
-                close double precision,
-                volume double precision,
-                vwap double precision,
-                source text NOT NULL DEFAULT 'ib',
-                created_at timestamptz DEFAULT now(),
-                CONSTRAINT option_min_bar_uidx PRIMARY KEY (symbol, expiry, strike, option_right, period, bar_time, source)
-            ) PARTITION BY RANGE (bar_time)
-        """
-        )
-        cur.execute(
-            "ALTER SEQUENCE option_min_option_min_id_seq OWNED BY option_min.option_min_id"
-        )
-        cur.execute(
-            "CREATE INDEX IF NOT EXISTS option_min_symbol_expiry_strike_right_period_time ON option_min (symbol, expiry, strike, option_right, period, bar_time DESC)"
-        )
-        _log("option_contracts, option_snapshots")
-        _log_table("option_contracts", "Option contract definitions (contract_key)")
-        cur.execute(
-            """
-            CREATE TABLE IF NOT EXISTS option_contracts (
-                option_contracts_id bigserial PRIMARY KEY,
-                contract_key text NOT NULL UNIQUE,
-                symbol text NOT NULL,
-                expiry text NOT NULL,
-                strike double precision NOT NULL,
-                option_right text NOT NULL,
-                massive_option_ticker text,
-                exercise_style text,
-                shares_per_contract integer,
-                created_at timestamptz DEFAULT now()
-            )
-            """
-        )
-        cur.execute(
-            "CREATE INDEX IF NOT EXISTS option_contracts_contract_key ON option_contracts (contract_key)"
-        )
-        cur.execute(
-            "CREATE INDEX IF NOT EXISTS option_contracts_symbol_expiry_strike_right ON option_contracts (symbol, expiry, strike, option_right)"
-        )
-        _log_table("option_expiration_cache", "Cached option expirations per underlying (Massive REST + TTL)")
-        cur.execute(
-            """
-            CREATE TABLE IF NOT EXISTS option_expiration_cache (
-                option_expiration_cache_id bigserial PRIMARY KEY,
-                symbol text NOT NULL,
-                expiry text NOT NULL,
-                source text NOT NULL DEFAULT 'massive',
-                last_seen_at timestamptz DEFAULT now(),
-                updated_at timestamptz DEFAULT now(),
-                UNIQUE (symbol, expiry, source)
-            )
-            """
-        )
-        cur.execute(
-            "CREATE INDEX IF NOT EXISTS option_expiration_cache_symbol_updated "
-            "ON option_expiration_cache (symbol, updated_at DESC)"
-        )
-        _log_table("option_snapshots", "Option snapshot (point-in-time quote, RANGE partitioned by snapshot_ts)")
-        cur.execute(
-            """
-            DO $snap_part$
-            DECLARE
-              tbl_kind char;
-              m_start date;
-              m_end date;
-              part_name text;
-            BEGIN
-              -- Check if the table exists at all
-              SELECT relkind INTO tbl_kind FROM pg_class
-              WHERE relname = 'option_snapshots' AND relnamespace = 'public'::regnamespace;
 
-              IF tbl_kind IS NULL THEN
-                -- Fresh install: create as partitioned table directly
-                CREATE SEQUENCE IF NOT EXISTS option_snapshots_option_snapshots_id_seq;
-                CREATE TABLE option_snapshots (
-                    option_snapshots_id bigint NOT NULL DEFAULT nextval('option_snapshots_option_snapshots_id_seq'),
-                    contract_key text NOT NULL,
-                    snapshot_ts timestamptz NOT NULL,
-                    iv double precision,
-                    delta double precision,
-                    gamma double precision,
-                    theta double precision,
-                    vega double precision,
-                    open_interest integer,
-                    underlying_ticker text,
-                    day_open double precision,
-                    day_high double precision,
-                    day_low double precision,
-                    day_close double precision,
-                    day_previous_close double precision,
-                    day_change double precision,
-                    day_change_percent double precision,
-                    day_volume bigint,
-                    day_vwap double precision,
-                    day_last_updated timestamptz,
-                    day_last_updated_day date GENERATED ALWAYS AS (
-                      CASE WHEN day_last_updated IS NULL THEN NULL
-                      ELSE (timezone('America/New_York', day_last_updated))::date END
-                    ) STORED,
-                    source text NOT NULL DEFAULT 'ib',
-                    created_at timestamptz DEFAULT now(),
-                    PRIMARY KEY (contract_key, snapshot_ts)
-                ) PARTITION BY RANGE (snapshot_ts);
-                ALTER SEQUENCE option_snapshots_option_snapshots_id_seq OWNED BY option_snapshots.option_snapshots_id;
-                -- Create default partition for current month and next 3 months
-                FOR i IN 0..3 LOOP
-                  m_start := date_trunc('month', now())::date + (i || ' months')::interval;
-                  m_end   := m_start + interval '1 month';
-                  part_name := 'option_snapshots_y' || to_char(m_start, 'YYYY') || 'm' || to_char(m_start, 'MM');
-                  EXECUTE format(
-                    'CREATE TABLE IF NOT EXISTS %I PARTITION OF option_snapshots FOR VALUES FROM (%L) TO (%L)',
-                    part_name, m_start, m_end
-                  );
-                END LOOP;
-                -- Default partition for anything outside defined ranges
-                CREATE TABLE IF NOT EXISTS option_snapshots_default PARTITION OF option_snapshots DEFAULT;
-
-              ELSIF tbl_kind = 'r' THEN
-                -- Existing non-partitioned table: migrate to partitioned
-                RAISE NOTICE 'Migrating option_snapshots from heap to RANGE partition on snapshot_ts ...';
-
-                -- 0. Align legacy heap column set with current DDL (migrate_opt block runs later in _ensure_tables;
-                -- without these, INSERT ... SELECT by name fails on older DBs that only had mid + created_at.)
-                IF NOT EXISTS (
-                  SELECT 1 FROM information_schema.columns
-                  WHERE table_schema = 'public' AND table_name = 'option_snapshots' AND column_name = 'iv'
-                ) THEN
-                  ALTER TABLE option_snapshots ADD COLUMN iv double precision;
-                  ALTER TABLE option_snapshots ADD COLUMN delta double precision;
-                  ALTER TABLE option_snapshots ADD COLUMN gamma double precision;
-                  ALTER TABLE option_snapshots ADD COLUMN theta double precision;
-                  ALTER TABLE option_snapshots ADD COLUMN vega double precision;
-                  ALTER TABLE option_snapshots ADD COLUMN open_interest integer;
-                  ALTER TABLE option_snapshots ADD COLUMN source text NOT NULL DEFAULT 'ib';
-                END IF;
-                IF NOT EXISTS (
-                  SELECT 1 FROM information_schema.columns
-                  WHERE table_schema = 'public' AND table_name = 'option_snapshots' AND column_name = 'underlying_ticker'
-                ) THEN
-                  ALTER TABLE option_snapshots ADD COLUMN underlying_ticker text;
-                END IF;
-                IF NOT EXISTS (
-                  SELECT 1 FROM information_schema.columns
-                  WHERE table_schema = 'public' AND table_name = 'option_snapshots' AND column_name = 'day_open'
-                ) THEN
-                  ALTER TABLE option_snapshots ADD COLUMN day_open double precision;
-                  ALTER TABLE option_snapshots ADD COLUMN day_high double precision;
-                  ALTER TABLE option_snapshots ADD COLUMN day_low double precision;
-                  ALTER TABLE option_snapshots ADD COLUMN day_close double precision;
-                  ALTER TABLE option_snapshots ADD COLUMN day_previous_close double precision;
-                  ALTER TABLE option_snapshots ADD COLUMN day_change double precision;
-                  ALTER TABLE option_snapshots ADD COLUMN day_change_percent double precision;
-                  ALTER TABLE option_snapshots ADD COLUMN day_volume bigint;
-                  ALTER TABLE option_snapshots ADD COLUMN day_vwap double precision;
-                  ALTER TABLE option_snapshots ADD COLUMN day_last_updated timestamptz;
-                END IF;
-
-                -- 1. Create new partitioned parent
-                CREATE SEQUENCE IF NOT EXISTS option_snapshots_new_id_seq;
-                CREATE TABLE option_snapshots_new (
-                    option_snapshots_id bigint NOT NULL DEFAULT nextval('option_snapshots_new_id_seq'),
-                    contract_key text NOT NULL,
-                    snapshot_ts timestamptz NOT NULL,
-                    iv double precision,
-                    delta double precision,
-                    gamma double precision,
-                    theta double precision,
-                    vega double precision,
-                    open_interest integer,
-                    underlying_ticker text,
-                    day_open double precision,
-                    day_high double precision,
-                    day_low double precision,
-                    day_close double precision,
-                    day_previous_close double precision,
-                    day_change double precision,
-                    day_change_percent double precision,
-                    day_volume bigint,
-                    day_vwap double precision,
-                    day_last_updated timestamptz,
-                    day_last_updated_day date GENERATED ALWAYS AS (
-                      CASE WHEN day_last_updated IS NULL THEN NULL
-                      ELSE (timezone('America/New_York', day_last_updated))::date END
-                    ) STORED,
-                    source text NOT NULL DEFAULT 'ib',
-                    created_at timestamptz DEFAULT now(),
-                    PRIMARY KEY (contract_key, snapshot_ts)
-                ) PARTITION BY RANGE (snapshot_ts);
-
-                -- 2. Create monthly partitions covering existing data + future
-                SELECT date_trunc('month', COALESCE(min(snapshot_ts), now()))::date INTO m_start
-                FROM option_snapshots;
-                m_end := (date_trunc('month', now()) + interval '4 months')::date;
-
-                WHILE m_start < m_end LOOP
-                  part_name := 'option_snapshots_new_y' || to_char(m_start, 'YYYY') || 'm' || to_char(m_start, 'MM');
-                  EXECUTE format(
-                    'CREATE TABLE IF NOT EXISTS %I PARTITION OF option_snapshots_new FOR VALUES FROM (%L) TO (%L)',
-                    part_name, m_start, (m_start + interval '1 month')::date
-                  );
-                  m_start := (m_start + interval '1 month')::date;
-                END LOOP;
-                CREATE TABLE IF NOT EXISTS option_snapshots_new_default PARTITION OF option_snapshots_new DEFAULT;
-
-                -- 3. Copy data (must list columns by name: legacy heaps often had created_at before iv/greeks
-                -- from ALTER TABLE ... ADD COLUMN, so SELECT * would misalign types.)
-                INSERT INTO option_snapshots_new (
-                    option_snapshots_id,
-                    contract_key,
-                    snapshot_ts,
-                    iv,
-                    delta,
-                    gamma,
-                    theta,
-                    vega,
-                    open_interest,
-                    underlying_ticker,
-                    day_open,
-                    day_high,
-                    day_low,
-                    day_close,
-                    day_previous_close,
-                    day_change,
-                    day_change_percent,
-                    day_volume,
-                    day_vwap,
-                    day_last_updated,
-                    source,
-                    created_at
-                )
-                SELECT
-                    option_snapshots_id,
-                    contract_key,
-                    snapshot_ts,
-                    iv,
-                    delta,
-                    gamma,
-                    theta,
-                    vega,
-                    open_interest,
-                    underlying_ticker,
-                    day_open,
-                    day_high,
-                    day_low,
-                    day_close,
-                    day_previous_close,
-                    day_change,
-                    day_change_percent,
-                    day_volume,
-                    day_vwap,
-                    day_last_updated,
-                    source,
-                    created_at
-                FROM option_snapshots;
-
-                -- 4. Set sequence to continue after max id
-                PERFORM setval('option_snapshots_new_id_seq',
-                  GREATEST(
-                    (SELECT COALESCE(max(option_snapshots_id), 0) FROM option_snapshots_new),
-                    1
-                  )
-                );
-
-                -- 5. Swap tables
-                DROP MATERIALIZED VIEW IF EXISTS option_snapshots_latest;
-                ALTER TABLE option_snapshots RENAME TO option_snapshots_old;
-                ALTER TABLE option_snapshots_new RENAME TO option_snapshots;
-
-                -- Rename partitions to standard naming
-                FOR part_name IN
-                  SELECT tablename FROM pg_tables
-                  WHERE schemaname = 'public' AND tablename LIKE 'option_snapshots_new_%'
-                LOOP
-                  EXECUTE format('ALTER TABLE %I RENAME TO %I',
-                    part_name, replace(part_name, '_new_', '_'));
-                END LOOP;
-
-                -- Rename and reassign sequence
-                ALTER SEQUENCE option_snapshots_new_id_seq RENAME TO option_snapshots_option_snapshots_id_seq;
-                ALTER SEQUENCE option_snapshots_option_snapshots_id_seq OWNED BY option_snapshots.option_snapshots_id;
-                ALTER TABLE option_snapshots ALTER COLUMN option_snapshots_id SET DEFAULT nextval('option_snapshots_option_snapshots_id_seq');
-
-                -- Drop old table (data already copied)
-                DROP TABLE IF EXISTS option_snapshots_old;
-                RAISE NOTICE 'Migration complete: option_snapshots is now RANGE partitioned.';
-
-              ELSE
-                -- Already partitioned (relkind = 'p'), ensure future partitions exist
-                FOR i IN 0..3 LOOP
-                  m_start := date_trunc('month', now())::date + (i || ' months')::interval;
-                  m_end   := m_start + interval '1 month';
-                  part_name := 'option_snapshots_y' || to_char(m_start, 'YYYY') || 'm' || to_char(m_start, 'MM');
-                  IF to_regclass('public.' || part_name) IS NULL THEN
-                    EXECUTE format(
-                      'CREATE TABLE %I PARTITION OF option_snapshots FOR VALUES FROM (%L) TO (%L)',
-                      part_name, m_start, m_end
-                    );
-                  END IF;
-                END LOOP;
-              END IF;
-            END $snap_part$;
-            """
-        )
-        cur.execute(
-            """
-            DO $option_snapshots_pk$
-            DECLARE
-              dup_groups bigint;
-              old_surrogate_pk boolean;
-              pk_conname name;
-              has_natural_pk boolean;
-            BEGIN
-              IF to_regclass('public.option_snapshots') IS NULL THEN
-                RETURN;
-              END IF;
-              SELECT EXISTS (
-                SELECT 1 FROM pg_constraint c
-                WHERE c.conrelid = 'public.option_snapshots'::regclass
-                  AND c.contype = 'p'
-                  AND pg_get_constraintdef(c.oid) LIKE '%option_snapshots_id%'
-              ) INTO old_surrogate_pk;
-              IF NOT old_surrogate_pk THEN
-                RETURN;
-              END IF;
-              SELECT COUNT(*)::bigint INTO dup_groups FROM (
-                SELECT 1 FROM option_snapshots
-                GROUP BY contract_key, snapshot_ts
-                HAVING COUNT(*) > 1
-              ) d;
-              IF dup_groups > 0 THEN
-                RAISE NOTICE 'option_snapshots: duplicate (contract_key, snapshot_ts) groups exist — run scripts/db/dedupe_option_snapshots.py --apply then re-run schema refresh to migrate PRIMARY KEY to (contract_key, snapshot_ts).';
-                RETURN;
-              END IF;
-              ALTER TABLE option_snapshots DROP CONSTRAINT IF EXISTS option_snapshots_contract_snapshot_uniq;
-              SELECT c.conname INTO pk_conname
-              FROM pg_constraint c
-              WHERE c.conrelid = 'public.option_snapshots'::regclass
-                AND c.contype = 'p'
-                AND pg_get_constraintdef(c.oid) LIKE '%option_snapshots_id%'
-              LIMIT 1;
-              IF pk_conname IS NOT NULL THEN
-                EXECUTE format('ALTER TABLE option_snapshots DROP CONSTRAINT %I', pk_conname);
-              END IF;
-              SELECT EXISTS (
-                SELECT 1 FROM pg_constraint c
-                WHERE c.conrelid = 'public.option_snapshots'::regclass
-                  AND c.contype = 'p'
-                  AND pg_get_constraintdef(c.oid) LIKE '%contract_key%'
-                  AND pg_get_constraintdef(c.oid) LIKE '%snapshot_ts%'
-                  AND pg_get_constraintdef(c.oid) NOT LIKE '%option_snapshots_id%'
-              ) INTO has_natural_pk;
-              IF NOT has_natural_pk THEN
-                ALTER TABLE option_snapshots ADD CONSTRAINT option_snapshots_pkey PRIMARY KEY (contract_key, snapshot_ts);
-              END IF;
-            END $option_snapshots_pk$;
-            """
-        )
-        cur.execute("DROP INDEX IF EXISTS option_snapshots_contract_key_ts")
-
-        _log("option_snapshots_latest materialized view (created after migrate_opt when base columns exist)")
-        _log("migrate option_* tables for Massive (R-A6): source column, snapshots greeks")
-        cur.execute(
-            """
-            DO $migrate_opt$
-            BEGIN
-              IF to_regclass('public.option_day') IS NOT NULL THEN
-                IF NOT EXISTS (
-                  SELECT 1 FROM information_schema.columns
-                  WHERE table_schema = 'public' AND table_name = 'option_day' AND column_name = 'source'
-                ) THEN
-                  ALTER TABLE option_day ADD COLUMN source text NOT NULL DEFAULT 'ib';
-                END IF;
-                IF EXISTS (
-                  SELECT 1 FROM pg_constraint WHERE conname = 'option_day_symbol_expiry_strike_option_right_bar_time_key'
-                ) THEN
-                  ALTER TABLE option_day DROP CONSTRAINT option_day_symbol_expiry_strike_option_right_bar_time_key;
-                END IF;
-                IF NOT EXISTS (
-                  SELECT 1 FROM pg_constraint WHERE conname = 'option_day_bar_uidx'
-                ) THEN
-                  ALTER TABLE option_day ADD CONSTRAINT option_day_bar_uidx
-                    UNIQUE (symbol, expiry, strike, option_right, bar_time, source);
-                END IF;
-                IF NOT EXISTS (
-                  SELECT 1 FROM information_schema.columns
-                  WHERE table_schema = 'public' AND table_name = 'option_day' AND column_name = 'vwap'
-                ) THEN
-                  ALTER TABLE option_day ADD COLUMN vwap double precision;
-                END IF;
-              END IF;
-
-              IF to_regclass('public.option_min') IS NOT NULL THEN
-                IF NOT EXISTS (
-                  SELECT 1 FROM information_schema.columns
-                  WHERE table_schema = 'public' AND table_name = 'option_min' AND column_name = 'source'
-                ) THEN
-                  ALTER TABLE option_min ADD COLUMN source text NOT NULL DEFAULT 'ib';
-                END IF;
-                IF EXISTS (
-                  SELECT 1 FROM pg_constraint WHERE conname = 'option_min_symbol_expiry_strike_option_right_period_bar_time_key'
-                ) THEN
-                  ALTER TABLE option_min DROP CONSTRAINT option_min_symbol_expiry_strike_option_right_period_bar_time_key;
-                END IF;
-                IF NOT EXISTS (
-                  SELECT 1 FROM pg_constraint WHERE conname = 'option_min_bar_uidx'
-                ) THEN
-                  ALTER TABLE option_min ADD CONSTRAINT option_min_bar_uidx
-                    UNIQUE (symbol, expiry, strike, option_right, period, bar_time, source);
-                END IF;
-                IF NOT EXISTS (
-                  SELECT 1 FROM information_schema.columns
-                  WHERE table_schema = 'public' AND table_name = 'option_min' AND column_name = 'vwap'
-                ) THEN
-                  ALTER TABLE option_min ADD COLUMN vwap double precision;
-                END IF;
-              END IF;
-
-              IF to_regclass('public.option_contracts') IS NOT NULL THEN
-                IF NOT EXISTS (
-                  SELECT 1 FROM information_schema.columns
-                  WHERE table_schema = 'public' AND table_name = 'option_contracts' AND column_name = 'massive_option_ticker'
-                ) THEN
-                  ALTER TABLE option_contracts ADD COLUMN massive_option_ticker text;
-                END IF;
-                IF NOT EXISTS (
-                  SELECT 1 FROM information_schema.columns
-                  WHERE table_schema = 'public' AND table_name = 'option_contracts' AND column_name = 'exercise_style'
-                ) THEN
-                  ALTER TABLE option_contracts ADD COLUMN exercise_style text;
-                END IF;
-                IF NOT EXISTS (
-                  SELECT 1 FROM information_schema.columns
-                  WHERE table_schema = 'public' AND table_name = 'option_contracts' AND column_name = 'shares_per_contract'
-                ) THEN
-                  ALTER TABLE option_contracts ADD COLUMN shares_per_contract integer;
-                END IF;
-                IF EXISTS (
-                  SELECT 1 FROM information_schema.columns
-                  WHERE table_schema = 'public' AND table_name = 'option_contracts' AND column_name = 'cfi'
-                ) THEN
-                  ALTER TABLE option_contracts DROP COLUMN cfi;
-                END IF;
-                IF EXISTS (
-                  SELECT 1 FROM information_schema.columns
-                  WHERE table_schema = 'public' AND table_name = 'option_contracts' AND column_name = 'primary_exchange'
-                ) THEN
-                  ALTER TABLE option_contracts DROP COLUMN primary_exchange;
-                END IF;
-                IF EXISTS (
-                  SELECT 1 FROM information_schema.columns
-                  WHERE table_schema = 'public' AND table_name = 'option_contracts' AND column_name = 'updated_at'
-                ) THEN
-                  ALTER TABLE option_contracts DROP COLUMN updated_at;
-                END IF;
-              END IF;
-
-              IF to_regclass('public.option_snapshots') IS NOT NULL THEN
-                IF NOT EXISTS (
-                  SELECT 1 FROM information_schema.columns
-                  WHERE table_schema = 'public' AND table_name = 'option_snapshots' AND column_name = 'iv'
-                ) THEN
-                  ALTER TABLE option_snapshots ADD COLUMN iv double precision;
-                  ALTER TABLE option_snapshots ADD COLUMN delta double precision;
-                  ALTER TABLE option_snapshots ADD COLUMN gamma double precision;
-                  ALTER TABLE option_snapshots ADD COLUMN theta double precision;
-                  ALTER TABLE option_snapshots ADD COLUMN vega double precision;
-                  ALTER TABLE option_snapshots ADD COLUMN open_interest integer;
-                  ALTER TABLE option_snapshots ADD COLUMN source text NOT NULL DEFAULT 'ib';
-                END IF;
-                IF NOT EXISTS (
-                  SELECT 1 FROM information_schema.columns
-                  WHERE table_schema = 'public' AND table_name = 'option_snapshots' AND column_name = 'underlying_ticker'
-                ) THEN
-                  ALTER TABLE option_snapshots ADD COLUMN underlying_ticker text;
-                END IF;
-                IF NOT EXISTS (
-                  SELECT 1 FROM information_schema.columns
-                  WHERE table_schema = 'public' AND table_name = 'option_snapshots' AND column_name = 'day_open'
-                ) THEN
-                  ALTER TABLE option_snapshots ADD COLUMN day_open double precision;
-                  ALTER TABLE option_snapshots ADD COLUMN day_high double precision;
-                  ALTER TABLE option_snapshots ADD COLUMN day_low double precision;
-                  ALTER TABLE option_snapshots ADD COLUMN day_close double precision;
-                  ALTER TABLE option_snapshots ADD COLUMN day_previous_close double precision;
-                  ALTER TABLE option_snapshots ADD COLUMN day_change double precision;
-                  ALTER TABLE option_snapshots ADD COLUMN day_change_percent double precision;
-                  ALTER TABLE option_snapshots ADD COLUMN day_volume bigint;
-                  ALTER TABLE option_snapshots ADD COLUMN day_vwap double precision;
-                  ALTER TABLE option_snapshots ADD COLUMN day_last_updated timestamptz;
-                END IF;
-              END IF;
-
-              -- option_snapshots: generated day_last_updated_day, drop legacy quote/FMV columns, view + MV
-              IF to_regclass('public.option_snapshots') IS NOT NULL
-                 AND to_regclass('public.stock_day') IS NOT NULL THEN
-                IF EXISTS (
-                    SELECT 1 FROM information_schema.columns
-                    WHERE table_schema = 'public' AND table_name = 'option_snapshots' AND column_name = 'last'
-                  )
-                  OR NOT EXISTS (
-                    SELECT 1 FROM information_schema.columns
-                    WHERE table_schema = 'public' AND table_name = 'option_snapshots'
-                      AND column_name = 'day_last_updated_day'
-                  )
-                  OR NOT EXISTS (
-                    SELECT 1 FROM pg_matviews
-                    WHERE schemaname = 'public' AND matviewname = 'option_snapshots_latest'
-                  )
-                  OR EXISTS (
-                    SELECT 1 FROM information_schema.columns
-                    WHERE table_schema = 'public' AND table_name = 'option_snapshots_latest' AND column_name = 'last'
-                  )
-                  OR NOT EXISTS (
-                    SELECT 1 FROM information_schema.columns
-                    WHERE table_schema = 'public' AND table_name = 'option_snapshots_latest'
-                      AND column_name = 'day_last_updated_day'
-                  ) THEN
-                  DROP MATERIALIZED VIEW IF EXISTS option_snapshots_latest;
-                END IF;
-                IF NOT EXISTS (
-                  SELECT 1 FROM information_schema.columns
-                  WHERE table_schema = 'public' AND table_name = 'option_snapshots'
-                    AND column_name = 'day_last_updated_day'
-                ) THEN
-                  ALTER TABLE option_snapshots ADD COLUMN day_last_updated_day date
-                    GENERATED ALWAYS AS (
-                      CASE WHEN day_last_updated IS NULL THEN NULL
-                      ELSE (timezone('America/New_York', day_last_updated))::date END
-                    ) STORED;
-                END IF;
-                IF EXISTS (
-                  SELECT 1 FROM information_schema.columns
-                  WHERE table_schema = 'public' AND table_name = 'option_snapshots' AND column_name = 'last'
-                ) THEN
-                  ALTER TABLE option_snapshots DROP COLUMN last;
-                END IF;
-                IF EXISTS (
-                  SELECT 1 FROM information_schema.columns
-                  WHERE table_schema = 'public' AND table_name = 'option_snapshots' AND column_name = 'bid'
-                ) THEN
-                  ALTER TABLE option_snapshots DROP COLUMN bid;
-                END IF;
-                IF EXISTS (
-                  SELECT 1 FROM information_schema.columns
-                  WHERE table_schema = 'public' AND table_name = 'option_snapshots' AND column_name = 'ask'
-                ) THEN
-                  ALTER TABLE option_snapshots DROP COLUMN ask;
-                END IF;
-                IF EXISTS (
-                  SELECT 1 FROM information_schema.columns
-                  WHERE table_schema = 'public' AND table_name = 'option_snapshots' AND column_name = 'mid'
-                ) THEN
-                  ALTER TABLE option_snapshots DROP COLUMN mid;
-                END IF;
-                IF EXISTS (
-                  SELECT 1 FROM information_schema.columns
-                  WHERE table_schema = 'public' AND table_name = 'option_snapshots' AND column_name = 'underlying_price'
-                ) THEN
-                  ALTER TABLE option_snapshots DROP COLUMN underlying_price;
-                END IF;
-                IF EXISTS (
-                  SELECT 1 FROM information_schema.columns
-                  WHERE table_schema = 'public' AND table_name = 'option_snapshots' AND column_name = 'break_even_price'
-                ) THEN
-                  ALTER TABLE option_snapshots DROP COLUMN break_even_price;
-                END IF;
-                IF EXISTS (
-                  SELECT 1 FROM information_schema.columns
-                  WHERE table_schema = 'public' AND table_name = 'option_snapshots' AND column_name = 'fmv'
-                ) THEN
-                  ALTER TABLE option_snapshots DROP COLUMN fmv;
-                END IF;
-                IF EXISTS (
-                  SELECT 1 FROM information_schema.columns
-                  WHERE table_schema = 'public' AND table_name = 'option_snapshots' AND column_name = 'fmv_last_updated'
-                ) THEN
-                  ALTER TABLE option_snapshots DROP COLUMN fmv_last_updated;
-                END IF;
-                EXECUTE $v_os_ud$
-                  CREATE OR REPLACE VIEW option_snapshots_with_underlying_day AS
-                  SELECT
-                    os.option_snapshots_id,
-                    os.contract_key,
-                    os.snapshot_ts,
-                    os.iv,
-                    os.delta,
-                    os.gamma,
-                    os.theta,
-                    os.vega,
-                    os.open_interest,
-                    os.underlying_ticker,
-                    os.day_open,
-                    os.day_high,
-                    os.day_low,
-                    os.day_close,
-                    os.day_previous_close,
-                    os.day_change,
-                    os.day_change_percent,
-                    os.day_volume,
-                    os.day_vwap,
-                    os.day_last_updated,
-                    os.day_last_updated_day,
-                    os.source,
-                    os.created_at,
-                    sd.open AS u_open,
-                    sd.high AS u_high,
-                    sd.low AS u_low,
-                    sd.close AS underlying_price,
-                    sd.volume AS u_volume,
-                    sd.vwap AS u_vwap
-                  FROM public.option_snapshots os
-                  LEFT JOIN public.stock_day sd
-                    ON sd.source = 'massive'
-                   AND sd.symbol = upper(trim(os.underlying_ticker))
-                   AND sd.bar_time = os.day_last_updated_day
-                $v_os_ud$;
-                IF NOT EXISTS (
-                    SELECT 1 FROM pg_matviews
-                    WHERE schemaname = 'public' AND matviewname = 'option_snapshots_latest'
-                  ) THEN
-                  EXECUTE $mvos$
-                    CREATE MATERIALIZED VIEW option_snapshots_latest AS
-                    SELECT DISTINCT ON (contract_key)
-                      contract_key, snapshot_ts,
-                      iv, delta, gamma, theta, vega, open_interest,
-                      underlying_ticker,
-                      day_open, day_high, day_low, day_close,
-                      day_previous_close, day_change, day_change_percent,
-                      day_volume, day_vwap, day_last_updated,
-                      day_last_updated_day,
-                      source, created_at
-                    FROM option_snapshots
-                    ORDER BY contract_key, snapshot_ts DESC
-                  $mvos$;
-                  CREATE UNIQUE INDEX IF NOT EXISTS option_snapshots_latest_ck
-                    ON option_snapshots_latest (contract_key);
-                END IF;
-                CREATE INDEX IF NOT EXISTS option_snapshots_underlying_ticker_day
-                  ON option_snapshots (underlying_ticker, day_last_updated_day);
-              END IF;
-            END
-            $migrate_opt$;
-            """
-        )
-        cur.execute(
-            """
-            DO $option_day_part$
-            DECLARE
-              rk char;
-              m_start date;
-              m_end date;
-              part_name text;
-              r record;
-              min_bt timestamptz;
-              max_bt timestamptz;
-              mx bigint;
-            BEGIN
-              SELECT c.relkind INTO rk FROM pg_class c
-              JOIN pg_namespace n ON n.oid = c.relnamespace
-              WHERE n.nspname = 'public' AND c.relname = 'option_day';
-              IF rk IS NULL THEN
-                RETURN;
-              END IF;
-
-              IF rk = 'p' THEN
-                SELECT date_trunc('month', COALESCE((SELECT MIN(bar_time) FROM public.option_day), now()))::date
-                  INTO m_start;
-                max_bt := COALESCE((SELECT MAX(bar_time) FROM public.option_day), now());
-                m_end := (date_trunc('month', GREATEST(max_bt, now()))::date + interval '4 months')::date;
-                WHILE m_start < m_end LOOP
-                  part_name := 'option_day_y' || to_char(m_start, 'YYYY') || 'm' || to_char(m_start, 'MM');
-                  IF to_regclass('public.' || part_name) IS NULL THEN
-                    EXECUTE format(
-                      'CREATE TABLE %I PARTITION OF public.option_day FOR VALUES FROM (%L) TO (%L)',
-                      part_name, m_start, (m_start + interval '1 month')::date
-                    );
-                  END IF;
-                  m_start := (m_start + interval '1 month')::date;
-                END LOOP;
-                IF to_regclass('public.option_day_default') IS NULL THEN
-                  CREATE TABLE option_day_default PARTITION OF public.option_day DEFAULT;
-                END IF;
-                RETURN;
-              END IF;
-
-              RAISE NOTICE 'Migrating option_day heap to RANGE partitions on bar_time ...';
-
-              DELETE FROM public.option_day od
-              WHERE EXISTS (
-                SELECT 1 FROM public.option_day od2
-                WHERE od2.symbol = od.symbol
-                  AND od2.expiry = od.expiry
-                  AND od2.strike = od.strike
-                  AND od2.option_right = od.option_right
-                  AND od2.bar_time = od.bar_time
-                  AND od2.source = od.source
-                  AND od2.option_day_id < od.option_day_id
-              );
-
-              CREATE TABLE option_day_new (
-                option_day_id bigint NOT NULL DEFAULT nextval('option_day_option_day_id_seq'),
-                symbol text NOT NULL,
-                expiry text NOT NULL,
-                strike double precision NOT NULL,
-                option_right text NOT NULL,
-                bar_time timestamptz NOT NULL,
-                open double precision,
-                high double precision,
-                low double precision,
-                close double precision,
-                volume double precision,
-                vwap double precision,
-                source text NOT NULL DEFAULT 'ib',
-                created_at timestamptz DEFAULT now(),
-                CONSTRAINT option_day_mig_pkey PRIMARY KEY (symbol, expiry, strike, option_right, bar_time, source)
-              ) PARTITION BY RANGE (bar_time);
-
-              SELECT MIN(bar_time), MAX(bar_time) INTO min_bt, max_bt FROM public.option_day;
-              m_start := date_trunc('month', COALESCE(min_bt, now()))::date;
-              IF max_bt IS NULL THEN
-                max_bt := COALESCE(min_bt, now());
-              END IF;
-              m_end := (date_trunc('month', GREATEST(max_bt, now()))::date + interval '4 months')::date;
-              WHILE m_start < m_end LOOP
-                part_name := 'option_day_new_y' || to_char(m_start, 'YYYY') || 'm' || to_char(m_start, 'MM');
-                EXECUTE format(
-                  'CREATE TABLE %I PARTITION OF option_day_new FOR VALUES FROM (%L) TO (%L)',
-                  part_name, m_start, (m_start + interval '1 month')::date
-                );
-                m_start := (m_start + interval '1 month')::date;
-              END LOOP;
-              CREATE TABLE option_day_new_default PARTITION OF option_day_new DEFAULT;
-
-              INSERT INTO option_day_new (
-                option_day_id, symbol, expiry, strike, option_right, bar_time,
-                open, high, low, close, volume, vwap, source, created_at
-              )
-              SELECT
-                option_day_id, symbol, expiry, strike, option_right, bar_time,
-                open, high, low, close, volume, vwap, source, created_at
-              FROM public.option_day;
-
-              SELECT COALESCE(MAX(option_day_id), 1) INTO mx FROM option_day_new;
-              PERFORM setval('option_day_option_day_id_seq', GREATEST(mx, 1));
-
-              ALTER SEQUENCE option_day_option_day_id_seq OWNED BY NONE;
-              DROP TABLE public.option_day;
-              ALTER TABLE option_day_new RENAME TO option_day;
-              ALTER SEQUENCE option_day_option_day_id_seq OWNED BY option_day.option_day_id;
-              ALTER TABLE public.option_day
-                ALTER COLUMN option_day_id SET DEFAULT nextval('option_day_option_day_id_seq');
-
-              FOR r IN
-                SELECT c.relname AS tname FROM pg_class c
-                JOIN pg_namespace n ON n.oid = c.relnamespace
-                WHERE n.nspname = 'public' AND c.relname LIKE 'option_day_new_y%'
-              LOOP
-                EXECUTE format(
-                  'ALTER TABLE %I RENAME TO %I',
-                  r.tname,
-                  replace(r.tname, 'option_day_new_', 'option_day_')
-                );
-              END LOOP;
-              IF to_regclass('public.option_day_new_default') IS NOT NULL THEN
-                ALTER TABLE option_day_new_default RENAME TO option_day_default;
-              END IF;
-
-              ALTER TABLE public.option_day RENAME CONSTRAINT option_day_mig_pkey TO option_day_bar_uidx;
-
-              CREATE INDEX IF NOT EXISTS option_day_symbol_expiry_strike_right_time
-                ON public.option_day (symbol, expiry, strike, option_right, bar_time DESC);
-              RAISE NOTICE 'option_day: RANGE partition migration complete.';
-            END
-            $option_day_part$;
-            """
-        )
-        cur.execute(
-            """
-            DO $option_min_part$
-            DECLARE
-              rk char;
-              m_start date;
-              m_end date;
-              part_name text;
-              r record;
-              min_bt timestamptz;
-              max_bt timestamptz;
-              mx bigint;
-            BEGIN
-              SELECT c.relkind INTO rk FROM pg_class c
-              JOIN pg_namespace n ON n.oid = c.relnamespace
-              WHERE n.nspname = 'public' AND c.relname = 'option_min';
-              IF rk IS NULL THEN
-                RETURN;
-              END IF;
-
-              IF rk = 'p' THEN
-                SELECT date_trunc('month', COALESCE((SELECT MIN(bar_time) FROM public.option_min), now()))::date
-                  INTO m_start;
-                max_bt := COALESCE((SELECT MAX(bar_time) FROM public.option_min), now());
-                m_end := (date_trunc('month', GREATEST(max_bt, now()))::date + interval '4 months')::date;
-                WHILE m_start < m_end LOOP
-                  part_name := 'option_min_y' || to_char(m_start, 'YYYY') || 'm' || to_char(m_start, 'MM');
-                  IF to_regclass('public.' || part_name) IS NULL THEN
-                    EXECUTE format(
-                      'CREATE TABLE %I PARTITION OF public.option_min FOR VALUES FROM (%L) TO (%L)',
-                      part_name, m_start, (m_start + interval '1 month')::date
-                    );
-                  END IF;
-                  m_start := (m_start + interval '1 month')::date;
-                END LOOP;
-                IF to_regclass('public.option_min_default') IS NULL THEN
-                  CREATE TABLE option_min_default PARTITION OF public.option_min DEFAULT;
-                END IF;
-                RETURN;
-              END IF;
-
-              RAISE NOTICE 'Migrating option_min heap to RANGE partitions on bar_time ...';
-
-              DELETE FROM public.option_min om
-              WHERE EXISTS (
-                SELECT 1 FROM public.option_min om2
-                WHERE om2.symbol = om.symbol
-                  AND om2.expiry = om.expiry
-                  AND om2.strike = om.strike
-                  AND om2.option_right = om.option_right
-                  AND om2.period = om.period
-                  AND om2.bar_time = om.bar_time
-                  AND om2.source = om.source
-                  AND om2.option_min_id < om.option_min_id
-              );
-
-              CREATE TABLE option_min_new (
-                option_min_id bigint NOT NULL DEFAULT nextval('option_min_option_min_id_seq'),
-                symbol text NOT NULL,
-                expiry text NOT NULL,
-                strike double precision NOT NULL,
-                option_right text NOT NULL,
-                period text NOT NULL,
-                bar_time timestamptz NOT NULL,
-                open double precision,
-                high double precision,
-                low double precision,
-                close double precision,
-                volume double precision,
-                vwap double precision,
-                source text NOT NULL DEFAULT 'ib',
-                created_at timestamptz DEFAULT now(),
-                CONSTRAINT option_min_mig_pkey PRIMARY KEY (symbol, expiry, strike, option_right, period, bar_time, source)
-              ) PARTITION BY RANGE (bar_time);
-
-              SELECT MIN(bar_time), MAX(bar_time) INTO min_bt, max_bt FROM public.option_min;
-              m_start := date_trunc('month', COALESCE(min_bt, now()))::date;
-              IF max_bt IS NULL THEN
-                max_bt := COALESCE(min_bt, now());
-              END IF;
-              m_end := (date_trunc('month', GREATEST(max_bt, now()))::date + interval '4 months')::date;
-              WHILE m_start < m_end LOOP
-                part_name := 'option_min_new_y' || to_char(m_start, 'YYYY') || 'm' || to_char(m_start, 'MM');
-                EXECUTE format(
-                  'CREATE TABLE %I PARTITION OF option_min_new FOR VALUES FROM (%L) TO (%L)',
-                  part_name, m_start, (m_start + interval '1 month')::date
-                );
-                m_start := (m_start + interval '1 month')::date;
-              END LOOP;
-              CREATE TABLE option_min_new_default PARTITION OF option_min_new DEFAULT;
-
-              INSERT INTO option_min_new (
-                option_min_id, symbol, expiry, strike, option_right, period, bar_time,
-                open, high, low, close, volume, vwap, source, created_at
-              )
-              SELECT
-                option_min_id, symbol, expiry, strike, option_right, period, bar_time,
-                open, high, low, close, volume, vwap, source, created_at
-              FROM public.option_min;
-
-              SELECT COALESCE(MAX(option_min_id), 1) INTO mx FROM option_min_new;
-              PERFORM setval('option_min_option_min_id_seq', GREATEST(mx, 1));
-
-              ALTER SEQUENCE option_min_option_min_id_seq OWNED BY NONE;
-              DROP TABLE public.option_min;
-              ALTER TABLE option_min_new RENAME TO option_min;
-              ALTER SEQUENCE option_min_option_min_id_seq OWNED BY option_min.option_min_id;
-              ALTER TABLE public.option_min
-                ALTER COLUMN option_min_id SET DEFAULT nextval('option_min_option_min_id_seq');
-
-              FOR r IN
-                SELECT c.relname AS tname FROM pg_class c
-                JOIN pg_namespace n ON n.oid = c.relnamespace
-                WHERE n.nspname = 'public' AND c.relname LIKE 'option_min_new_y%'
-              LOOP
-                EXECUTE format(
-                  'ALTER TABLE %I RENAME TO %I',
-                  r.tname,
-                  replace(r.tname, 'option_min_new_', 'option_min_')
-                );
-              END LOOP;
-              IF to_regclass('public.option_min_new_default') IS NOT NULL THEN
-                ALTER TABLE option_min_new_default RENAME TO option_min_default;
-              END IF;
-
-              ALTER TABLE public.option_min RENAME CONSTRAINT option_min_mig_pkey TO option_min_bar_uidx;
-
-              CREATE INDEX IF NOT EXISTS option_min_symbol_expiry_strike_right_period_time
-                ON public.option_min (symbol, expiry, strike, option_right, period, bar_time DESC);
-              RAISE NOTICE 'option_min: RANGE partition migration complete.';
-            END
-            $option_min_part$;
-            """
-        )
         conn.commit()
         _log("preference_position_categories, preference_position_category_tags")
         _log_table(
@@ -2535,47 +1071,6 @@ def _ensure_tables(conn, log=None, log_table=None) -> None:
             "CREATE INDEX IF NOT EXISTS job_bars_backfill_status_created ON job_bars_backfill (status, created_at)"
         )
 
-        _log("job_massive_backfill, option_open_interest_daily, option_trades, massive_corporate_action (R-A6)")
-        _log_table("job_massive_backfill", "Massive async sync job queue")
-        cur.execute(
-            """
-            CREATE TABLE IF NOT EXISTS job_massive_backfill (
-                job_massive_backfill_id bigserial PRIMARY KEY,
-                kind text NOT NULL,
-                payload jsonb NOT NULL DEFAULT '{}'::jsonb,
-                status text NOT NULL DEFAULT 'pending',
-                result jsonb,
-                celery_task_id text,
-                created_at timestamptz DEFAULT now(),
-                updated_at timestamptz DEFAULT now()
-            )
-            """
-        )
-        cur.execute(
-            "CREATE INDEX IF NOT EXISTS job_massive_backfill_status_created ON job_massive_backfill (status, created_at)"
-        )
-        cur.execute(
-            """
-            DO $jmb_hash$
-            BEGIN
-              IF to_regclass('public.job_massive_backfill') IS NOT NULL THEN
-                IF NOT EXISTS (
-                  SELECT 1 FROM information_schema.columns
-                  WHERE table_schema = 'public' AND table_name = 'job_massive_backfill' AND column_name = 'payload_hash'
-                ) THEN
-                  ALTER TABLE job_massive_backfill ADD COLUMN payload_hash text;
-                END IF;
-              END IF;
-            END $jmb_hash$;
-            """
-        )
-        cur.execute(
-            """
-            CREATE UNIQUE INDEX IF NOT EXISTS job_massive_backfill_dedup
-            ON job_massive_backfill (kind, payload_hash)
-            WHERE status IN ('pending', 'running') AND payload_hash IS NOT NULL
-            """
-        )
         _log_table("job_sepa_phase4", "SEPA Phase4 async screening job queue")
         cur.execute(
             """
@@ -2613,7 +1108,7 @@ def _ensure_tables(conn, log=None, log_table=None) -> None:
             CREATE TABLE IF NOT EXISTS public.stock_readiness_daily (
                 as_of_date date NOT NULL,
                 symbol text NOT NULL,
-                tickers_id bigint NULL REFERENCES public.tickers (tickers_id) ON DELETE SET NULL,
+                tickers_id bigint NULL,
                 universe_rule_version text NOT NULL DEFAULT 'v1',
                 price_source text NOT NULL DEFAULT 'massive',
                 included_in_universe boolean NOT NULL DEFAULT false,
@@ -2649,6 +1144,22 @@ def _ensure_tables(conn, log=None, log_table=None) -> None:
                 technical_eval          jsonb NULL,
                 PRIMARY KEY (as_of_date, symbol, universe_rule_version, price_source)
             )
+            """
+        )
+        # Drop obsolete FK to public.tickers if present (market-data owns tickers now).
+        cur.execute(
+            """
+            DO $srd_fk$
+            BEGIN
+              IF EXISTS (
+                SELECT 1 FROM pg_constraint
+                WHERE conname = 'stock_readiness_daily_tickers_id_fkey'
+              ) THEN
+                ALTER TABLE public.stock_readiness_daily
+                  DROP CONSTRAINT stock_readiness_daily_tickers_id_fkey;
+              END IF;
+            END
+            $srd_fk$;
             """
         )
         # ADD COLUMN patches for tables already renamed from the old schema
@@ -2785,467 +1296,92 @@ def _ensure_tables(conn, log=None, log_table=None) -> None:
             ON public.cache_stock_snapshot (fetched_at DESC)
             """
         )
-
-        # --- Massive Stocks Fundamentals v1 (flat REST) — SEPA Data Ready Steps 4–9 ---
+        # P9: Trade-facing SEPA/universe views read market.* (public.tickers / stock_day dropped).
+        # Created only when market schema tables exist (plugin DDL applied first).
         _log_table(
-            "stock_income_statements",
-            "Massive GET /stocks/financials/v1/income-statements (quarterly/annual/ttm)",
+            "v_us_equity_universe",
+            "View: US common-stock universe from market.ticker (compat shape for SEPA)",
         )
         cur.execute(
             """
-            CREATE TABLE IF NOT EXISTS public.stock_income_statements (
-                symbol text NOT NULL,
-                timeframe text NOT NULL,
-                period_end date NOT NULL,
-                filing_date date NULL,
-                fiscal_year integer NOT NULL,
-                fiscal_quarter integer NOT NULL DEFAULT 0,
-                basic_earnings_per_share double precision NULL,
-                diluted_earnings_per_share double precision NULL,
-                revenue double precision NULL,
-                basic_shares_outstanding double precision NULL,
-                diluted_shares_outstanding double precision NULL,
-                consolidated_net_income_loss double precision NULL,
-                cost_of_revenue double precision NULL,
-                gross_profit double precision NULL,
-                operating_income double precision NULL,
-                total_operating_expenses double precision NULL,
-                selling_general_administrative double precision NULL,
-                research_development double precision NULL,
-                depreciation_depletion_amortization double precision NULL,
-                ebitda double precision NULL,
-                interest_income double precision NULL,
-                interest_expense double precision NULL,
-                other_income_expense double precision NULL,
-                total_other_income_expense double precision NULL,
-                income_before_income_taxes double precision NULL,
-                income_taxes double precision NULL,
-                net_income_loss_attributable_common_shareholders double precision NULL,
-                noncontrolling_interest double precision NULL,
-                discontinued_operations double precision NULL,
-                extraordinary_items double precision NULL,
-                equity_in_affiliates double precision NULL,
-                preferred_stock_dividends_declared double precision NULL,
-                other_operating_expenses double precision NULL,
-                tickers jsonb NULL,
-                cik text NULL,
-                source text NOT NULL DEFAULT 'massive',
-                fetched_at timestamptz NOT NULL DEFAULT now(),
-                PRIMARY KEY (symbol, timeframe, period_end, source)
-            )
-            """
-        )
-        cur.execute(
-            """
-            ALTER TABLE public.stock_income_statements
-            ADD COLUMN IF NOT EXISTS tickers jsonb NULL
-            """
-        )
-        cur.execute(
-            """
-            CREATE INDEX IF NOT EXISTS idx_stock_income_sym_tf
-            ON public.stock_income_statements (symbol, timeframe, source)
-            """
-        )
-
-        _log_table(
-            "stock_balance_sheets",
-            "Massive GET /stocks/financials/v1/balance-sheets",
-        )
-        cur.execute(
-            """
-            CREATE TABLE IF NOT EXISTS public.stock_balance_sheets (
-                symbol text NOT NULL,
-                timeframe text NOT NULL,
-                period_end date NOT NULL,
-                filing_date date NULL,
-                fiscal_year integer NOT NULL,
-                fiscal_quarter integer NOT NULL DEFAULT 0,
-                accounts_payable double precision NULL,
-                accrued_and_other_current_liabilities double precision NULL,
-                accumulated_other_comprehensive_income double precision NULL,
-                additional_paid_in_capital double precision NULL,
-                cash_and_equivalents double precision NULL,
-                cik text NULL,
-                commitments_and_contingencies double precision NULL,
-                common_stock double precision NULL,
-                debt_current double precision NULL,
-                deferred_revenue_current double precision NULL,
-                goodwill double precision NULL,
-                intangible_assets_net double precision NULL,
-                inventories double precision NULL,
-                long_term_debt_and_capital_lease_obligations double precision NULL,
-                noncontrolling_interest double precision NULL,
-                other_assets double precision NULL,
-                other_current_assets double precision NULL,
-                other_equity double precision NULL,
-                other_noncurrent_liabilities double precision NULL,
-                preferred_stock double precision NULL,
-                property_plant_equipment_net double precision NULL,
-                receivables double precision NULL,
-                retained_earnings_deficit double precision NULL,
-                short_term_investments double precision NULL,
-                total_assets double precision NULL,
-                total_current_assets double precision NULL,
-                total_current_liabilities double precision NULL,
-                total_equity double precision NULL,
-                total_equity_attributable_to_parent double precision NULL,
-                total_liabilities double precision NULL,
-                total_liabilities_and_equity double precision NULL,
-                treasury_stock double precision NULL,
-                source text NOT NULL DEFAULT 'massive',
-                fetched_at timestamptz NOT NULL DEFAULT now(),
-                PRIMARY KEY (symbol, timeframe, period_end, source)
-            )
-            """
-        )
-        cur.execute(
-            """
-            CREATE INDEX IF NOT EXISTS idx_stock_balance_sym_tf
-            ON public.stock_balance_sheets (symbol, timeframe, source)
-            """
-        )
-
-        _log_table(
-            "stock_cash_flows",
-            "Massive GET /stocks/financials/v1/cash-flow-statements",
-        )
-        # Column names match Massive results[] (flat floats). Drop mismatched layouts so INSERT stays aligned.
-        cur.execute(
-            """
-            DO $stock_cf_migrate$
+            DO $univ$
             BEGIN
-              IF to_regclass('public.stock_cash_flows') IS NOT NULL THEN
-                IF EXISTS (
-                  SELECT 1 FROM information_schema.columns
-                  WHERE table_schema = 'public' AND table_name = 'stock_cash_flows'
-                    AND column_name IN (
-                      'net_cash_flow_from_operating_activities',
-                      'net_cash_flow_from_investing_activities',
-                      'net_cash_flow_from_financing_activities',
-                      'net_change_in_cash_and_equivalents',
-                      'capital_expenditure',
-                      'free_cash_flow',
-                      'depreciation_and_amortization'
-                    )
-                )
-                OR NOT EXISTS (
-                  SELECT 1 FROM information_schema.columns
-                  WHERE table_schema = 'public' AND table_name = 'stock_cash_flows'
-                    AND column_name = 'change_in_cash_and_equivalents'
-                )
-                OR NOT EXISTS (
-                  SELECT 1 FROM information_schema.columns
-                  WHERE table_schema = 'public' AND table_name = 'stock_cash_flows'
-                    AND column_name = 'purchase_of_property_plant_and_equipment'
-                )
-                THEN
-                  DROP TABLE public.stock_cash_flows CASCADE;
-                END IF;
+              IF to_regclass('market.ticker') IS NOT NULL THEN
+                EXECUTE $sql$
+                CREATE OR REPLACE VIEW public.v_us_equity_universe AS
+                SELECT
+                    NULL::bigint AS tickers_id,
+                    upper(trim(t.symbol)) AS symbol,
+                    t.name,
+                    t.market,
+                    t.locale,
+                    t.primary_exchange,
+                    t.instrument_type,
+                    t.active,
+                    NULL::timestamptz AS delisted_utc,
+                    t.list_date,
+                    t.sector,
+                    t.industry
+                FROM market.ticker t
+                WHERE COALESCE(t.active, false) = true
+                  AND lower(COALESCE(t.locale, '')) = 'us'
+                  AND lower(COALESCE(t.market, '')) = 'stocks'
+                  AND lower(COALESCE(t.instrument_type, '')) = 'cs'
+                $sql$;
+                EXECUTE 'CREATE OR REPLACE VIEW public.v_sepa_us_equity_universe AS SELECT * FROM public.v_us_equity_universe';
               END IF;
             END
-            $stock_cf_migrate$;
+            $univ$
             """
         )
-        cur.execute(
-            """
-            CREATE TABLE IF NOT EXISTS public.stock_cash_flows (
-                symbol text NOT NULL,
-                timeframe text NOT NULL,
-                period_end date NOT NULL,
-                filing_date date NULL,
-                fiscal_year integer NOT NULL,
-                fiscal_quarter integer NOT NULL DEFAULT 0,
-                cik text NULL,
-                cash_from_operating_activities_continuing_operations double precision NULL,
-                change_in_cash_and_equivalents double precision NULL,
-                change_in_other_operating_assets_and_liabilities_net double precision NULL,
-                depreciation_depletion_and_amortization double precision NULL,
-                dividends double precision NULL,
-                effect_of_currency_exchange_rate double precision NULL,
-                income_loss_from_discontinued_operations double precision NULL,
-                long_term_debt_issuances_repayments double precision NULL,
-                net_cash_from_financing_activities double precision NULL,
-                net_cash_from_financing_activities_continuing_operations double precision NULL,
-                net_cash_from_financing_activities_discontinued_operations double precision NULL,
-                net_cash_from_investing_activities double precision NULL,
-                net_cash_from_investing_activities_continuing_operations double precision NULL,
-                net_cash_from_investing_activities_discontinued_operations double precision NULL,
-                net_cash_from_operating_activities double precision NULL,
-                net_cash_from_operating_activities_discontinued_operations double precision NULL,
-                net_income double precision NULL,
-                noncontrolling_interests double precision NULL,
-                other_cash_adjustments double precision NULL,
-                other_financing_activities double precision NULL,
-                other_investing_activities double precision NULL,
-                other_operating_activities double precision NULL,
-                purchase_of_property_plant_and_equipment double precision NULL,
-                sale_of_property_plant_and_equipment double precision NULL,
-                short_term_debt_issuances_repayments double precision NULL,
-                source text NOT NULL DEFAULT 'massive',
-                fetched_at timestamptz NOT NULL DEFAULT now(),
-                PRIMARY KEY (symbol, timeframe, period_end, source)
-            )
-            """
-        )
-        cur.execute(
-            """
-            CREATE INDEX IF NOT EXISTS idx_stock_cashflow_sym_tf
-            ON public.stock_cash_flows (symbol, timeframe, source)
-            """
-        )
-
-        _log_table(
-            "stock_ratios",
-            "Massive GET /stocks/financials/v1/ratios (TTM ratios per trading date)",
-        )
-        cur.execute(
-            """
-            DO $stock_ratios_migrate$
-            BEGIN
-              IF to_regclass('public.stock_ratios') IS NOT NULL THEN
-                IF EXISTS (
-                  SELECT 1 FROM information_schema.columns
-                  WHERE table_schema = 'public' AND table_name = 'stock_ratios'
-                    AND column_name IN ('timeframe', 'period_end', 'current_ratio', 'gross_margin')
-                )
-                OR NOT EXISTS (
-                  SELECT 1 FROM information_schema.columns
-                  WHERE table_schema = 'public' AND table_name = 'stock_ratios'
-                    AND column_name = 'average_volume'
-                )
-                THEN
-                  DROP TABLE public.stock_ratios CASCADE;
-                END IF;
-              END IF;
-            END
-            $stock_ratios_migrate$;
-            """
-        )
-        cur.execute(
-            """
-            CREATE TABLE IF NOT EXISTS public.stock_ratios (
-                symbol text NOT NULL,
-                date date NOT NULL,
-                average_volume double precision NULL,
-                cash double precision NULL,
-                cik text NULL,
-                "current" double precision NULL,
-                debt_to_equity double precision NULL,
-                dividend_yield double precision NULL,
-                earnings_per_share double precision NULL,
-                enterprise_value double precision NULL,
-                ev_to_ebitda double precision NULL,
-                ev_to_sales double precision NULL,
-                free_cash_flow double precision NULL,
-                market_cap double precision NULL,
-                price double precision NULL,
-                price_to_book double precision NULL,
-                price_to_cash_flow double precision NULL,
-                price_to_earnings double precision NULL,
-                price_to_free_cash_flow double precision NULL,
-                price_to_sales double precision NULL,
-                quick double precision NULL,
-                return_on_assets double precision NULL,
-                return_on_equity double precision NULL,
-                source text NOT NULL DEFAULT 'massive',
-                fetched_at timestamptz NOT NULL DEFAULT now(),
-                PRIMARY KEY (symbol, date, source)
-            )
-            """
-        )
-        cur.execute(
-            """
-            CREATE INDEX IF NOT EXISTS idx_stock_ratios_sym_date_src
-            ON public.stock_ratios (symbol, source, date DESC)
-            """
-        )
-
-        _log_table(
-            "stock_short_interest",
-            "Massive GET /stocks/v1/short-interest",
-        )
-        cur.execute(
-            """
-            CREATE TABLE IF NOT EXISTS public.stock_short_interest (
-                symbol text NOT NULL,
-                settlement_date date NOT NULL,
-                short_interest bigint NULL,
-                avg_daily_volume bigint NULL,
-                days_to_cover double precision NULL,
-                cik text NULL,
-                source text NOT NULL DEFAULT 'massive',
-                fetched_at timestamptz NOT NULL DEFAULT now(),
-                PRIMARY KEY (symbol, settlement_date, source)
-            )
-            """
-        )
-        cur.execute(
-            """
-            DO $si_adv_mig$
-            BEGIN
-              IF to_regclass('public.stock_short_interest') IS NOT NULL THEN
-                IF EXISTS (
-                  SELECT 1 FROM information_schema.columns
-                  WHERE table_schema = 'public' AND table_name = 'stock_short_interest'
-                    AND column_name = 'avg_daily_volume' AND udt_name = 'float8'
-                ) THEN
-                  ALTER TABLE public.stock_short_interest
-                    ALTER COLUMN avg_daily_volume TYPE bigint
-                    USING CASE
-                      WHEN avg_daily_volume IS NULL THEN NULL
-                      ELSE round(avg_daily_volume)::bigint
-                    END;
-                END IF;
-              END IF;
-            END
-            $si_adv_mig$;
-            """
-        )
-        cur.execute(
-            """
-            CREATE INDEX IF NOT EXISTS idx_stock_short_int_sym_settle
-            ON public.stock_short_interest (symbol, settlement_date DESC)
-            """
-        )
-
-        _log_table(
-            "stock_short_volume",
-            "Massive GET /stocks/v1/short-volume",
-        )
-        cur.execute(
-            """
-            CREATE TABLE IF NOT EXISTS public.stock_short_volume (
-                symbol text NOT NULL,
-                trade_date date NOT NULL,
-                adf_short_volume bigint NULL,
-                adf_short_volume_exempt bigint NULL,
-                exempt_volume double precision NULL,
-                nasdaq_carteret_short_volume bigint NULL,
-                nasdaq_carteret_short_volume_exempt bigint NULL,
-                nasdaq_chicago_short_volume bigint NULL,
-                nasdaq_chicago_short_volume_exempt bigint NULL,
-                non_exempt_volume double precision NULL,
-                nyse_short_volume bigint NULL,
-                nyse_short_volume_exempt bigint NULL,
-                short_volume bigint NULL,
-                short_volume_ratio double precision NULL,
-                total_volume bigint NULL,
-                exchanges jsonb NULL,
-                cik text NULL,
-                source text NOT NULL DEFAULT 'massive',
-                fetched_at timestamptz NOT NULL DEFAULT now(),
-                PRIMARY KEY (symbol, trade_date, source)
-            )
-            """
-        )
-        cur.execute(
-            """
-            DO $sv_cols_mig$
-            BEGIN
-              IF to_regclass('public.stock_short_volume') IS NULL THEN
-                RETURN;
-              END IF;
-              IF NOT EXISTS (
-                SELECT 1 FROM information_schema.columns
-                WHERE table_schema = 'public' AND table_name = 'stock_short_volume'
-                  AND column_name = 'adf_short_volume'
-              ) THEN
-                ALTER TABLE public.stock_short_volume
-                  ADD COLUMN adf_short_volume bigint NULL,
-                  ADD COLUMN adf_short_volume_exempt bigint NULL,
-                  ADD COLUMN exempt_volume double precision NULL,
-                  ADD COLUMN nasdaq_carteret_short_volume bigint NULL,
-                  ADD COLUMN nasdaq_carteret_short_volume_exempt bigint NULL,
-                  ADD COLUMN nasdaq_chicago_short_volume bigint NULL,
-                  ADD COLUMN nasdaq_chicago_short_volume_exempt bigint NULL,
-                  ADD COLUMN non_exempt_volume double precision NULL,
-                  ADD COLUMN nyse_short_volume bigint NULL,
-                  ADD COLUMN nyse_short_volume_exempt bigint NULL;
-              END IF;
-            END
-            $sv_cols_mig$;
-            """
-        )
-        cur.execute(
-            """
-            CREATE INDEX IF NOT EXISTS idx_stock_short_vol_sym_date
-            ON public.stock_short_volume (symbol, trade_date DESC)
-            """
-        )
-
-        _log_table("v_us_equity_universe", "View: US common-stock universe from tickers (active CS, locale=us, market=stocks)")
-        cur.execute(
-            """
-            CREATE OR REPLACE VIEW public.v_us_equity_universe AS
-            SELECT
-                t.tickers_id,
-                upper(trim(t.ticker)) AS symbol,
-                t.name,
-                t.market,
-                t.locale,
-                t.primary_exchange,
-                t.instrument_type,
-                t.active,
-                t.delisted_utc,
-                o.list_date,
-                o.sector,
-                o.industry
-            FROM public.tickers t
-            LEFT JOIN public.ticker_overview o ON o.tickers_id = t.tickers_id
-            WHERE COALESCE(t.active, false) = true
-              AND lower(COALESCE(t.locale, '')) = 'us'
-              AND lower(COALESCE(t.market, '')) = 'stocks'
-              AND lower(COALESCE(t.instrument_type, '')) = 'cs'
-            """
-        )
-        # Keep the old sepa-prefixed name as a compatibility alias
-        cur.execute(
-            "CREATE OR REPLACE VIEW public.v_sepa_us_equity_universe AS SELECT * FROM public.v_us_equity_universe"
-        )
-
         _log_table(
             "v_sepa_symbol_price_readiness",
-            "View: per-symbol stock_day bar counts and price_ready vs lookback window (calendar days)",
+            "View: per-symbol market.stock_daily bar counts and price_ready vs lookback window",
         )
         cur.execute(
             """
-            CREATE OR REPLACE VIEW public.v_sepa_symbol_price_readiness AS
-            WITH params AS (
+            DO $price_ready$
+            BEGIN
+              IF to_regclass('market.stock_daily') IS NOT NULL THEN
+                EXECUTE $sql$
+                CREATE OR REPLACE VIEW public.v_sepa_symbol_price_readiness AS
+                WITH params AS (
+                    SELECT
+                        'polygon'::text AS price_source,
+                        (CURRENT_DATE - integer '420') AS window_start,
+                        CURRENT_DATE AS as_of_date,
+                        240::integer AS min_bar_rows,
+                        7::integer AS max_stale_calendar_days
+                )
                 SELECT
-                    'massive'::text AS price_source,
-                    (CURRENT_DATE - integer '420') AS window_start,
-                    CURRENT_DATE AS as_of_date,
-                    240::integer AS min_bar_rows,
-                    7::integer AS max_stale_calendar_days
-            )
-            SELECT
-                p.as_of_date,
-                upper(trim(sd.symbol)) AS symbol,
-                p.price_source,
-                count(*)::integer AS bar_rows,
-                min(sd.bar_time)::date AS first_bar_date,
-                max(sd.bar_time)::date AS last_bar_date,
-                count(*) FILTER (WHERE sd.close IS NULL)::integer AS null_close_rows,
-                count(*) FILTER (WHERE sd.volume IS NULL)::integer AS null_volume_rows,
-                (
-                    count(*) >= p.min_bar_rows
-                    AND max(sd.bar_time) >= (
-                        p.as_of_date - (p.max_stale_calendar_days || ' days')::interval
-                    )::date
-                    AND count(*) FILTER (WHERE sd.close IS NULL) = 0
-                    AND count(*) FILTER (WHERE sd.volume IS NULL) = 0
-                ) AS price_ready
-            FROM params p
-            JOIN public.stock_day sd
-                ON sd.source = p.price_source
-               AND sd.bar_time >= p.window_start
-               AND sd.bar_time <= p.as_of_date
-            GROUP BY p.as_of_date, p.price_source, p.min_bar_rows, p.max_stale_calendar_days, p.window_start,
-                     upper(trim(sd.symbol))
+                    p.as_of_date,
+                    upper(trim(sd.symbol)) AS symbol,
+                    p.price_source,
+                    count(*)::integer AS bar_rows,
+                    min(sd.bar_date)::date AS first_bar_date,
+                    max(sd.bar_date)::date AS last_bar_date,
+                    count(*) FILTER (WHERE sd.close IS NULL)::integer AS null_close_rows,
+                    count(*) FILTER (WHERE sd.volume IS NULL)::integer AS null_volume_rows,
+                    (
+                        count(*) >= p.min_bar_rows
+                        AND max(sd.bar_date) >= (
+                            p.as_of_date - (p.max_stale_calendar_days || ' days')::interval
+                        )::date
+                        AND count(*) FILTER (WHERE sd.close IS NULL) = 0
+                        AND count(*) FILTER (WHERE sd.volume IS NULL) = 0
+                    ) AS price_ready
+                FROM params p
+                JOIN market.stock_daily sd
+                    ON sd.bar_date >= p.window_start
+                   AND sd.bar_date <= p.as_of_date
+                GROUP BY p.as_of_date, p.price_source, p.min_bar_rows, p.max_stale_calendar_days,
+                         p.window_start, upper(trim(sd.symbol))
+                $sql$;
+              END IF;
+            END
+            $price_ready$
             """
         )
-
         _log_table(
             "v_sepa_symbol_fund_cache_readiness",
             "View: valid-row snapshot of research_sepa_fundamentals_cache (created when cache table exists)",
@@ -3325,31 +1461,6 @@ def _ensure_tables(conn, log=None, log_table=None) -> None:
         cur.execute(
             "CREATE INDEX IF NOT EXISTS report_atm_iv_symbol_date ON report_option_atm_iv_daily (symbol, trade_date DESC)"
         )
-
-        _log_table("option_open_interest_daily", "Option daily open interest (Massive)")
-        cur.execute(
-            """
-            CREATE TABLE IF NOT EXISTS option_open_interest_daily (
-                option_open_interest_daily_id bigserial PRIMARY KEY,
-                contract_key text NOT NULL,
-                symbol text NOT NULL,
-                expiry text NOT NULL,
-                strike double precision NOT NULL,
-                option_right text NOT NULL,
-                trade_date date NOT NULL,
-                open_interest integer NOT NULL,
-                source text NOT NULL DEFAULT 'massive',
-                created_at timestamptz DEFAULT now(),
-                UNIQUE (contract_key, trade_date, source)
-            )
-            """
-        )
-        cur.execute(
-            "CREATE INDEX IF NOT EXISTS option_oi_daily_contract_date ON option_open_interest_daily (contract_key, trade_date DESC)"
-        )
-        cur.execute(
-            "CREATE INDEX IF NOT EXISTS option_oi_daily_symbol_date ON option_open_interest_daily (symbol, trade_date DESC)"
-        )
         _log_table("option_trades", "Option trades ticks (Massive Developer tier)")
         cur.execute(
             """
@@ -3378,31 +1489,6 @@ def _ensure_tables(conn, log=None, log_table=None) -> None:
         cur.execute(
             "CREATE INDEX IF NOT EXISTS option_trades_symbol_ts ON option_trades (symbol, trade_ts DESC)"
         )
-        _log_table("massive_corporate_action", "Corporate actions cache (Massive)")
-        cur.execute(
-            """
-            CREATE TABLE IF NOT EXISTS massive_corporate_action (
-                massive_corporate_action_id bigserial PRIMARY KEY,
-                symbol text NOT NULL,
-                action_type text NOT NULL,
-                ex_date date,
-                record_date date,
-                payment_date date,
-                ratio_from double precision,
-                ratio_to double precision,
-                amount double precision,
-                currency text,
-                description text,
-                source text NOT NULL DEFAULT 'massive',
-                created_at timestamptz DEFAULT now(),
-                UNIQUE (symbol, action_type, ex_date, source)
-            )
-            """
-        )
-        cur.execute(
-            "CREATE INDEX IF NOT EXISTS massive_corp_action_symbol_ex ON massive_corporate_action (symbol, ex_date DESC)"
-        )
-
         # ── Executions: raw tables + account_executions view ──
         # TWS and Flex stored separately; view merges (Flex authoritative, TWS fills gaps).
         # Match key: exec_id (IB Execution ID = Flex ibExecID).

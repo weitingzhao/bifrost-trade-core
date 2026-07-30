@@ -1,6 +1,6 @@
-"""Fetch US reference index daily bars via Massive/Polygon v2 aggs and write to stock_day (source=massive).
+"""Fetch US reference index daily bars via Massive/Polygon v2 aggs and write to market.stock_daily.
 
-Used by POST /indices/refresh. Gap-fill from DB latest daily bar; UPSERT via apply_stock_custom_bars.
+Used by POST /indices/refresh. Gap-fill from DB latest daily bar; UPSERT via write_ohlc_bars_to_db.
 Requires config ``reference_indices`` with ``symbol``, optional ``label``, optional ``polygon_ticker``
 (see ``src.massive.polygon_stock_tickers``).
 """
@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import time
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
@@ -33,6 +34,38 @@ def _range_ms_for_refresh(
     return start_ms, end_ms
 
 
+def _aggs_results_to_daily_rows(symbol: str, bars: List[Any]) -> List[Dict[str, Any]]:
+    """Convert Massive/Polygon agg results into write_ohlc_bars_to_db row dicts."""
+    sym = (symbol or "").strip().upper()
+    rows: List[Dict[str, Any]] = []
+    for bar in bars:
+        if not isinstance(bar, dict):
+            continue
+        t = bar.get("t")
+        if t is None:
+            continue
+        try:
+            bt = datetime.fromtimestamp(int(t) / 1000.0, tz=timezone.utc)
+        except (TypeError, ValueError, OSError):
+            continue
+        bar_d = bt.date()
+        o, h, l_, c, v = bar.get("o"), bar.get("h"), bar.get("l"), bar.get("c"), bar.get("v")
+        rows.append(
+            {
+                "symbol": sym,
+                "period": "1 D",
+                "bar_time": bt,
+                "bar_date": bar_d.isoformat(),
+                "open": float(o) if o is not None else None,
+                "high": float(h) if h is not None else None,
+                "low": float(l_) if l_ is not None else None,
+                "close": float(c) if c is not None else None,
+                "volume": float(v) if v is not None else None,
+            }
+        )
+    return rows
+
+
 def _run_one_index_massive(
     config: Dict[str, Any],
     item: Dict[str, Any],
@@ -42,11 +75,9 @@ def _run_one_index_massive(
 ) -> tuple[bool, str, str]:
     """Returns (ok, symbol, error_message)."""
     from src.massive.polygon_stock_tickers import polygon_ticker_for_massive_aggs
-    from bifrost_core.persistence.postgres.connection import _get_conn_params
-    from bifrost_core.persistence.postgres.stock_ohlc_massive import apply_stock_custom_bars
+    from bifrost_core.monitor.reader.market import write_ohlc_bars_to_db
     from src.vendor.massive.client import MassiveClient
     from src.vendor.massive.config import get_massive_settings
-    import psycopg2
 
     symbol = (item.get("symbol") or "").strip()
     label = (item.get("label") or symbol) or ""
@@ -73,15 +104,17 @@ def _run_one_index_massive(
     if not isinstance(bars, list) or len(bars) == 0:
         return False, symbol, f"{label} ({symbol}): no daily aggregates returned"
 
-    params = _get_conn_params(config)
-    conn = psycopg2.connect(**params)
+    rows = _aggs_results_to_daily_rows(symbol, bars)
+    if not rows:
+        return False, symbol, f"{label} ({symbol}): no parseable daily aggregates"
+
     try:
-        with conn.cursor() as cur:
-            n = apply_stock_custom_bars(cur, symbol, "day", 1, data, adjusted=None)
-        conn.commit()
+        ok = write_ohlc_bars_to_db(config, rows)
+        if not ok:
+            return False, symbol, f"{symbol}: write_ohlc_bars_to_db returned false"
         logger.info(
-            "reference_indices: Massive wrote %s daily rows for %s (%s)",
-            n,
+            "reference_indices: Massive wrote %s daily rows for %s (%s) → market.stock_daily",
+            len(rows),
             symbol,
             label,
         )
@@ -89,8 +122,6 @@ def _run_one_index_massive(
     except Exception as e:
         logger.warning("reference_indices: write failed for %s: %s", symbol, e)
         return False, symbol, f"{symbol}: {e}"
-    finally:
-        conn.close()
 
 
 def refresh_reference_indices(
@@ -99,7 +130,7 @@ def refresh_reference_indices(
     reader: Optional[Any] = None,
     delay_sec: float = DELAY_BETWEEN_SYMBOLS_SEC,
 ) -> Dict[str, Any]:
-    """Fetch all reference indices from Massive/Polygon and write to stock_day.
+    """Fetch all reference indices from Massive/Polygon and write to market.stock_daily.
 
     config must contain reference_indices (list of { symbol, label?, polygon_ticker? }) and postgres.
     Returns { "ok": bool, "updated": [symbol, ...], "errors": [str, ...] }.
