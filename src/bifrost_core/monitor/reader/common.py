@@ -292,7 +292,7 @@ class StatusReader:
         return result
 
     def get_distinct_caret_bar_symbols(self) -> List[str]:
-        """Symbols starting with ``^`` present in ``stock_day`` / ``stock_min`` (for coverage when config lags DB)."""
+        """Symbols starting with ``^`` present in ``market.stock_daily`` / ``market.stock_minute``."""
         if not self._connect():
             return []
         result = market_module.distinct_caret_symbols_in_stock_bars_tables(self._conn)

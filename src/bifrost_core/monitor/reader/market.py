@@ -15,6 +15,25 @@ from bifrost_core.monitor.reader.symbol_normalize import norm_bars_symbol as _no
 logger = logging.getLogger(__name__)
 
 
+# UI / API period labels → market.stock_minute.period values written by Polygon ingest.
+_MINUTE_PERIOD_TO_DB: Dict[str, str] = {
+    "1 min": "1 minute",
+    "1 minute": "1 minute",
+    "5 mins": "5 minute",
+    "5 min": "5 minute",
+    "5 minutes": "5 minute",
+    "5 minute": "5 minute",
+    "1 hour": "1 hour",
+    "1 hours": "1 hour",
+}
+
+
+def _minute_period_db(period: str) -> str:
+    """Map API period label to market.stock_minute.period."""
+    per = (period or "").strip()
+    return _MINUTE_PERIOD_TO_DB.get(per, per)
+
+
 # ----- Conn-based (for common.StatusReader delegation) -----
 
 def get_is_us_trading_day_conn(conn: Any, date_str: str) -> bool:
@@ -119,28 +138,20 @@ def get_bars(
     period: str = "1 D",
     limit: int = 200,
 ) -> List[Dict[str, Any]]:
-    """Return rows from stock_day (1 D) or stock_min. Newest first. bar_time as Unix time for API."""
+    """Return rows from market.stock_daily (1 D) or market.stock_minute. Newest first."""
     if not symbol or not symbol.strip():
         return []
     per = (period or "1 D").strip()
-    table = "stock_day" if per.upper() == "1 D" else "stock_min"
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            if table == "stock_day":
+            if per.upper() == "1 D":
                 cur.execute(
                     """
-                    SELECT symbol, '1 D' AS period, extract(epoch from bar_time) AS time,
+                    SELECT symbol, '1 D' AS period, extract(epoch from bar_date) AS time,
                            open, high, low, close, volume, vwap
-                    FROM (
-                      SELECT DISTINCT ON (symbol, bar_time)
-                        symbol, bar_time, open, high, low, close, volume, vwap
-                      FROM stock_day
-                      WHERE symbol = %s
-                      ORDER BY symbol, bar_time DESC,
-                        CASE COALESCE(source, 'ib')
-                          WHEN 'ib' THEN 0 WHEN 'tv' THEN 1 WHEN 'massive' THEN 2 ELSE 3 END ASC
-                    ) d
-                    ORDER BY bar_time DESC NULLS LAST
+                    FROM market.stock_daily
+                    WHERE symbol = %s
+                    ORDER BY bar_date DESC NULLS LAST
                     LIMIT %s
                     """,
                     (symbol.strip(), limit),
@@ -148,21 +159,14 @@ def get_bars(
             else:
                 cur.execute(
                     """
-                    SELECT symbol, period, extract(epoch from bar_time) AS time,
+                    SELECT symbol, %s AS period, extract(epoch from bar_time) AS time,
                            open, high, low, close, volume, vwap
-                    FROM (
-                      SELECT DISTINCT ON (symbol, period, bar_time)
-                        symbol, period, bar_time, open, high, low, close, volume, vwap
-                      FROM stock_min
-                      WHERE symbol = %s AND period = %s
-                      ORDER BY symbol, period, bar_time DESC,
-                        CASE COALESCE(source, 'ib')
-                          WHEN 'ib' THEN 0 WHEN 'tv' THEN 1 WHEN 'massive' THEN 2 ELSE 3 END ASC
-                    ) m
+                    FROM market.stock_minute
+                    WHERE symbol = %s AND period = %s
                     ORDER BY bar_time DESC NULLS LAST
                     LIMIT %s
                     """,
-                    (symbol.strip(), per, limit),
+                    (per, symbol.strip(), _minute_period_db(per), limit),
                 )
             rows = cur.fetchall()
         return [dict(r) for r in rows]
@@ -176,22 +180,16 @@ def get_bars_latest(conn: Any, symbol: Optional[str] = None, period: str = "1 D"
     if not symbol or not symbol.strip():
         return None
     per = (period or "1 D").strip()
-    table = "stock_day" if per.upper() == "1 D" else "stock_min"
     try:
         with conn.cursor() as cur:
-            if table == "stock_day":
+            if per.upper() == "1 D":
                 cur.execute(
                     """
-                    SELECT extract(epoch from bar_time) AS t
-                    FROM (
-                      SELECT DISTINCT ON (symbol, bar_time) symbol, bar_time
-                      FROM stock_day
-                      WHERE symbol = %s
-                      ORDER BY symbol, bar_time DESC,
-                        CASE COALESCE(source, 'ib')
-                          WHEN 'ib' THEN 0 WHEN 'tv' THEN 1 WHEN 'massive' THEN 2 ELSE 3 END ASC
-                    ) d
-                    ORDER BY bar_time DESC LIMIT 1
+                    SELECT extract(epoch from bar_date) AS t
+                    FROM market.stock_daily
+                    WHERE symbol = %s
+                    ORDER BY bar_date DESC
+                    LIMIT 1
                     """,
                     (symbol.strip(),),
                 )
@@ -199,17 +197,12 @@ def get_bars_latest(conn: Any, symbol: Optional[str] = None, period: str = "1 D"
                 cur.execute(
                     """
                     SELECT extract(epoch from bar_time) AS t
-                    FROM (
-                      SELECT DISTINCT ON (symbol, period, bar_time) symbol, period, bar_time
-                      FROM stock_min
-                      WHERE symbol = %s AND period = %s
-                      ORDER BY symbol, period, bar_time DESC,
-                        CASE COALESCE(source, 'ib')
-                          WHEN 'ib' THEN 0 WHEN 'tv' THEN 1 WHEN 'massive' THEN 2 ELSE 3 END ASC
-                    ) m
-                    ORDER BY bar_time DESC LIMIT 1
+                    FROM market.stock_minute
+                    WHERE symbol = %s AND period = %s
+                    ORDER BY bar_time DESC
+                    LIMIT 1
                     """,
-                    (symbol.strip(), per),
+                    (symbol.strip(), _minute_period_db(per)),
                 )
             row = cur.fetchone()
         return float(row[0]) if row and row[0] is not None else None
@@ -230,25 +223,17 @@ def get_bar_times_in_range(
         return []
     sym = symbol.strip()
     per = (period or "1 D").strip()
-    table = "stock_day" if per.upper() == "1 D" else "stock_min"
     try:
         with conn.cursor() as cur:
-            if table == "stock_day":
+            if per.upper() == "1 D":
                 cur.execute(
                     """
-                    SELECT extract(epoch from bar_time) AS t
-                    FROM (
-                      SELECT DISTINCT ON (symbol, bar_time)
-                        symbol, bar_time
-                      FROM stock_day
-                      WHERE symbol = %s
-                        AND bar_time >= to_timestamp(%s)::date
-                        AND bar_time <= to_timestamp(%s)::date
-                      ORDER BY symbol, bar_time ASC,
-                        CASE COALESCE(source, 'ib')
-                          WHEN 'ib' THEN 0 WHEN 'tv' THEN 1 WHEN 'massive' THEN 2 ELSE 3 END ASC
-                    ) d
-                    ORDER BY bar_time ASC
+                    SELECT extract(epoch from bar_date) AS t
+                    FROM market.stock_daily
+                    WHERE symbol = %s
+                      AND bar_date >= to_timestamp(%s)::date
+                      AND bar_date <= to_timestamp(%s)::date
+                    ORDER BY bar_date ASC
                     """,
                     (sym, float(start_ts), float(end_ts)),
                 )
@@ -256,20 +241,13 @@ def get_bar_times_in_range(
                 cur.execute(
                     """
                     SELECT extract(epoch from bar_time) AS t
-                    FROM (
-                      SELECT DISTINCT ON (symbol, period, bar_time)
-                        symbol, period, bar_time
-                      FROM stock_min
-                      WHERE symbol = %s AND period = %s
-                        AND bar_time >= to_timestamp(%s)
-                        AND bar_time <= to_timestamp(%s)
-                      ORDER BY symbol, period, bar_time ASC,
-                        CASE COALESCE(source, 'ib')
-                          WHEN 'ib' THEN 0 WHEN 'tv' THEN 1 WHEN 'massive' THEN 2 ELSE 3 END ASC
-                    ) m
+                    FROM market.stock_minute
+                    WHERE symbol = %s AND period = %s
+                      AND bar_time >= to_timestamp(%s)
+                      AND bar_time <= to_timestamp(%s)
                     ORDER BY bar_time ASC
                     """,
-                    (sym, per, float(start_ts), float(end_ts)),
+                    (sym, _minute_period_db(per), float(start_ts), float(end_ts)),
                 )
             rows = cur.fetchall()
         return [float(row[0]) for row in rows if row and row[0] is not None]
@@ -283,7 +261,7 @@ def get_bars_benchmark(
     symbols: Optional[List[str]] = None,
     on_or_before: Optional[date] = None,
 ) -> Dict[str, Dict[str, Any]]:
-    """Return latest daily bar on or before given date per symbol from stock_day."""
+    """Return latest daily bar on or before given date per symbol from market.stock_daily."""
     sym_list = list({(s or "").strip() for s in (symbols or []) if (s or "").strip()})
     if not sym_list:
         return {}
@@ -292,26 +270,18 @@ def get_bars_benchmark(
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(
                 """
-                WITH dedup AS (
-                  SELECT DISTINCT ON (symbol, bar_time)
-                    symbol, bar_time, close
-                  FROM stock_day
-                  WHERE symbol = ANY(%s) AND bar_time <= %s
-                  ORDER BY symbol, bar_time ASC,
-                    CASE COALESCE(source, 'ib')
-                      WHEN 'ib' THEN 0 WHEN 'tv' THEN 1 WHEN 'massive' THEN 2 ELSE 3 END ASC
-                ),
-                ordered AS (
-                    SELECT symbol, bar_time, close,
-                           LEAD(close) OVER (PARTITION BY symbol ORDER BY bar_time DESC) AS prev_close
-                    FROM dedup
+                WITH ordered AS (
+                    SELECT symbol, bar_date, close,
+                           LEAD(close) OVER (PARTITION BY symbol ORDER BY bar_date DESC) AS prev_close
+                    FROM market.stock_daily
+                    WHERE symbol = ANY(%s) AND bar_date <= %s
                 )
                 SELECT DISTINCT ON (symbol) symbol,
-                       extract(epoch from bar_time) AS bar_time,
+                       extract(epoch from bar_date) AS bar_time,
                        close,
                        prev_close
                 FROM ordered
-                ORDER BY symbol, bar_time DESC
+                ORDER BY symbol, bar_date DESC
                 """,
                 (sym_list, ref),
             )
@@ -331,7 +301,7 @@ def get_bars_benchmark(
 
 
 def get_stock_day_fallback_price(conn: Any, symbol: str) -> Optional[Tuple[float, float, Optional[float]]]:
-    """Return (close, bar_time_epoch, prev_close) from stock_day for display when live quote is missing or stale.
+    """Return (close, bar_time_epoch, prev_close) from market.stock_daily when live quote is missing/stale.
 
     When the latest bar is **today**'s session date: before NY regular close (+ grace) we still use the prior
     completed session (avoids intraday partial aggregates). After that cutoff we use today's close so Positions
@@ -345,18 +315,11 @@ def get_stock_day_fallback_price(conn: Any, symbol: str) -> Optional[Tuple[float
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(
                 """
-                SELECT bar_time, close,
-                       extract(epoch from bar_time) AS bar_time_epoch
-                FROM (
-                  SELECT DISTINCT ON (bar_time)
-                    bar_time, close
-                  FROM stock_day
-                  WHERE UPPER(TRIM(symbol)) = UPPER(TRIM(%s))
-                  ORDER BY bar_time DESC,
-                    CASE COALESCE(source, 'ib')
-                      WHEN 'ib' THEN 0 WHEN 'tv' THEN 1 WHEN 'massive' THEN 2 ELSE 3 END ASC
-                ) d
-                ORDER BY bar_time DESC
+                SELECT bar_date AS bar_time, close,
+                       extract(epoch from bar_date) AS bar_time_epoch
+                FROM market.stock_daily
+                WHERE UPPER(TRIM(symbol)) = UPPER(TRIM(%s))
+                ORDER BY bar_date DESC
                 LIMIT 3
                 """,
                 (sym,),
@@ -452,23 +415,26 @@ def get_contract_quotes_conn(conn: Any, contract_keys: List[str]) -> List[Dict[s
 
 
 def get_bars_stats(conn: Any, symbol: Optional[str] = None) -> Dict[str, Any]:
-    """Return row counts for the given symbol in stock_day and stock_min (per period)."""
+    """Return row counts for the given symbol in market.stock_daily and market.stock_minute.
+
+    Response keys keep legacy names (``stock_day`` / ``stock_min``) for API compatibility.
+    """
     if not symbol or not symbol.strip():
         return {"stock_day": 0, "stock_min": {}}
     sym = symbol.strip()
     out: Dict[str, Any] = {"stock_day": 0, "stock_min": {}}
     try:
         with conn.cursor() as cur:
-            cur.execute("SELECT COUNT(*) FROM stock_day WHERE symbol = %s", (sym,))
+            cur.execute("SELECT COUNT(*) FROM market.stock_daily WHERE symbol = %s", (sym,))
             row = cur.fetchone()
             out["stock_day"] = int(row[0]) if row and row[0] is not None else 0
-            for per in ("1 min", "5 mins", "1 hour"):
+            for api_per in ("1 min", "5 mins", "1 hour"):
                 cur.execute(
-                    "SELECT COUNT(*) FROM stock_min WHERE symbol = %s AND period = %s",
-                    (sym, per),
+                    "SELECT COUNT(*) FROM market.stock_minute WHERE symbol = %s AND period = %s",
+                    (sym, _minute_period_db(api_per)),
                 )
                 r = cur.fetchone()
-                out["stock_min"][per] = int(r[0]) if r and r[0] is not None else 0
+                out["stock_min"][api_per] = int(r[0]) if r and r[0] is not None else 0
         return out
     except Exception as e:
         logger.debug("get_bars_stats failed: %s", e)
@@ -476,7 +442,7 @@ def get_bars_stats(conn: Any, symbol: Optional[str] = None) -> Dict[str, Any]:
 
 
 def _coverage_day_iso(v: Any) -> Optional[str]:
-    """Normalize MIN/MAX(bar_time) for JSON: always YYYY-MM-DD string."""
+    """Normalize MIN/MAX(bar_date) for JSON: always YYYY-MM-DD string."""
     if v is None:
         return None
     if hasattr(v, "isoformat") and callable(getattr(v, "isoformat")):
@@ -502,16 +468,16 @@ def _ordered_unique_symbols(symbols: Optional[List[str]]) -> List[str]:
 
 
 def distinct_caret_symbols_in_stock_bars_tables(conn: Any) -> List[str]:
-    """Symbols starting with ``^`` that appear in ``stock_day`` or ``stock_min`` (e.g. ``^VIX``) for coverage lists."""
+    """Symbols starting with ``^`` that appear in market.stock_daily or market.stock_minute."""
     out: set[str] = set()
     try:
         with conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT DISTINCT symbol FROM stock_day
+                SELECT DISTINCT symbol FROM market.stock_daily
                 WHERE replace(symbol, U&'\\FF3E', '^') LIKE '^%'
                 UNION
-                SELECT DISTINCT symbol FROM stock_min
+                SELECT DISTINCT symbol FROM market.stock_minute
                 WHERE replace(symbol, U&'\\FF3E', '^') LIKE '^%'
                 """,
             )
@@ -526,9 +492,10 @@ def distinct_caret_symbols_in_stock_bars_tables(conn: Any) -> List[str]:
 
 
 def get_bars_coverage(conn: Any, symbols: Optional[List[str]] = None) -> List[Dict[str, Any]]:
-    """Return per-symbol coverage (count, min_ts, max_ts) for stock_day and stock_min.
+    """Return per-symbol coverage for market.stock_daily and market.stock_minute.
 
-    Matches ``stock_* .symbol`` using ``upper(trim(symbol))`` so config ``^VIX`` aligns with DB
+    Response keys keep legacy names (``stock_day`` / ``stock_min``) for API compatibility.
+    Matches ``symbol`` using ``upper(trim(symbol))`` so config ``^VIX`` aligns with DB
     even when casing or surrounding whitespace differs.
     """
     sym_list = _ordered_unique_symbols(list(symbols) if symbols else None)
@@ -543,11 +510,11 @@ def get_bars_coverage(conn: Any, symbols: Optional[List[str]] = None) -> List[Di
                 """
                 SELECT upper(trim(replace(symbol, U&'\\FF3E', '^'))) AS sym_norm,
                        COUNT(*) AS cnt,
-                       MIN(bar_time)::text AS min_day,
-                       MAX(bar_time)::text AS max_day,
-                       extract(epoch from MIN(bar_time)) AS min_ts,
-                       extract(epoch from MAX(bar_time)) AS max_ts
-                FROM stock_day
+                       MIN(bar_date)::text AS min_day,
+                       MAX(bar_date)::text AS max_day,
+                       extract(epoch from MIN(bar_date)) AS min_ts,
+                       extract(epoch from MAX(bar_date)) AS max_ts
+                FROM market.stock_daily
                 WHERE upper(trim(replace(symbol, U&'\\FF3E', '^'))) = ANY(%s)
                 GROUP BY upper(trim(replace(symbol, U&'\\FF3E', '^')))
                 """,
@@ -565,22 +532,26 @@ def get_bars_coverage(conn: Any, symbols: Optional[List[str]] = None) -> List[Di
                     "min_ts": float(row[4]) if row[4] is not None else None,
                     "max_ts": float(row[5]) if row[5] is not None else None,
                 }
+            db_periods = [_minute_period_db(p) for p in ("1 min", "5 mins", "1 hour")]
             cur.execute(
                 """
                 SELECT upper(trim(replace(symbol, U&'\\FF3E', '^'))) AS sym_norm, period,
                        COUNT(*) AS cnt,
                        extract(epoch from MIN(bar_time)) AS min_ts,
                        extract(epoch from MAX(bar_time)) AS max_ts
-                FROM stock_min
-                WHERE upper(trim(replace(symbol, U&'\\FF3E', '^'))) = ANY(%s) AND period IN ('1 min', '5 mins', '1 hour')
+                FROM market.stock_minute
+                WHERE upper(trim(replace(symbol, U&'\\FF3E', '^'))) = ANY(%s)
+                  AND period = ANY(%s)
                 GROUP BY upper(trim(replace(symbol, U&'\\FF3E', '^'))), period
                 """,
-                (norm_list,),
+                (norm_list, db_periods),
             )
+            # Map DB period back to API label
+            db_to_api = {_minute_period_db(p): p for p in ("1 min", "5 mins", "1 hour")}
             min_rows: Dict[str, Dict[str, Dict[str, Any]]] = {}
             for row in cur.fetchall():
                 sn = _norm_bars_symbol(row[0] or "")
-                per = row[1]
+                per = db_to_api.get(row[1], row[1])
                 cnt, min_ts, max_ts = int(row[2]), row[3], row[4]
                 if not sn:
                     continue
