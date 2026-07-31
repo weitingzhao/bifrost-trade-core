@@ -370,6 +370,11 @@ def get_stock_day_fallback_price(conn: Any, symbol: str) -> Optional[Tuple[float
         return None
     except Exception as e:
         logger.debug("get_stock_day_fallback_price failed: %s", e)
+        # psycopg2 aborts the connection txn on SQL errors; clear so callers can continue.
+        try:
+            conn.rollback()
+        except Exception:
+            pass
         return None
 
 

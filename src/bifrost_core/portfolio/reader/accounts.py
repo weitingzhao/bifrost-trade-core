@@ -504,7 +504,11 @@ def get_accounts_from_tables(conn: Any) -> Optional[List[Dict[str, Any]]]:
             out.append({"account_id": acc_id, "summary": summary, "positions": positions})
         return out
     except Exception as e:
-        logger.debug("get_accounts_from_tables failed: %s", e)
+        logger.warning("get_accounts_from_tables failed: %s", e)
+        try:
+            conn.rollback()
+        except Exception:
+            pass
         return None
 
 
