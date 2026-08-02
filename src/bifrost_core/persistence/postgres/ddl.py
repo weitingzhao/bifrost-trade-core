@@ -1310,7 +1310,9 @@ def _ensure_tables(conn, log=None, log_table=None) -> None:
                 EXECUTE $sql$
                 CREATE OR REPLACE VIEW public.v_us_equity_universe AS
                 SELECT
-                    NULL::bigint AS tickers_id,
+                    -- Stable synthetic id (public.tickers dropped in P9). Non-null so
+                    -- readiness_snapshot included_in_universe = (tickers_id IS NOT NULL) works.
+                    hashtext(upper(trim(t.symbol)))::bigint AS tickers_id,
                     upper(trim(t.symbol)) AS symbol,
                     t.name,
                     t.market,
