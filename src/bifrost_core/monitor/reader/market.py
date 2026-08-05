@@ -309,7 +309,7 @@ def get_stock_day_fallback_price(conn: Any, symbol: str) -> Optional[Tuple[float
     """
     if not (symbol or "").strip():
         return None
-    sym = (symbol or "").strip()
+    sym = (symbol or "").strip().upper()
     today = date.today()
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
@@ -318,7 +318,7 @@ def get_stock_day_fallback_price(conn: Any, symbol: str) -> Optional[Tuple[float
                 SELECT bar_date AS bar_time, close,
                        extract(epoch from bar_date) AS bar_time_epoch
                 FROM market.stock_daily
-                WHERE UPPER(TRIM(symbol)) = UPPER(TRIM(%s))
+                WHERE symbol = %s
                 ORDER BY bar_date DESC
                 LIMIT 3
                 """,
@@ -480,10 +480,10 @@ def distinct_caret_symbols_in_stock_bars_tables(conn: Any) -> List[str]:
             cur.execute(
                 """
                 SELECT DISTINCT symbol FROM market.stock_daily
-                WHERE replace(symbol, U&'\\FF3E', '^') LIKE '^%'
+                WHERE symbol LIKE '^%' OR symbol LIKE U&'\\FF3E%'
                 UNION
                 SELECT DISTINCT symbol FROM market.stock_minute
-                WHERE replace(symbol, U&'\\FF3E', '^') LIKE '^%'
+                WHERE symbol LIKE '^%' OR symbol LIKE U&'\\FF3E%'
                 """,
             )
             for row in cur.fetchall() or []:
