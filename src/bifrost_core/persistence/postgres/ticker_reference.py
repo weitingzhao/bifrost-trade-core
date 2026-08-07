@@ -949,7 +949,7 @@ def normalize_ticker_ref_kind(kind: str) -> str:
         "contracts": "feed_option_contracts",
         # Stocks corporate actions cache (dividends, splits, IPOs, ticker events)
         "corporate_action": "feed_stocks_corporate_action",
-        # Max Pain report job (DB-only; was ``max_pain``)
-        "max_pain": "report_option_max_pain",
+        # Max Pain: Plugin market_analytics (P7 — legacy report_option_max_pain retired)
+        "max_pain": "market_analytics_max_pain",
     }
     return legacy.get(k, k)
