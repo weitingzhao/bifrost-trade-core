@@ -13,6 +13,83 @@ from bifrost_core.monitor.reader import write_account_executions_to_db
 logger = logging.getLogger(__name__)
 
 
+def _is_flex_statement_unavailable(exc: BaseException) -> bool:
+    """IB Flex Web Service error 1003 — date override often unsupported for Activity queries."""
+    msg = str(exc)
+    return "[1003]" in msg or "Statement is not available" in msg
+
+
+def _fetch_trades_with_date_fallback(
+    token: str,
+    query_id: str,
+    *,
+    from_date: Optional[str],
+    to_date: Optional[str],
+) -> tuple[List[Dict[str, Any]], bool, Optional[str]]:
+    """
+    Fetch Flex Trades with progressive fallback when IB rejects date overrides.
+
+    Order:
+    1. from_date/to_date when both provided
+    2. On 1003 or empty: query default period (no fd/td)
+    3. On still empty / still failing: period=5 (Last 365 Calendar Days)
+    """
+    rows: List[Dict[str, Any]] = []
+    used_fallback = False
+    fallback_kind: Optional[str] = None
+    primary_err: Optional[ValueError] = None
+
+    if from_date and to_date:
+        try:
+            rows = fetch_trades(token, query_id, from_date=from_date, to_date=to_date)
+        except ValueError as e:
+            if not _is_flex_statement_unavailable(e):
+                raise
+            primary_err = e
+            logger.warning(
+                "Flex Trades date-range rejected for query_id=%s (%s); trying query default",
+                query_id,
+                e,
+            )
+    else:
+        rows = fetch_trades(token, query_id, from_date=from_date, to_date=to_date)
+
+    if rows:
+        return rows, used_fallback, fallback_kind
+
+    # Empty or 1003 on date-range → query default (no fd/td).
+    try:
+        rows = fetch_trades(token, query_id)
+        if rows:
+            return rows, True, (
+                "query_default_after_1003" if primary_err is not None else "query_default_after_empty"
+            )
+    except ValueError as e_default:
+        logger.warning(
+            "Flex Trades query-default failed for query_id=%s: %s",
+            query_id,
+            e_default,
+        )
+        if primary_err is None:
+            primary_err = e_default
+
+    # Last resort: IB period=5 (Last 365 Calendar Days).
+    try:
+        rows = fetch_trades(token, query_id, period=5)
+        if rows:
+            return rows, True, "period5_after_empty_or_1003"
+    except ValueError as e_period:
+        if primary_err is not None:
+            raise ValueError(
+                f"{primary_err}; fallback query-default/period=5 also failed: {e_period}"
+            ) from e_period
+        raise
+
+    if primary_err is not None:
+        raise primary_err
+    return rows, used_fallback, fallback_kind
+
+
 def _publish_flex_executions_system_message(
     config: Optional[dict],
     *,
@@ -136,16 +213,12 @@ def fetch_flex_trades_and_upsert_executions(
             role = entry.get("role") or "unknown"
             label = entry.get("query_label")
             try:
-                rows = fetch_trades(token, query_id, from_date=from_date, to_date=to_date)
-                used_fallback = False
-                if not rows:
-                    try:
-                        rows_fallback = fetch_trades(token, query_id, period=5)
-                        if rows_fallback:
-                            rows = rows_fallback
-                            used_fallback = True
-                    except ValueError as e_fallback:
-                        errors.append(f"Flex fallback (period=5) {i + 1}/{len(entries)} ({role} {query_id}): {e_fallback}")
+                rows, used_fallback, fallback_kind = _fetch_trades_with_date_fallback(
+                    token,
+                    query_id,
+                    from_date=from_date,
+                    to_date=to_date,
+                )
                 rows_per_fetch.append(len(rows))
                 all_rows.extend(rows)
                 span_from, span_to = rows_span(rows)
@@ -158,6 +231,7 @@ def fetch_flex_trades_and_upsert_executions(
                         "data_from": span_from,
                         "data_to": span_to,
                         "used_fallback": used_fallback,
+                        "fallback_kind": fallback_kind,
                     }
                 )
             except ValueError as e:

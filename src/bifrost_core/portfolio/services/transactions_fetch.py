@@ -45,6 +45,24 @@ def fetch_cash_transactions_from_flex(
                 rows = fetch_cash_transactions(token, query_id, from_date=from_date, to_date=to_date)
                 all_rows.extend(rows)
             except ValueError as e:
+                # IB often returns 1003 when Activity Flex rejects fd/td overrides.
+                if (
+                    from_date
+                    and to_date
+                    and ("[1003]" in str(e) or "Statement is not available" in str(e))
+                ):
+                    logger.warning(
+                        "Flex cash date-range rejected for query_id=%s (%s); trying query default",
+                        query_id,
+                        e,
+                    )
+                    try:
+                        rows = fetch_cash_transactions(token, query_id)
+                        all_rows.extend(rows)
+                        continue
+                    except ValueError as e2:
+                        errors.append(f"{e}; fallback query-default failed: {e2}")
+                        continue
                 errors.append(str(e))
         if errors and not all_rows:
             return {"ok": False, "error": "; ".join(errors), "count": 0}
