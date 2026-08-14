@@ -1,15 +1,10 @@
-"""Massive-backed option bars in PostgreSQL (market.option_* schema)."""
+"""Massive-backed option bars via Plugin Market Data API."""
 
 from __future__ import annotations
 
 import logging
 from datetime import date
 from typing import Any, Dict, List, Optional
-
-import psycopg2
-from psycopg2.extras import RealDictCursor
-
-from bifrost_core.persistence.postgres.connection import _get_conn_params
 
 logger = logging.getLogger(__name__)
 
@@ -59,14 +54,16 @@ def get_option_bars(
     source: str = "massive",
     limit: int = 200,
 ) -> List[Dict[str, Any]]:
-    """OHLC for one option contract from market.option_daily (1 D) or market.option_minute.
+    """OHLC for one option contract via Plugin API (option_daily / option_minute).
 
-    ``source`` is accepted for API compatibility but ignored (single Polygon vendor).
+    ``config`` and ``source`` are accepted for API compatibility.
     Response includes ``source='massive'`` for downstream callers.
     """
-    _ = source  # unused — market.* has no source column
-    if not config or (config.get("sink") != "postgres" and not config.get("postgres")):
-        return []
+    from bifrost_core.monitor.market_read_client import (
+        get_option_bars_daily_via_plugin,
+        get_option_bars_minute_via_plugin,
+    )
+
     per = (period or "1 min").strip()
     sym = (symbol or "").strip().upper()
     exp = _norm_expiry_date(expiry)
@@ -77,51 +74,42 @@ def get_option_bars(
         r = "P"
     if not sym or exp is None:
         return []
+    exp_str = exp.isoformat()
     try:
-        params = _get_conn_params(config)
-        conn = psycopg2.connect(**params)
-        try:
-            with conn.cursor(cursor_factory=RealDictCursor) as cur:
-                if per.upper() == "1 D":
-                    cur.execute(
-                        """
-                        SELECT extract(epoch from bar_date) AS time,
-                               open, high, low, close, volume, vwap,
-                               'massive' AS source
-                        FROM market.option_daily
-                        WHERE underlying = %s AND expiry = %s
-                          AND strike = %s AND option_right = %s
-                        ORDER BY bar_date DESC NULLS LAST
-                        LIMIT %s
-                        """,
-                        (sym, exp, float(strike), r, max(1, min(500, limit))),
-                    )
-                else:
-                    cur.execute(
-                        """
-                        SELECT extract(epoch from bar_time) AS time,
-                               open, high, low, close, volume, vwap,
-                               'massive' AS source
-                        FROM market.option_minute
-                        WHERE underlying = %s AND expiry = %s
-                          AND strike = %s AND option_right = %s
-                          AND period = %s
-                        ORDER BY bar_time DESC NULLS LAST
-                        LIMIT %s
-                        """,
-                        (
-                            sym,
-                            exp,
-                            float(strike),
-                            r,
-                            _minute_period_db(per),
-                            max(1, min(500, limit)),
-                        ),
-                    )
-                rows = cur.fetchall()
-            return [dict(x) for x in rows]
-        finally:
-            conn.close()
+        if per.upper() == "1 D":
+            raw = get_option_bars_daily_via_plugin(sym, exp_str, float(strike), r, limit=limit)
+            rows: List[Dict[str, Any]] = []
+            for bar in raw:
+                bd = bar.get("bar_date")
+                epoch = None
+                if bd:
+                    try:
+                        epoch = date.fromisoformat(str(bd)[:10]).toordinal()
+                        d = date.fromisoformat(str(bd)[:10])
+                        from datetime import datetime, timezone as tz
+                        epoch = datetime(d.year, d.month, d.day, tzinfo=tz.utc).timestamp()
+                    except (ValueError, TypeError):
+                        pass
+                rows.append({
+                    "time": epoch,
+                    "open": bar.get("open"),
+                    "high": bar.get("high"),
+                    "low": bar.get("low"),
+                    "close": bar.get("close"),
+                    "volume": bar.get("volume"),
+                    "vwap": bar.get("vwap"),
+                    "source": "massive",
+                })
+            return rows
+        else:
+            db_period = _minute_period_db(per)
+            raw = get_option_bars_minute_via_plugin(
+                sym, exp_str, float(strike), r, period=db_period, limit=limit,
+            )
+            return [
+                {**bar, "source": "massive"}
+                for bar in raw
+            ]
     except Exception as e:
-        logger.debug("get_option_bars failed: %s", e)
+        logger.debug("get_option_bars via Plugin failed: %s", e)
         return []

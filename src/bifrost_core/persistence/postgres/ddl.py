@@ -1296,92 +1296,71 @@ def _ensure_tables(conn, log=None, log_table=None) -> None:
             ON public.cache_stock_snapshot (fetched_at DESC)
             """
         )
-        # P9: Trade-facing SEPA/universe views read market.* (public.tickers / stock_day dropped).
-        # Created only when market schema tables exist (plugin DDL applied first).
+        # Plugin-synced tables: former views over market.ticker / market.stock_daily.
+        # Populated by universe_sync.py from Plugin API (Golden Source).
         _log_table(
-            "v_us_equity_universe",
-            "View: US common-stock universe from market.ticker (compat shape for SEPA)",
+            "us_equity_universe",
+            "US common-stock universe synced from Plugin GET /market/reference/universe",
         )
         cur.execute(
             """
-            DO $univ$
-            BEGIN
-              IF to_regclass('market.ticker') IS NOT NULL THEN
-                EXECUTE $sql$
-                CREATE OR REPLACE VIEW public.v_us_equity_universe AS
-                SELECT
-                    -- Stable synthetic id (public.tickers dropped in P9). Non-null so
-                    -- readiness_snapshot included_in_universe = (tickers_id IS NOT NULL) works.
-                    hashtext(upper(trim(t.symbol)))::bigint AS tickers_id,
-                    upper(trim(t.symbol)) AS symbol,
-                    t.name,
-                    t.market,
-                    t.locale,
-                    t.primary_exchange,
-                    t.instrument_type,
-                    t.active,
-                    NULL::timestamptz AS delisted_utc,
-                    t.list_date,
-                    t.sector,
-                    t.industry
-                FROM market.ticker t
-                WHERE COALESCE(t.active, false) = true
-                  AND lower(COALESCE(t.locale, '')) = 'us'
-                  AND lower(COALESCE(t.market, '')) = 'stocks'
-                  AND lower(COALESCE(t.instrument_type, '')) = 'cs'
-                $sql$;
-                EXECUTE 'CREATE OR REPLACE VIEW public.v_sepa_us_equity_universe AS SELECT * FROM public.v_us_equity_universe';
-              END IF;
-            END
-            $univ$
+            CREATE TABLE IF NOT EXISTS public.us_equity_universe (
+                tickers_id bigint,
+                symbol text PRIMARY KEY,
+                name text,
+                market text,
+                locale text,
+                primary_exchange text,
+                instrument_type text,
+                active boolean,
+                delisted_utc timestamptz,
+                list_date date,
+                sector text,
+                industry text,
+                synced_at timestamptz DEFAULT now()
+            )
             """
-        )
-        _log_table(
-            "v_sepa_symbol_price_readiness",
-            "View: per-symbol market.stock_daily bar counts and price_ready vs lookback window",
         )
         cur.execute(
             """
-            DO $price_ready$
-            BEGIN
-              IF to_regclass('market.stock_daily') IS NOT NULL THEN
-                EXECUTE $sql$
-                CREATE OR REPLACE VIEW public.v_sepa_symbol_price_readiness AS
-                WITH params AS (
-                    SELECT
-                        'polygon'::text AS price_source,
-                        (CURRENT_DATE - integer '420') AS window_start,
-                        CURRENT_DATE AS as_of_date,
-                        240::integer AS min_bar_rows,
-                        7::integer AS max_stale_calendar_days
-                )
-                SELECT
-                    p.as_of_date,
-                    upper(trim(sd.symbol)) AS symbol,
-                    p.price_source,
-                    count(*)::integer AS bar_rows,
-                    min(sd.bar_date)::date AS first_bar_date,
-                    max(sd.bar_date)::date AS last_bar_date,
-                    count(*) FILTER (WHERE sd.close IS NULL)::integer AS null_close_rows,
-                    count(*) FILTER (WHERE sd.volume IS NULL)::integer AS null_volume_rows,
-                    (
-                        count(*) >= p.min_bar_rows
-                        AND max(sd.bar_date) >= (
-                            p.as_of_date - (p.max_stale_calendar_days || ' days')::interval
-                        )::date
-                        AND count(*) FILTER (WHERE sd.close IS NULL) = 0
-                        AND count(*) FILTER (WHERE sd.volume IS NULL) = 0
-                    ) AS price_ready
-                FROM params p
-                JOIN market.stock_daily sd
-                    ON sd.bar_date >= p.window_start
-                   AND sd.bar_date <= p.as_of_date
-                GROUP BY p.as_of_date, p.price_source, p.min_bar_rows, p.max_stale_calendar_days,
-                         p.window_start, upper(trim(sd.symbol))
-                $sql$;
-              END IF;
-            END
-            $price_ready$
+            CREATE OR REPLACE VIEW public.v_us_equity_universe AS
+            SELECT tickers_id, symbol, name, market, locale, primary_exchange,
+                   instrument_type, active, delisted_utc, list_date, sector, industry
+            FROM public.us_equity_universe
+            """
+        )
+        cur.execute(
+            """
+            CREATE OR REPLACE VIEW public.v_sepa_us_equity_universe AS
+            SELECT * FROM public.v_us_equity_universe
+            """
+        )
+        _log_table(
+            "sepa_symbol_price_readiness",
+            "Per-symbol bar counts and price_ready synced from Plugin /readiness/bar-aggregate",
+        )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS public.sepa_symbol_price_readiness (
+                as_of_date date,
+                symbol text PRIMARY KEY,
+                price_source text,
+                bar_rows integer,
+                first_bar_date date,
+                last_bar_date date,
+                null_close_rows integer,
+                null_volume_rows integer,
+                price_ready boolean,
+                synced_at timestamptz DEFAULT now()
+            )
+            """
+        )
+        cur.execute(
+            """
+            CREATE OR REPLACE VIEW public.v_sepa_symbol_price_readiness AS
+            SELECT as_of_date, symbol, price_source, bar_rows, first_bar_date,
+                   last_bar_date, null_close_rows, null_volume_rows, price_ready
+            FROM public.sepa_symbol_price_readiness
             """
         )
         _log_table(
@@ -1897,3 +1876,18 @@ def _ensure_tables(conn, log=None, log_table=None) -> None:
         )
 
         conn.commit()
+
+        try:
+            from bifrost_core.persistence.postgres.universe_sync import (
+                sync_price_readiness_from_plugin,
+                sync_universe_from_plugin,
+            )
+
+            sync_universe_from_plugin(conn)
+            sync_price_readiness_from_plugin(conn)
+            conn.commit()
+        except Exception:
+            try:
+                conn.rollback()
+            except Exception:
+                pass

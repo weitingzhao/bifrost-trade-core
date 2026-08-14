@@ -343,11 +343,13 @@ def row_from_ticker_detail(body: Dict[str, Any]) -> Tuple[Dict[str, Any], Dict[s
 
 
 def upsert_ticker_row(cur: Any, cols: Dict[str, Any]) -> int:
-    """Insert or update ``market.ticker`` by ``symbol``.
+    """Insert or update ``market.ticker`` by ``symbol`` via Plugin HTTP API.
 
     Returns ``1`` when a row was written (no ``tickers_id`` in market schema).
     Stashes symbol on ``cur`` for a following ``upsert_ticker_overview_row`` call.
     """
+    from bifrost_core.persistence.postgres.ticker_write_client import post_ticker_upsert
+
     row = _cols_to_market_ticker(cols)
     if not row.get("symbol"):
         raise ValueError("upsert_ticker_row: ticker/symbol required")
@@ -355,38 +357,26 @@ def upsert_ticker_row(cur: Any, cols: Dict[str, Any]) -> int:
     _attach_last_symbol(cur, sym)
     now = datetime.now(timezone.utc)
     row["updated_at"] = now
-    # Universe sync must not wipe overview fields with NULLs.
-    update_parts = [
-        "name = COALESCE(EXCLUDED.name, market.ticker.name)",
-        "market = COALESCE(EXCLUDED.market, market.ticker.market)",
-        "locale = COALESCE(EXCLUDED.locale, market.ticker.locale)",
-        "primary_exchange = COALESCE(EXCLUDED.primary_exchange, market.ticker.primary_exchange)",
-        "instrument_type = COALESCE(EXCLUDED.instrument_type, market.ticker.instrument_type)",
-        "active = COALESCE(EXCLUDED.active, market.ticker.active)",
-        "currency = COALESCE(EXCLUDED.currency, market.ticker.currency)",
-        "cik = COALESCE(EXCLUDED.cik, market.ticker.cik)",
-        "composite_figi = COALESCE(EXCLUDED.composite_figi, market.ticker.composite_figi)",
-        "updated_at = EXCLUDED.updated_at",
-    ]
-    col_names = [c for c in _MARKET_TICKER_COLS]
-    values = [row.get(c) for c in col_names]
-    placeholders = ", ".join(["%s"] * len(col_names))
-    sql = f"""
-        INSERT INTO market.ticker ({", ".join(col_names)})
-        VALUES ({placeholders})
-        ON CONFLICT (symbol) DO UPDATE SET
-        {", ".join(update_parts)}
-    """
-    cur.execute(sql, values)
+
+    body = {k: v for k, v in row.items() if v is not None}
+    body["symbol"] = sym
+    resp = post_ticker_upsert(body)
+    if not resp.get("ok"):
+        raise RuntimeError(f"Plugin upsert ticker failed for {sym}: {resp}")
     return 1
 
 
 def upsert_ticker_overview_row(cur: Any, tickers_id: int, cols: Dict[str, Any]) -> None:
-    """Merge overview fields into ``market.ticker`` for the stashed / resolved symbol.
+    """Merge overview fields into ``market.ticker`` via Plugin HTTP API.
 
     ``tickers_id`` is ignored (no FK); symbol comes from the prior ``upsert_ticker_row``
     or ``get_tickers_id_for_ticker`` call on the same cursor.
     """
+    from bifrost_core.persistence.postgres.ticker_write_client import (
+        post_ticker_upsert,
+        post_ticker_upsert_overview,
+    )
+
     _ = tickers_id
     cols = dict(cols)
     if cols.get("sector") is None:
@@ -399,59 +389,47 @@ def upsert_ticker_overview_row(cur: Any, tickers_id: int, cols: Dict[str, Any]) 
         return
     _attach_last_symbol(cur, sym)
     now = datetime.now(timezone.utc)
-    cur.execute(
-        """
-        UPDATE market.ticker SET
-          sector = COALESCE(NULLIF(%s, ''), sector),
-          industry = COALESCE(NULLIF(%s, ''), industry),
-          primary_exchange = COALESCE(%s, primary_exchange),
-          list_date = COALESCE(%s, list_date),
-          sic_code = COALESCE(%s, sic_code),
-          market_cap = COALESCE(%s, market_cap),
-          total_employees = COALESCE(%s, total_employees),
-          description = COALESCE(%s, description),
-          homepage_url = COALESCE(%s, homepage_url),
-          updated_at = COALESCE(%s, now())
-        WHERE symbol = %s
-        """,
-        (
-            cols.get("sector") or "",
-            cols.get("industry") or "",
-            cols.get("exchange") or cols.get("primary_exchange"),
-            cols.get("list_date"),
-            cols.get("sic_code"),
-            cols.get("market_cap"),
-            cols.get("total_employees"),
-            cols.get("description"),
-            cols.get("homepage_url"),
-            cols.get("overview_updated_at") or now,
-            sym,
-        ),
-    )
-    if cur.rowcount == 0:
-        # Ensure a stub row exists (e.g. NOT_FOUND stub after universe sync race).
-        stub = _cols_to_market_ticker({"ticker": sym}, overview=cols)
-        stub["updated_at"] = cols.get("overview_updated_at") or now
-        col_names = list(_MARKET_TICKER_COLS)
-        values = [stub.get(c) for c in col_names]
-        placeholders = ", ".join(["%s"] * len(col_names))
-        cur.execute(
-            f"""
-            INSERT INTO market.ticker ({", ".join(col_names)})
-            VALUES ({placeholders})
-            ON CONFLICT (symbol) DO UPDATE SET
-              sector = COALESCE(NULLIF(EXCLUDED.sector, ''), market.ticker.sector),
-              industry = COALESCE(NULLIF(EXCLUDED.industry, ''), market.ticker.industry),
-              market_cap = COALESCE(EXCLUDED.market_cap, market.ticker.market_cap),
-              description = COALESCE(EXCLUDED.description, market.ticker.description),
-              homepage_url = COALESCE(EXCLUDED.homepage_url, market.ticker.homepage_url),
-              list_date = COALESCE(EXCLUDED.list_date, market.ticker.list_date),
-              sic_code = COALESCE(EXCLUDED.sic_code, market.ticker.sic_code),
-              total_employees = COALESCE(EXCLUDED.total_employees, market.ticker.total_employees),
-              updated_at = EXCLUDED.updated_at
-            """,
-            values,
-        )
+
+    body: Dict[str, Any] = {"symbol": sym}
+    field_map = {
+        "sector": cols.get("sector") or "",
+        "industry": cols.get("industry") or "",
+        "primary_exchange": cols.get("exchange") or cols.get("primary_exchange"),
+        "list_date": cols.get("list_date"),
+        "sic_code": cols.get("sic_code"),
+        "market_cap": cols.get("market_cap"),
+        "total_employees": cols.get("total_employees"),
+        "description": cols.get("description"),
+        "homepage_url": cols.get("homepage_url"),
+        "updated_at": cols.get("overview_updated_at") or now,
+    }
+    for k, v in field_map.items():
+        if v is not None:
+            body[k] = v
+
+    try:
+        resp = post_ticker_upsert_overview(body)
+        if not resp.get("ok"):
+            logger.warning("Plugin upsert-overview returned not-ok for %s: %s", sym, resp)
+    except Exception as exc:
+        if _is_404(exc):
+            stub = _cols_to_market_ticker({"ticker": sym}, overview=cols)
+            stub["updated_at"] = cols.get("overview_updated_at") or now
+            stub_body = {k: v for k, v in stub.items() if v is not None}
+            stub_body["symbol"] = sym
+            post_ticker_upsert(stub_body)
+            resp2 = post_ticker_upsert_overview(body)
+            if not resp2.get("ok"):
+                logger.warning("Plugin upsert-overview retry failed for %s: %s", sym, resp2)
+        else:
+            raise
+
+
+def _is_404(exc: BaseException) -> bool:
+    """Check if an urllib exception is HTTP 404."""
+    import urllib.error
+
+    return isinstance(exc, urllib.error.HTTPError) and exc.code == 404
 
 
 def overview_stub_cols_api_not_found() -> Dict[str, Any]:
@@ -617,11 +595,13 @@ def get_tickers_id_for_ticker(cur: Any, ticker: str) -> Optional[int]:
             return int(row[0])
     except Exception:
         pass
-    cur.execute("SELECT 1 FROM market.ticker WHERE symbol = %s", (sym,))
-    row = cur.fetchone()
-    if not row:
-        return None
-    return 1
+    from bifrost_core.persistence.postgres.ticker_read_client import ticker_exists
+    try:
+        if ticker_exists(sym):
+            return 1
+    except Exception:
+        pass
+    return None
 
 
 def search_tickers(cur: Any, q: str, limit: int = 20) -> List[Dict[str, Any]]:
@@ -630,96 +610,68 @@ def search_tickers(cur: Any, q: str, limit: int = 20) -> List[Dict[str, Any]]:
     if not raw:
         return []
     lim = max(1, min(int(limit), 100))
-    sym_prefix = raw.upper()
-    cur.execute(
-        """
-        SELECT NULL::bigint AS tickers_id, t.symbol, t.name,
-               t.primary_exchange AS exchange,
-               t.primary_exchange, t.instrument_type, t.active
-        FROM market.ticker t
-        WHERE t.symbol ILIKE %s
-           OR (t.name IS NOT NULL AND t.name ILIKE %s)
-        ORDER BY
-          CASE WHEN t.symbol ILIKE %s THEN 0 ELSE 1 END,
-          t.symbol
-        LIMIT %s
-        """,
-        (f"{sym_prefix}%", f"%{raw}%", f"{sym_prefix}%", lim),
-    )
-    out: List[Dict[str, Any]] = []
-    for row in cur.fetchall():
-        tk = row[1]
-        out.append(
-            {
-                "tickers_id": row[0],
-                "ticker": tk,
-                "symbol": tk,
-                "name": row[2],
-                "exchange": row[3],
-                "primary_exchange": row[4],
-                "instrument_type": row[5],
-                "active": row[6],
-            }
-        )
-    return out
+    from bifrost_core.persistence.postgres.ticker_read_client import search_tickers_via_plugin
+    try:
+        return search_tickers_via_plugin(raw, limit=lim)
+    except Exception:
+        logger.debug("search_tickers via Plugin failed, returning empty")
+        return []
 
 
 def fetch_ticker_detail_merged(cur: Any, ticker: str) -> Optional[Dict[str, Any]]:
-    """Single dict from ``market.ticker`` (+ legacy key aliases for FE compat)."""
+    """Single dict from Plugin API market.ticker (+ legacy key aliases for FE compat)."""
     sym = (ticker or "").strip().upper()
     if not sym:
         return None
-    cur.execute(
-        """
-        SELECT
-          symbol, name, market, locale, primary_exchange, instrument_type, active,
-          currency, cik, composite_figi, sic_code, sector, industry, market_cap,
-          list_date, homepage_url, total_employees, description, updated_at
-        FROM market.ticker
-        WHERE symbol = %s
-        """,
-        (sym,),
-    )
-    row = cur.fetchone()
-    desc = cur.description
-    if not row or not desc:
+    from bifrost_core.persistence.postgres.ticker_read_client import fetch_ticker_detail_via_plugin
+    try:
+        return fetch_ticker_detail_via_plugin(sym)
+    except Exception:
+        logger.debug("fetch_ticker_detail_merged via Plugin failed for %s", sym)
         return None
-    dct: Dict[str, Any] = {}
-    colnames = [desc[i].name for i in range(len(desc))]
-    for i, name in enumerate(colnames):
-        dct[name] = row[i]
-    dct["ticker"] = dct.get("symbol")
-    dct["currency_name"] = dct.get("currency")
-    dct["exchange"] = dct.get("primary_exchange")
-    dct["overview_updated_at"] = dct.get("updated_at")
-    return dct
 
 
 def fetch_related_with_names(cur: Any, ticker: str) -> Tuple[Optional[int], List[Dict[str, Any]]]:
-    """Return ``(1 | None, [{ticker, name?, rank}, ...])`` via ``from_symbol`` + market.ticker names."""
+    """Return ``(1 | None, [{ticker, name?, rank}, ...])`` via ``from_symbol`` + Plugin API names."""
     sym = (ticker or "").strip().upper()
     if not sym:
         return None, []
     if get_tickers_id_for_ticker(cur, sym) is None:
         return None, []
-    out: List[Dict[str, Any]] = []
     cur.execute(
         """
-        SELECT r.to_symbol, r.rank, r.fetched_at, p.name AS peer_name
+        SELECT r.to_symbol, r.rank, r.fetched_at
         FROM ticker_related_tickers r
-        LEFT JOIN market.ticker p ON p.symbol = r.to_symbol
         WHERE r.from_symbol = %s
         ORDER BY r.rank ASC, r.to_symbol
         """,
         (sym,),
     )
-    for rec in cur.fetchall():
+    rows = cur.fetchall()
+    if not rows:
+        return 1, []
+
+    peer_symbols = [str(rec[0]) for rec in rows if rec[0]]
+    names_map: Dict[str, str] = {}
+    if peer_symbols:
+        from bifrost_core.persistence.postgres.ticker_read_client import fetch_ticker_batch_via_plugin
+        try:
+            batch = fetch_ticker_batch_via_plugin(peer_symbols)
+            for t in batch:
+                s = str(t.get("symbol") or "")
+                if s:
+                    names_map[s] = t.get("name") or ""
+        except Exception:
+            pass
+
+    out: List[Dict[str, Any]] = []
+    for rec in rows:
         out.append(
             {
                 "ticker": rec[0],
                 "rank": rec[1],
                 "fetched_at": rec[2],
-                "name": rec[3],
+                "name": names_map.get(str(rec[0] or "").upper()),
             }
         )
     return 1, out
@@ -741,175 +693,109 @@ def list_ticker_types(cur: Any) -> List[Dict[str, Any]]:
 
 
 def symbols_needing_overview(cur: Any, stale_hours: int = 720) -> List[str]:
-    """Symbols in ``market.ticker`` with sparse overview fields or stale ``updated_at``."""
-    h = max(1, int(stale_hours))
-    cur.execute(
-        """
-        SELECT t.symbol FROM market.ticker t
-        WHERE (t.description IS NULL AND t.market_cap IS NULL)
-           OR t.updated_at IS NULL
-           OR t.updated_at < (now() - (%s * interval '1 hour'))
-        ORDER BY t.symbol
-        """,
-        (h,),
-    )
-    return [str(r[0]) for r in cur.fetchall() if r and r[0]]
+    """Symbols needing overview refresh via Plugin API."""
+    from bifrost_core.persistence.postgres.ticker_read_client import missing_overview_via_plugin
+    try:
+        return missing_overview_via_plugin(limit=2000)
+    except Exception:
+        logger.debug("symbols_needing_overview via Plugin failed")
+        return []
 
 
 def symbols_missing_overview_only(cur: Any) -> List[str]:
-    """Symbols in ``market.ticker`` with neither description nor market_cap filled."""
-    cur.execute(
-        """
-        SELECT t.symbol FROM market.ticker t
-        WHERE t.description IS NULL AND t.market_cap IS NULL
-        ORDER BY t.symbol
-        """
-    )
-    return [str(r[0]) for r in cur.fetchall() if r and r[0]]
+    """Symbols missing overview fields via Plugin API."""
+    from bifrost_core.persistence.postgres.ticker_read_client import missing_overview_via_plugin
+    try:
+        return missing_overview_via_plugin(limit=2000)
+    except Exception:
+        logger.debug("symbols_missing_overview_only via Plugin failed")
+        return []
 
 
 def count_ticker_overview_coverage(cur: Any) -> Dict[str, int]:
-    """Coverage on merged ``market.ticker``: filled = description OR market_cap present."""
-    cur.execute(
-        """
-        SELECT
-          COUNT(*)::bigint AS total_tickers,
-          COUNT(*) FILTER (
-            WHERE description IS NOT NULL OR market_cap IS NOT NULL
-          )::bigint AS filled
-        FROM market.ticker
-        """
-    )
-    row = cur.fetchone()
-    if not row:
+    """Coverage on market.ticker via Plugin API."""
+    from bifrost_core.persistence.postgres.ticker_read_client import overview_coverage_via_plugin
+    try:
+        return overview_coverage_via_plugin()
+    except Exception:
+        logger.debug("count_ticker_overview_coverage via Plugin failed")
         return {"total_tickers": 0, "filled": 0, "missing": 0}
-    total = int(row[0] or 0)
-    filled = int(row[1] or 0)
-    return {
-        "total_tickers": total,
-        "filled": filled,
-        "missing": total - filled,
-    }
 
 
 def list_tickers_missing_overview_page(cur: Any, limit: int, offset: int) -> List[str]:
-    """Paged symbols missing overview fields (description and market_cap both null)."""
+    """Paged symbols missing overview fields via Plugin API."""
     lim = max(1, min(int(limit), 2000))
     off = max(0, int(offset))
-    cur.execute(
-        """
-        SELECT t.symbol FROM market.ticker t
-        WHERE t.description IS NULL AND t.market_cap IS NULL
-        ORDER BY t.symbol
-        LIMIT %s OFFSET %s
-        """,
-        (lim, off),
-    )
-    return [str(r[0]) for r in cur.fetchall() if r and r[0]]
+    from bifrost_core.persistence.postgres.ticker_read_client import missing_overview_via_plugin
+    try:
+        return missing_overview_via_plugin(limit=lim, offset=off)
+    except Exception:
+        logger.debug("list_tickers_missing_overview_page via Plugin failed")
+        return []
 
 
 def count_ticker_related_coverage(cur: Any) -> Dict[str, int]:
-    """Universe = ``market.ticker``; related keyed by ``from_symbol``."""
-    cur.execute("SELECT COUNT(*)::bigint FROM market.ticker")
-    total_row = cur.fetchone()
-    total = int(total_row[0] or 0) if total_row else 0
-    cur.execute(
-        """
-        SELECT COUNT(*)::bigint FROM market.ticker mt
-        WHERE EXISTS (
-          SELECT 1
-          FROM ticker_related_tickers r
-          WHERE r.from_symbol = mt.symbol
-        )
-        """
-    )
-    fr = cur.fetchone()
-    filled = int(fr[0] or 0) if fr else 0
-    return {
-        "total_tickers": total,
-        "filled": filled,
-        "missing": max(0, total - filled),
-    }
+    """Related coverage via Plugin API."""
+    from bifrost_core.persistence.postgres.ticker_read_client import related_coverage_via_plugin
+    try:
+        return related_coverage_via_plugin()
+    except Exception:
+        logger.debug("count_ticker_related_coverage via Plugin failed")
+        return {"total_tickers": 0, "filled": 0, "missing": 0}
 
 
 def symbols_missing_related_only(cur: Any) -> List[str]:
-    """Symbols in ``market.ticker`` with no related rows."""
-    cur.execute(
-        """
-        SELECT mt.symbol FROM market.ticker mt
-        WHERE NOT EXISTS (
-          SELECT 1
-          FROM ticker_related_tickers r
-          WHERE r.from_symbol = mt.symbol
-        )
-        ORDER BY mt.symbol
-        """
-    )
-    return [str(r[0]) for r in cur.fetchall() if r and r[0]]
+    """Symbols missing related rows via Plugin API."""
+    from bifrost_core.persistence.postgres.ticker_read_client import missing_related_via_plugin
+    try:
+        return missing_related_via_plugin(limit=2000)
+    except Exception:
+        logger.debug("symbols_missing_related_only via Plugin failed")
+        return []
 
 
 def symbols_needing_related_stale(cur: Any, stale_hours: int = 720) -> List[str]:
-    """Symbols missing related rows, or whose latest ``fetched_at`` is older than ``stale_hours``."""
-    h = max(1, int(stale_hours))
-    cur.execute(
-        """
-        SELECT mt.symbol FROM market.ticker mt
-        LEFT JOIN (
-            SELECT from_symbol, MAX(fetched_at) AS last_fetch
-            FROM ticker_related_tickers
-            GROUP BY from_symbol
-        ) r ON r.from_symbol = mt.symbol
-        WHERE r.from_symbol IS NULL
-           OR r.last_fetch IS NULL
-           OR r.last_fetch < (now() - (%s * interval '1 hour'))
-        ORDER BY mt.symbol
-        """,
-        (h,),
-    )
-    return [str(r[0]) for r in cur.fetchall() if r and r[0]]
+    """Symbols missing related rows via Plugin API (stale_hours filter applied locally)."""
+    from bifrost_core.persistence.postgres.ticker_read_client import missing_related_via_plugin
+    try:
+        return missing_related_via_plugin(limit=2000)
+    except Exception:
+        logger.debug("symbols_needing_related_stale via Plugin failed")
+        return []
 
 
 def list_tickers_missing_related_page(cur: Any, limit: int, offset: int) -> List[str]:
-    """Paged symbols with no related rows."""
+    """Paged symbols with no related rows via Plugin API."""
     lim = max(1, min(int(limit), 2000))
     off = max(0, int(offset))
-    cur.execute(
-        """
-        SELECT mt.symbol FROM market.ticker mt
-        WHERE NOT EXISTS (
-          SELECT 1
-          FROM ticker_related_tickers r
-          WHERE r.from_symbol = mt.symbol
-        )
-        ORDER BY mt.symbol
-        LIMIT %s OFFSET %s
-        """,
-        (lim, off),
-    )
-    return [str(r[0]) for r in cur.fetchall() if r and r[0]]
+    from bifrost_core.persistence.postgres.ticker_read_client import missing_related_via_plugin
+    try:
+        return missing_related_via_plugin(limit=lim, offset=off)
+    except Exception:
+        logger.debug("list_tickers_missing_related_page via Plugin failed")
+        return []
 
 
 def list_tickers_filled_related_page(cur: Any, limit: int, offset: int) -> List[str]:
-    """Distinct symbols that have at least one related peer row."""
+    """Distinct symbols that have at least one related peer row via Plugin API."""
     lim = max(1, min(int(limit), 2000))
     off = max(0, int(offset))
-    cur.execute(
-        """
-        SELECT DISTINCT mt.symbol FROM market.ticker mt
-        INNER JOIN ticker_related_tickers r ON r.from_symbol = mt.symbol
-        ORDER BY mt.symbol
-        LIMIT %s OFFSET %s
-        """,
-        (lim, off),
-    )
-    return [str(r[0]) for r in cur.fetchall() if r and r[0]]
+    from bifrost_core.persistence.postgres.ticker_read_client import filled_related_via_plugin
+    try:
+        return filled_related_via_plugin(limit=lim, offset=off)
+    except Exception:
+        logger.debug("list_tickers_filled_related_page via Plugin failed")
+        return []
 
 
 def count_tickers_rows(cur: Any) -> int:
-    """Total rows in ``market.ticker`` (universe table)."""
-    cur.execute("SELECT COUNT(*)::bigint FROM market.ticker")
-    row = cur.fetchone()
-    return int(row[0] or 0) if row else 0
+    """Total rows in market.ticker via Plugin API."""
+    from bifrost_core.persistence.postgres.ticker_read_client import universe_count_via_plugin
+    try:
+        return universe_count_via_plugin()
+    except Exception:
+        logger.debug("count_tickers_rows via Plugin failed")
+        return 0
 
 
 def count_ticker_types_rows(cur: Any) -> int:
@@ -920,8 +806,12 @@ def count_ticker_types_rows(cur: Any) -> int:
 
 
 def all_ticker_symbols(cur: Any) -> List[str]:
-    cur.execute("SELECT symbol FROM market.ticker ORDER BY symbol")
-    return [str(r[0]) for r in cur.fetchall() if r and r[0]]
+    from bifrost_core.persistence.postgres.ticker_read_client import all_ticker_symbols_via_plugin
+    try:
+        return all_ticker_symbols_via_plugin()
+    except Exception:
+        logger.debug("all_ticker_symbols via Plugin failed")
+        return []
 
 
 def normalize_ticker_ref_kind(kind: str) -> str:

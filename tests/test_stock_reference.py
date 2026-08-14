@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from unittest.mock import patch
+
 from bifrost_core.persistence.postgres.ticker_reference import (
     count_ticker_overview_coverage,
     count_ticker_related_coverage,
@@ -169,111 +171,63 @@ def test_overview_stub_cols_api_not_found_sets_timestamp():
     assert stub["overview_updated_at"] is not None
 
 
-def test_symbols_missing_overview_only_returns_tickers_without_overview_row():
-    class _Cur:
-        def execute(self, *_a, **_k):
-            return None
-
-        def fetchall(self):
-            return [("AAA",), ("ZZZ",)]
-
-    assert symbols_missing_overview_only(_Cur()) == ["AAA", "ZZZ"]
+@patch("bifrost_core.persistence.postgres.ticker_read_client.missing_overview_via_plugin")
+def test_symbols_missing_overview_only_returns_tickers_without_overview_row(mock_fn):
+    mock_fn.return_value = ["AAA", "ZZZ"]
+    assert symbols_missing_overview_only(None) == ["AAA", "ZZZ"]
 
 
-def test_count_ticker_overview_coverage_maps_row():
-    class _Cur:
-        def execute(self, *_a, **_k):
-            return None
-
-        def fetchone(self):
-            return (10000, 9200, 800)
-
-    assert count_ticker_overview_coverage(_Cur()) == {
+@patch("bifrost_core.persistence.postgres.ticker_read_client.overview_coverage_via_plugin")
+def test_count_ticker_overview_coverage_maps_row(mock_fn):
+    mock_fn.return_value = {"total_tickers": 10000, "filled": 9200, "missing": 800}
+    assert count_ticker_overview_coverage(None) == {
         "total_tickers": 10000,
         "filled": 9200,
         "missing": 800,
     }
 
 
-def test_list_tickers_missing_overview_page_respects_limit():
-    class _Cur:
-        def execute(self, sql, params):
-            self.params = params
-
-        def fetchall(self):
-            return [("A",), ("B",)]
-
-    cur = _Cur()
-    assert list_tickers_missing_overview_page(cur, 2, 10) == ["A", "B"]
-    assert cur.params == (2, 10)
+@patch("bifrost_core.persistence.postgres.ticker_read_client.missing_overview_via_plugin")
+def test_list_tickers_missing_overview_page_respects_limit(mock_fn):
+    mock_fn.return_value = ["A", "B"]
+    assert list_tickers_missing_overview_page(None, 2, 10) == ["A", "B"]
+    mock_fn.assert_called_once_with(limit=2, offset=10)
 
 
-def test_count_ticker_related_coverage_maps_row():
-    class _Cur:
-        def __init__(self):
-            self._n = 0
-
-        def execute(self, *_a, **_k):
-            return None
-
-        def fetchone(self):
-            # 1) COUNT(*) FROM market.ticker  2) COUNT filled via related join
-            self._n += 1
-            return (5000,) if self._n == 1 else (800,)
-
-    assert count_ticker_related_coverage(_Cur()) == {
+@patch("bifrost_core.persistence.postgres.ticker_read_client.related_coverage_via_plugin")
+def test_count_ticker_related_coverage_maps_row(mock_fn):
+    mock_fn.return_value = {"total_tickers": 5000, "filled": 800, "missing": 4200}
+    assert count_ticker_related_coverage(None) == {
         "total_tickers": 5000,
         "filled": 800,
         "missing": 4200,
     }
 
 
-def test_list_tickers_missing_related_page_params():
-    class _Cur:
-        def execute(self, _sql, params):
-            self.params = params
-
-        def fetchall(self):
-            return [("Z",)]
-
-    cur = _Cur()
-    assert list_tickers_missing_related_page(cur, 3, 99) == ["Z"]
-    assert cur.params == (3, 99)
+@patch("bifrost_core.persistence.postgres.ticker_read_client.missing_related_via_plugin")
+def test_list_tickers_missing_related_page_params(mock_fn):
+    mock_fn.return_value = ["Z"]
+    assert list_tickers_missing_related_page(None, 3, 99) == ["Z"]
+    mock_fn.assert_called_once_with(limit=3, offset=99)
 
 
-def test_list_tickers_filled_related_page_params():
-    class _Cur:
-        def execute(self, _sql, params):
-            self.params = params
-
-        def fetchall(self):
-            return [("A",), ("B",)]
-
-    cur = _Cur()
-    assert list_tickers_filled_related_page(cur, 2, 0) == ["A", "B"]
-    assert cur.params == (2, 0)
+@patch("bifrost_core.persistence.postgres.ticker_read_client.filled_related_via_plugin")
+def test_list_tickers_filled_related_page_params(mock_fn):
+    mock_fn.return_value = ["A", "B"]
+    assert list_tickers_filled_related_page(None, 2, 0) == ["A", "B"]
+    mock_fn.assert_called_once_with(limit=2, offset=0)
 
 
-def test_symbols_missing_related_only_returns_tickers_without_related_rows():
-    class _Cur:
-        def execute(self, *_a, **_k):
-            return None
-
-        def fetchall(self):
-            return [("AAA",), ("ZZZ",)]
-
-    assert symbols_missing_related_only(_Cur()) == ["AAA", "ZZZ"]
+@patch("bifrost_core.persistence.postgres.ticker_read_client.missing_related_via_plugin")
+def test_symbols_missing_related_only_returns_tickers_without_related_rows(mock_fn):
+    mock_fn.return_value = ["AAA", "ZZZ"]
+    assert symbols_missing_related_only(None) == ["AAA", "ZZZ"]
 
 
-def test_count_tickers_rows():
-    class _Cur:
-        def execute(self, *_a, **_k):
-            return None
-
-        def fetchone(self):
-            return (42_000,)
-
-    assert count_tickers_rows(_Cur()) == 42000
+@patch("bifrost_core.persistence.postgres.ticker_read_client.universe_count_via_plugin")
+def test_count_tickers_rows(mock_fn):
+    mock_fn.return_value = 42000
+    assert count_tickers_rows(None) == 42000
 
 
 def test_count_ticker_types_rows():

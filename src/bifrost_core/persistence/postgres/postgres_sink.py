@@ -5,7 +5,7 @@ import logging
 import math
 import os
 import time
-from datetime import date, datetime, timezone
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 import psycopg2
@@ -738,84 +738,56 @@ class PostgreSQLSink(StatusSink):
             logger.warning("write_open_orders failed: %s", e, exc_info=True)
 
     def write_ohlc_bars(self, rows: Any) -> None:
-        """Write stock OHLC to market.stock_daily (1 D) or market.stock_minute.
+        """Write stock OHLC bars via Plugin Market Data API (POST /stocks/bars/ingest).
 
-        UPSERT last-writer-wins on PK ``(symbol, bar_date)`` /
-        ``(symbol, period, bar_time)``. No ``source`` column.
-
-        Minute periods use the same mapping as ``get_bars`` (e.g. ``1 min`` →
-        ``1 minute``). Target year/month partitions must already exist
-        (market-data plugin ``ensure_*_partitions``); this method does not create them.
+        Delegates to the same HTTP client used by monitor/reader/market.py.
+        StatusSink's PG connection is preserved for daemon_*/account_* writes.
+        Failure logs a warning but does not crash the daemon.
         """
         if not rows:
             return
-        if not self._ensure_conn():
-            return
-        # Local import avoids persistence → monitor package cycle at module load.
-        from bifrost_core.monitor.reader.market import _minute_period_db
+        from bifrost_core.monitor.market_write_client import post_bars_ingest
 
+        payload = []
+        for r in rows:
+            symbol = (r.get("symbol") or "").strip()
+            period = (r.get("period") or "1 D").strip()
+            bar_time = r.get("bar_time")
+            if bar_time is None or not symbol:
+                continue
+            if isinstance(bar_time, (int, float)):
+                bar_dt = datetime.fromtimestamp(float(bar_time), tz=timezone.utc)
+            else:
+                bar_dt = bar_time
+            if period.upper() == "1 D":
+                bar_date_str = r.get("bar_date")
+                if bar_date_str:
+                    bt_iso = str(bar_date_str)[:10]
+                elif isinstance(bar_dt, datetime):
+                    bt_iso = bar_dt.strftime("%Y-%m-%d")
+                else:
+                    bt_iso = str(bar_dt)
+            else:
+                bt_iso = bar_dt.isoformat() if isinstance(bar_dt, datetime) else str(bar_dt)
+            payload.append({
+                "symbol": symbol,
+                "period": period,
+                "bar_time": bt_iso,
+                "open": r.get("open"),
+                "high": r.get("high"),
+                "low": r.get("low"),
+                "close": r.get("close"),
+                "volume": r.get("volume"),
+            })
+        if not payload:
+            return
         try:
-            with self._conn.cursor() as cur:
-                for r in rows:
-                    symbol = (r.get("symbol") or "").strip()
-                    period = (r.get("period") or "1 D").strip()
-                    bar_time = r.get("bar_time")
-                    open_ = r.get("open")
-                    high = r.get("high")
-                    low = r.get("low")
-                    close = r.get("close")
-                    volume = r.get("volume")
-                    if bar_time is None or not symbol:
-                        continue
-                    if isinstance(bar_time, (int, float)):
-                        bar_dt = datetime.fromtimestamp(float(bar_time), tz=timezone.utc)
-                    else:
-                        bar_dt = bar_time
-                    if period.upper() == "1 D":
-                        # market.stock_daily.bar_date is DATE — use original local date to
-                        # avoid UTC date shift (e.g. 18:00-0600 → next day in UTC)
-                        bar_date_str = r.get("bar_date")
-                        if bar_date_str:
-                            try:
-                                bar_d = date.fromisoformat(str(bar_date_str)[:10])
-                            except (ValueError, TypeError):
-                                bar_d = bar_dt.date() if isinstance(bar_dt, datetime) else bar_dt
-                        elif isinstance(bar_dt, datetime):
-                            bar_d = bar_dt.date()
-                        else:
-                            bar_d = bar_dt
-                        cur.execute(
-                            """
-                            INSERT INTO market.stock_daily
-                                (symbol, bar_date, open, high, low, close, volume, fetched_at)
-                            VALUES (%s, %s, %s, %s, %s, %s, %s, now())
-                            ON CONFLICT (symbol, bar_date)
-                            DO UPDATE SET open = EXCLUDED.open, high = EXCLUDED.high, low = EXCLUDED.low,
-                                          close = EXCLUDED.close, volume = EXCLUDED.volume,
-                                          fetched_at = now()
-                            """,
-                            (symbol, bar_d, open_, high, low, close, volume),
-                        )
-                    else:
-                        cur.execute(
-                            """
-                            INSERT INTO market.stock_minute
-                                (symbol, period, bar_time, open, high, low, close, volume, fetched_at)
-                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, now())
-                            ON CONFLICT (symbol, period, bar_time)
-                            DO UPDATE SET open = EXCLUDED.open, high = EXCLUDED.high, low = EXCLUDED.low,
-                                          close = EXCLUDED.close, volume = EXCLUDED.volume,
-                                          fetched_at = now()
-                            """,
-                            (symbol, _minute_period_db(period), bar_dt, open_, high, low, close, volume),
-                        )
-            self._conn.commit()
+            resp = post_bars_ingest(payload)
             logger.info(
-                "[R-A3] write_ohlc_bars: wrote %s rows to market.stock_daily/stock_minute",
-                len(rows),
+                "[R-A3] write_ohlc_bars: wrote %s rows via Plugin API",
+                resp.get("written", len(payload)),
             )
         except Exception as e:
-            self._conn.rollback()
             logger.warning("write_ohlc_bars failed: %s", e, exc_info=True)
 
     # Control commands older than this are ignored (consumed but not executed), to avoid executing

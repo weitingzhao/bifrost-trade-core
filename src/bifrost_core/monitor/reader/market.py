@@ -10,7 +10,6 @@ import psycopg2
 from psycopg2.extras import RealDictCursor
 
 from bifrost_core.persistence.postgres.connection import _get_conn_params
-from bifrost_core.monitor.reader.symbol_normalize import norm_bars_symbol as _norm_bars_symbol
 
 logger = logging.getLogger(__name__)
 
@@ -138,76 +137,29 @@ def get_bars(
     period: str = "1 D",
     limit: int = 200,
 ) -> List[Dict[str, Any]]:
-    """Return rows from market.stock_daily (1 D) or market.stock_minute. Newest first."""
+    """Return rows from market.stock_daily (1 D) or market.stock_minute via Plugin API. Newest first."""
     if not symbol or not symbol.strip():
         return []
-    per = (period or "1 D").strip()
     try:
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            if per.upper() == "1 D":
-                cur.execute(
-                    """
-                    SELECT symbol, '1 D' AS period, extract(epoch from bar_date) AS time,
-                           open, high, low, close, volume, vwap
-                    FROM market.stock_daily
-                    WHERE symbol = %s
-                    ORDER BY bar_date DESC NULLS LAST
-                    LIMIT %s
-                    """,
-                    (symbol.strip(), limit),
-                )
-            else:
-                cur.execute(
-                    """
-                    SELECT symbol, %s AS period, extract(epoch from bar_time) AS time,
-                           open, high, low, close, volume, vwap
-                    FROM market.stock_minute
-                    WHERE symbol = %s AND period = %s
-                    ORDER BY bar_time DESC NULLS LAST
-                    LIMIT %s
-                    """,
-                    (per, symbol.strip(), _minute_period_db(per), limit),
-                )
-            rows = cur.fetchall()
-        return [dict(r) for r in rows]
+        from bifrost_core.monitor.market_read_client import get_bars_via_plugin
+
+        rows = get_bars_via_plugin(symbol.strip(), period=period, limit=limit)
+        return rows
     except Exception as e:
-        logger.debug("get_bars failed: %s", e)
+        logger.debug("get_bars via plugin failed: %s", e)
         return []
 
 
 def get_bars_latest(conn: Any, symbol: Optional[str] = None, period: str = "1 D") -> Optional[float]:
-    """Return Unix time of the latest bar for symbol+period, or None if no data."""
+    """Return Unix time of the latest bar for symbol+period via Plugin API, or None if no data."""
     if not symbol or not symbol.strip():
         return None
-    per = (period or "1 D").strip()
     try:
-        with conn.cursor() as cur:
-            if per.upper() == "1 D":
-                cur.execute(
-                    """
-                    SELECT extract(epoch from bar_date) AS t
-                    FROM market.stock_daily
-                    WHERE symbol = %s
-                    ORDER BY bar_date DESC
-                    LIMIT 1
-                    """,
-                    (symbol.strip(),),
-                )
-            else:
-                cur.execute(
-                    """
-                    SELECT extract(epoch from bar_time) AS t
-                    FROM market.stock_minute
-                    WHERE symbol = %s AND period = %s
-                    ORDER BY bar_time DESC
-                    LIMIT 1
-                    """,
-                    (symbol.strip(), _minute_period_db(per)),
-                )
-            row = cur.fetchone()
-        return float(row[0]) if row and row[0] is not None else None
+        from bifrost_core.monitor.market_read_client import get_bars_latest_via_plugin
+
+        return get_bars_latest_via_plugin(symbol.strip(), period=period)
     except Exception as e:
-        logger.debug("get_bars_latest failed: %s", e)
+        logger.debug("get_bars_latest via plugin failed: %s", e)
         return None
 
 
@@ -218,41 +170,17 @@ def get_bar_times_in_range(
     start_ts: Optional[float] = None,
     end_ts: Optional[float] = None,
 ) -> List[float]:
-    """Return bar timestamps within [start_ts, end_ts] ordered ascending."""
+    """Return bar timestamps within [start_ts, end_ts] ordered ascending via Plugin API."""
     if not symbol or not symbol.strip() or start_ts is None or end_ts is None:
         return []
-    sym = symbol.strip()
-    per = (period or "1 D").strip()
     try:
-        with conn.cursor() as cur:
-            if per.upper() == "1 D":
-                cur.execute(
-                    """
-                    SELECT extract(epoch from bar_date) AS t
-                    FROM market.stock_daily
-                    WHERE symbol = %s
-                      AND bar_date >= to_timestamp(%s)::date
-                      AND bar_date <= to_timestamp(%s)::date
-                    ORDER BY bar_date ASC
-                    """,
-                    (sym, float(start_ts), float(end_ts)),
-                )
-            else:
-                cur.execute(
-                    """
-                    SELECT extract(epoch from bar_time) AS t
-                    FROM market.stock_minute
-                    WHERE symbol = %s AND period = %s
-                      AND bar_time >= to_timestamp(%s)
-                      AND bar_time <= to_timestamp(%s)
-                    ORDER BY bar_time ASC
-                    """,
-                    (sym, _minute_period_db(per), float(start_ts), float(end_ts)),
-                )
-            rows = cur.fetchall()
-        return [float(row[0]) for row in rows if row and row[0] is not None]
+        from bifrost_core.monitor.market_read_client import get_bar_times_in_range_via_plugin
+
+        return get_bar_times_in_range_via_plugin(
+            symbol.strip(), period=period, start_ts=float(start_ts), end_ts=float(end_ts)
+        )
     except Exception as e:
-        logger.debug("get_bar_times_in_range failed: %s", e)
+        logger.debug("get_bar_times_in_range via plugin failed: %s", e)
         return []
 
 
@@ -261,120 +189,51 @@ def get_bars_benchmark(
     symbols: Optional[List[str]] = None,
     on_or_before: Optional[date] = None,
 ) -> Dict[str, Dict[str, Any]]:
-    """Return latest daily bar on or before given date per symbol from market.stock_daily."""
+    """Return latest daily bar on or before given date per symbol via Plugin API."""
     sym_list = list({(s or "").strip() for s in (symbols or []) if (s or "").strip()})
     if not sym_list:
         return {}
-    ref = on_or_before if on_or_before is not None else date.today()
+    ref_str = (on_or_before if on_or_before is not None else date.today()).isoformat()
     try:
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute(
-                """
-                WITH ordered AS (
-                    SELECT symbol, bar_date, close,
-                           LEAD(close) OVER (PARTITION BY symbol ORDER BY bar_date DESC) AS prev_close
-                    FROM market.stock_daily
-                    WHERE symbol = ANY(%s) AND bar_date <= %s
-                )
-                SELECT DISTINCT ON (symbol) symbol,
-                       extract(epoch from bar_date) AS bar_time,
-                       close,
-                       prev_close
-                FROM ordered
-                ORDER BY symbol, bar_date DESC
-                """,
-                (sym_list, ref),
-            )
-            rows = cur.fetchall()
-        return {
-            (r["symbol"] or "").strip(): {
-                "bar_time": float(r["bar_time"]) if r.get("bar_time") is not None else 0,
-                "close": float(r["close"]) if r.get("close") is not None else 0,
-                "prev_close": float(r["prev_close"]) if r.get("prev_close") is not None and r["prev_close"] is not None else None,
-            }
-            for r in rows
-            if (r.get("symbol") or "").strip()
-        }
+        from bifrost_core.monitor.market_read_client import get_bars_benchmark_via_plugin
+
+        return get_bars_benchmark_via_plugin(sym_list, on_or_before=ref_str)
     except Exception as e:
-        logger.debug("get_bars_benchmark failed: %s", e)
+        logger.debug("get_bars_benchmark via plugin failed: %s", e)
         return {}
 
 
 def get_stock_day_fallback_price(conn: Any, symbol: str) -> Optional[Tuple[float, float, Optional[float]]]:
-    """Return (close, bar_time_epoch, prev_close) from market.stock_daily when live quote is missing/stale.
-
-    When the latest bar is **today**'s session date: before NY regular close (+ grace) we still use the prior
-    completed session (avoids intraday partial aggregates). After that cutoff we use today's close so Positions
-    can show the finalized daily bar when IB live is unavailable.
-    """
+    """Return (close, bar_time_epoch, prev_close) from Plugin API when live quote is missing/stale."""
     if not (symbol or "").strip():
         return None
     sym = (symbol or "").strip().upper()
-    today = date.today()
     try:
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute(
-                """
-                SELECT bar_date AS bar_time, close,
-                       extract(epoch from bar_date) AS bar_time_epoch
-                FROM market.stock_daily
-                WHERE symbol = %s
-                ORDER BY bar_date DESC
-                LIMIT 3
-                """,
-                (sym,),
-            )
-            rows = cur.fetchall()
-        if not rows:
-            return None
-        bt0 = rows[0].get("bar_time")
-        bar_date_0 = bt0.date() if hasattr(bt0, "date") else (bt0 if isinstance(bt0, date) else today)
-        if bar_date_0 == today:
-            try:
-                from src.massive.stock_ohlc_daily_smart import is_ny_session_safely_closed
+        from bifrost_core.monitor.market_read_client import get_fallback_price_via_plugin
 
-                session_done = is_ny_session_safely_closed()
-            except Exception:
-                session_done = False
-            if session_done:
-                r = rows[0]
-                prev_close = rows[1].get("close") if len(rows) > 1 else None
-            else:
-                if len(rows) < 2:
-                    return None
-                r = rows[1]
-                prev_close = rows[2].get("close") if len(rows) > 2 else None
-        else:
-            r = rows[0]
-            prev_close = rows[1].get("close") if len(rows) > 1 else None
-        close = r.get("close")
-        ts = r.get("bar_time_epoch")
-        if close is None or ts is None:
+        resp = get_fallback_price_via_plugin(sym)
+        if not resp.get("found"):
             return None
-        try:
-            c = float(close)
-            t = float(ts)
-            if not math.isfinite(c) or not math.isfinite(t) or c <= 0:
-                return None
-            pcl: Optional[float] = None
-            if prev_close is not None:
-                try:
-                    pc = float(prev_close)
-                    if math.isfinite(pc) and pc > 0:
-                        pcl = pc
-                except (TypeError, ValueError):
-                    pass
-            return (c, t, pcl)
-        except (TypeError, ValueError):
-            pass
-        return None
+        close = resp.get("close")
+        bar_time = resp.get("bar_time")
+        prev_close = resp.get("prev_close")
+        if close is None or bar_time is None:
+            return None
+        c = float(close)
+        t = float(bar_time)
+        if not math.isfinite(c) or not math.isfinite(t) or c <= 0:
+            return None
+        pcl: Optional[float] = None
+        if prev_close is not None:
+            try:
+                pc = float(prev_close)
+                if math.isfinite(pc) and pc > 0:
+                    pcl = pc
+            except (TypeError, ValueError):
+                pass
+        return (c, t, pcl)
     except Exception as e:
-        logger.debug("get_stock_day_fallback_price failed: %s", e)
-        # psycopg2 aborts the connection txn on SQL errors; clear so callers can continue.
-        try:
-            conn.rollback()
-        except Exception:
-            pass
+        logger.debug("get_stock_day_fallback_price via plugin failed: %s", e)
         return None
 
 
@@ -420,29 +279,22 @@ def get_contract_quotes_conn(conn: Any, contract_keys: List[str]) -> List[Dict[s
 
 
 def get_bars_stats(conn: Any, symbol: Optional[str] = None) -> Dict[str, Any]:
-    """Return row counts for the given symbol in market.stock_daily and market.stock_minute.
+    """Return row counts for the given symbol via Plugin API.
 
     Response keys keep legacy names (``stock_day`` / ``stock_min``) for API compatibility.
     """
     if not symbol or not symbol.strip():
         return {"stock_day": 0, "stock_min": {}}
-    sym = symbol.strip()
-    out: Dict[str, Any] = {"stock_day": 0, "stock_min": {}}
     try:
-        with conn.cursor() as cur:
-            cur.execute("SELECT COUNT(*) FROM market.stock_daily WHERE symbol = %s", (sym,))
-            row = cur.fetchone()
-            out["stock_day"] = int(row[0]) if row and row[0] is not None else 0
-            for api_per in ("1 min", "5 mins", "1 hour"):
-                cur.execute(
-                    "SELECT COUNT(*) FROM market.stock_minute WHERE symbol = %s AND period = %s",
-                    (sym, _minute_period_db(api_per)),
-                )
-                r = cur.fetchone()
-                out["stock_min"][api_per] = int(r[0]) if r and r[0] is not None else 0
-        return out
+        from bifrost_core.monitor.market_read_client import get_bars_stats_via_plugin
+
+        resp = get_bars_stats_via_plugin(symbol.strip())
+        return {
+            "stock_day": resp.get("stock_day", 0),
+            "stock_min": resp.get("stock_min", {}),
+        }
     except Exception as e:
-        logger.debug("get_bars_stats failed: %s", e)
+        logger.debug("get_bars_stats via plugin failed: %s", e)
         return {"stock_day": 0, "stock_min": {}}
 
 
@@ -473,203 +325,94 @@ def _ordered_unique_symbols(symbols: Optional[List[str]]) -> List[str]:
 
 
 def distinct_caret_symbols_in_stock_bars_tables(conn: Any) -> List[str]:
-    """Symbols starting with ``^`` that appear in market.stock_daily or market.stock_minute."""
-    out: set[str] = set()
+    """Symbols starting with ``^`` via Plugin API."""
     try:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT DISTINCT symbol FROM market.stock_daily
-                WHERE symbol LIKE '^%' OR symbol LIKE U&'\\FF3E%'
-                UNION
-                SELECT DISTINCT symbol FROM market.stock_minute
-                WHERE symbol LIKE '^%' OR symbol LIKE U&'\\FF3E%'
-                """,
-            )
-            for row in cur.fetchall() or []:
-                s = (row[0] or "").strip()
-                if s:
-                    out.add(s)
-        return sorted(out)
+        from bifrost_core.monitor.market_read_client import get_caret_symbols_via_plugin
+
+        return get_caret_symbols_via_plugin()
     except Exception as e:
-        logger.debug("distinct_caret_symbols_in_stock_bars_tables failed: %s", e)
+        logger.debug("distinct_caret_symbols via plugin failed: %s", e)
         return []
 
 
 def get_bars_coverage(conn: Any, symbols: Optional[List[str]] = None) -> List[Dict[str, Any]]:
-    """Return per-symbol coverage for market.stock_daily and market.stock_minute.
+    """Return per-symbol coverage via Plugin API.
 
     Response keys keep legacy names (``stock_day`` / ``stock_min``) for API compatibility.
-    Matches ``symbol`` using ``upper(trim(symbol))`` so config ``^VIX`` aligns with DB
-    even when casing or surrounding whitespace differs.
     """
     sym_list = _ordered_unique_symbols(list(symbols) if symbols else None)
     if not sym_list:
         return []
-    norm_list = list(dict.fromkeys(_norm_bars_symbol(s) for s in sym_list))
-    empty_day = {"count": 0, "min_day": None, "max_day": None, "min_ts": None, "max_ts": None}
-    out: List[Dict[str, Any]] = []
     try:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT upper(trim(replace(symbol, U&'\\FF3E', '^'))) AS sym_norm,
-                       COUNT(*) AS cnt,
-                       MIN(bar_date)::text AS min_day,
-                       MAX(bar_date)::text AS max_day,
-                       extract(epoch from MIN(bar_date)) AS min_ts,
-                       extract(epoch from MAX(bar_date)) AS max_ts
-                FROM market.stock_daily
-                WHERE upper(trim(replace(symbol, U&'\\FF3E', '^'))) = ANY(%s)
-                GROUP BY upper(trim(replace(symbol, U&'\\FF3E', '^')))
-                """,
-                (norm_list,),
-            )
-            day_rows: Dict[str, Dict[str, Any]] = {}
-            for row in cur.fetchall():
-                sn = _norm_bars_symbol(row[0] or "")
-                if not sn:
-                    continue
-                day_rows[sn] = {
-                    "count": int(row[1]),
-                    "min_day": _coverage_day_iso(row[2]),
-                    "max_day": _coverage_day_iso(row[3]),
-                    "min_ts": float(row[4]) if row[4] is not None else None,
-                    "max_ts": float(row[5]) if row[5] is not None else None,
-                }
-            db_periods = [_minute_period_db(p) for p in ("1 min", "5 mins", "1 hour")]
-            cur.execute(
-                """
-                SELECT upper(trim(replace(symbol, U&'\\FF3E', '^'))) AS sym_norm, period,
-                       COUNT(*) AS cnt,
-                       extract(epoch from MIN(bar_time)) AS min_ts,
-                       extract(epoch from MAX(bar_time)) AS max_ts
-                FROM market.stock_minute
-                WHERE upper(trim(replace(symbol, U&'\\FF3E', '^'))) = ANY(%s)
-                  AND period = ANY(%s)
-                GROUP BY upper(trim(replace(symbol, U&'\\FF3E', '^'))), period
-                """,
-                (norm_list, db_periods),
-            )
-            # Map DB period back to API label
-            db_to_api = {_minute_period_db(p): p for p in ("1 min", "5 mins", "1 hour")}
-            min_rows: Dict[str, Dict[str, Dict[str, Any]]] = {}
-            for row in cur.fetchall():
-                sn = _norm_bars_symbol(row[0] or "")
-                per = db_to_api.get(row[1], row[1])
-                cnt, min_ts, max_ts = int(row[2]), row[3], row[4]
-                if not sn:
-                    continue
-                if sn not in min_rows:
-                    min_rows[sn] = {}
-                min_rows[sn][per] = {
-                    "count": cnt,
-                    "min_ts": float(min_ts) if min_ts is not None else None,
-                    "max_ts": float(max_ts) if max_ts is not None else None,
-                }
-            for sym in sym_list:
-                n = _norm_bars_symbol(sym)
-                day = day_rows.get(n, dict(empty_day))
-                mins = min_rows.get(n, {})
-                out.append({
-                    "symbol": sym,
-                    "stock_day": day,
-                    "stock_min": {
-                        "1 min": mins.get("1 min", {"count": 0, "min_ts": None, "max_ts": None}),
-                        "5 mins": mins.get("5 mins", {"count": 0, "min_ts": None, "max_ts": None}),
-                        "1 hour": mins.get("1 hour", {"count": 0, "min_ts": None, "max_ts": None}),
-                    },
-                })
-        return out
+        from bifrost_core.monitor.market_read_client import get_bars_coverage_via_plugin
+
+        return get_bars_coverage_via_plugin(sym_list)
     except Exception as e:
-        logger.debug("get_bars_coverage failed: %s", e)
+        logger.debug("get_bars_coverage via plugin failed: %s", e)
         return []
 
 
 # ----- Module-level (status_config) for re-export -----
 
 def write_ohlc_bars_to_db(status_config: dict, rows: List[Dict[str, Any]]) -> bool:
-    """Write OHLC bars to market.stock_daily (1 D) or market.stock_minute.
+    """Write OHLC bars via Plugin Market Data API (POST /stocks/bars/ingest).
 
-    UPSERT last-writer-wins on PK ``(symbol, bar_date)`` or ``(symbol, period, bar_time)``.
-    No ``source`` column — IB and Polygon share the same rows.
+    Each row is normalised to ``{symbol, period, bar_time, open, high, low, close, volume}``
+    with ``bar_time`` as ISO-8601 string. Daily bars preserve the original ``bar_date`` to
+    avoid UTC date shift.
 
-    Minute ``period`` values match reader/Polygon convention via ``_minute_period_db``
-    (e.g. ``1 min`` → ``1 minute``).
-
-    Partitions: ``market.stock_daily`` is RANGE by year on ``bar_date``;
-    ``market.stock_minute`` is RANGE by month on ``bar_time``. Inserts fail if the
-    target partition is missing — create via market-data plugin DDL
-    (``data_ops.ensure_year_partitions`` / ``ensure_month_partitions``).
+    Plugin API accepts raw period labels (``1 D``, ``1 min``, ``5 mins``, ``1 hour``).
     """
-    if not rows or not status_config or (status_config.get("sink") != "postgres" and not status_config.get("postgres")):
+    if not rows:
         return False
     try:
-        params = _get_conn_params(status_config)
-        conn = psycopg2.connect(**params)
-        try:
-            with conn.cursor() as cur:
-                for r in rows:
-                    symbol = (r.get("symbol") or "").strip()
-                    period = (r.get("period") or "1 D").strip()
-                    bar_time = r.get("bar_time")
-                    if bar_time is None or not symbol:
-                        continue
-                    if isinstance(bar_time, (int, float)):
-                        bar_dt = datetime.fromtimestamp(float(bar_time), tz=timezone.utc)
-                    else:
-                        bar_dt = bar_time
-                    open_ = r.get("open")
-                    high = r.get("high")
-                    low = r.get("low")
-                    close = r.get("close")
-                    volume = r.get("volume")
-                    if period.upper() == "1 D":
-                        # market.stock_daily.bar_date is DATE — use original local date to
-                        # avoid UTC date shift (e.g. 18:00-0600 → next day in UTC)
-                        bar_date_str = r.get("bar_date")
-                        if bar_date_str:
-                            try:
-                                bar_d = date.fromisoformat(str(bar_date_str)[:10])
-                            except (ValueError, TypeError):
-                                bar_d = bar_dt.date() if isinstance(bar_dt, datetime) else bar_dt
-                        elif isinstance(bar_dt, datetime):
-                            bar_d = bar_dt.date()
-                        else:
-                            bar_d = bar_dt
-                        cur.execute(
-                            """
-                            INSERT INTO market.stock_daily
-                                (symbol, bar_date, open, high, low, close, volume, fetched_at)
-                            VALUES (%s, %s, %s, %s, %s, %s, %s, now())
-                            ON CONFLICT (symbol, bar_date)
-                            DO UPDATE SET open = EXCLUDED.open, high = EXCLUDED.high, low = EXCLUDED.low,
-                                          close = EXCLUDED.close, volume = EXCLUDED.volume,
-                                          fetched_at = now()
-                            """,
-                            (symbol, bar_d, open_, high, low, close, volume),
-                        )
-                    else:
-                        cur.execute(
-                            """
-                            INSERT INTO market.stock_minute
-                                (symbol, period, bar_time, open, high, low, close, volume, fetched_at)
-                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, now())
-                            ON CONFLICT (symbol, period, bar_time)
-                            DO UPDATE SET open = EXCLUDED.open, high = EXCLUDED.high, low = EXCLUDED.low,
-                                          close = EXCLUDED.close, volume = EXCLUDED.volume,
-                                          fetched_at = now()
-                            """,
-                            (symbol, _minute_period_db(period), bar_dt, open_, high, low, close, volume),
-                        )
-            conn.commit()
-            logger.info(
-                "[R-A3] write_ohlc_bars_to_db: wrote %s rows to market.stock_daily/stock_minute",
-                len(rows),
-            )
-            return True
-        finally:
-            conn.close()
+        from bifrost_core.monitor.market_write_client import post_bars_ingest
+
+        payload: List[Dict[str, Any]] = []
+        for r in rows:
+            symbol = (r.get("symbol") or "").strip()
+            period = (r.get("period") or "1 D").strip()
+            bar_time = r.get("bar_time")
+            if bar_time is None or not symbol:
+                continue
+
+            if isinstance(bar_time, (int, float)):
+                bar_dt = datetime.fromtimestamp(float(bar_time), tz=timezone.utc)
+            else:
+                bar_dt = bar_time
+
+            if period.upper() == "1 D":
+                bar_date_str = r.get("bar_date")
+                if bar_date_str:
+                    bt_iso = str(bar_date_str)[:10]
+                elif isinstance(bar_dt, datetime):
+                    bt_iso = bar_dt.strftime("%Y-%m-%d")
+                else:
+                    bt_iso = str(bar_dt)
+            else:
+                bt_iso = bar_dt.isoformat() if isinstance(bar_dt, datetime) else str(bar_dt)
+
+            payload.append({
+                "symbol": symbol,
+                "period": period,
+                "bar_time": bt_iso,
+                "open": r.get("open"),
+                "high": r.get("high"),
+                "low": r.get("low"),
+                "close": r.get("close"),
+                "volume": r.get("volume"),
+            })
+
+        if not payload:
+            return False
+
+        resp = post_bars_ingest(payload)
+        written = resp.get("written", len(payload))
+        logger.info(
+            "[R-A3] write_ohlc_bars_to_db: wrote %s rows via Plugin API",
+            written,
+        )
+        return True
     except Exception as e:
         logger.warning("write_ohlc_bars_to_db failed: %s", e)
         return False
@@ -697,43 +440,33 @@ def delete_stock_bars_for_symbol(
     symbol: str,
     periods: Optional[list] = None,
 ) -> Dict[str, Any]:
-    """Delete market.stock_daily and/or market.stock_minute rows for the given symbol.
+    """Delete bars for a symbol via Plugin Market Data API (DELETE /stocks/bars).
 
     Returns ``{ok, deleted_day, deleted_min}`` or ``{ok: False, error}``.
-    Minute periods are mapped with ``_minute_period_db`` to match stored values.
     """
-    if not status_config or (status_config.get("sink") != "postgres" and not status_config.get("postgres")):
-        return {"ok": False, "error": "No postgres config"}
     sym = (symbol or "").strip()
     if not sym:
         return {"ok": False, "error": "Symbol required"}
     valid_periods = {"1 D", "1 min", "5 mins", "1 hour"}
     if periods:
         periods = [p.strip() for p in periods if (p or "").strip() in valid_periods]
-    delete_day = not periods or "1 D" in periods
+    delete_daily = not periods or "1 D" in periods
     min_periods = [p for p in ("1 min", "5 mins", "1 hour") if not periods or p in periods]
     try:
-        params = _get_conn_params(status_config)
-        conn = psycopg2.connect(**params)
-        try:
-            with conn.cursor() as cur:
-                deleted_day = 0
-                deleted_min = 0
-                if delete_day:
-                    cur.execute("DELETE FROM market.stock_daily WHERE symbol = %s", (sym,))
-                    deleted_day = cur.rowcount
-                if min_periods:
-                    db_min_periods = [_minute_period_db(p) for p in min_periods]
-                    cur.execute(
-                        "DELETE FROM market.stock_minute WHERE symbol = %s AND period = ANY(%s)",
-                        (sym, db_min_periods),
-                    )
-                    deleted_min = cur.rowcount
-            conn.commit()
-            logger.info("delete_stock_bars_for_symbol %s periods=%s: deleted_day=%s deleted_min=%s", sym, periods, deleted_day, deleted_min)
-            return {"ok": True, "deleted_day": deleted_day, "deleted_min": deleted_min}
-        finally:
-            conn.close()
+        from bifrost_core.monitor.market_write_client import delete_bars
+
+        resp = delete_bars(
+            symbol=sym,
+            delete_daily=delete_daily,
+            periods=min_periods if min_periods else None,
+        )
+        deleted_day = resp.get("deleted_daily", 0)
+        deleted_min = resp.get("deleted_minute", 0)
+        logger.info(
+            "delete_stock_bars_for_symbol %s periods=%s: deleted_day=%s deleted_min=%s",
+            sym, periods, deleted_day, deleted_min,
+        )
+        return {"ok": True, "deleted_day": deleted_day, "deleted_min": deleted_min}
     except Exception as e:
         logger.warning("delete_stock_bars_for_symbol failed: %s", e)
         return {"ok": False, "error": str(e)}
