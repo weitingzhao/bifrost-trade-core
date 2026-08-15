@@ -23,6 +23,18 @@ def _plugin_base_url() -> str:
     return os.environ.get("MARKET_DATA_PLUGIN_URL", "http://localhost:8790/market")
 
 
+def _write_headers() -> dict[str, str]:
+    headers = {"Content-Type": "application/json"}
+    token = (
+        os.environ.get("MARKET_DATA_WRITE_TOKEN", "").strip()
+        or os.environ.get("PLUGIN_OPERATOR_TOKEN", "").strip()
+        or os.environ.get("PLATFORM_OPERATOR_TOKEN", "").strip()
+    )
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    return headers
+
+
 def _json_serializer(obj: Any) -> Any:
     if isinstance(obj, datetime):
         return obj.isoformat()
@@ -39,7 +51,8 @@ def post_ticker_upsert(body: Dict[str, Any], timeout: int = 30) -> Dict[str, Any
     url = f"{_plugin_base_url()}/reference/ticker/upsert"
     payload = json.dumps(body, default=_json_serializer).encode("utf-8")
     req = urllib.request.Request(url, data=payload, method="POST")
-    req.add_header("Content-Type", "application/json")
+    for k, v in _write_headers().items():
+        req.add_header(k, v)
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         return json.loads(resp.read())
 
@@ -52,6 +65,7 @@ def post_ticker_upsert_overview(body: Dict[str, Any], timeout: int = 30) -> Dict
     url = f"{_plugin_base_url()}/reference/ticker/upsert-overview"
     payload = json.dumps(body, default=_json_serializer).encode("utf-8")
     req = urllib.request.Request(url, data=payload, method="POST")
-    req.add_header("Content-Type", "application/json")
+    for k, v in _write_headers().items():
+        req.add_header(k, v)
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         return json.loads(resp.read())
