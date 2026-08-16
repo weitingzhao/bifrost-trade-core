@@ -37,6 +37,23 @@ def _write_headers(*, content_type: bool = True) -> dict[str, str]:
     return headers
 
 
+def post_ingest_enqueue(
+    kind: str,
+    payload: Dict[str, Any] | None = None,
+    *,
+    priority: int = 0,
+    timeout: int = 30,
+) -> Dict[str, Any]:
+    """POST /ingest/enqueue. Returns Plugin job dict (ok, job_id, kind, …)."""
+    url = f"{_plugin_base_url()}/ingest/enqueue"
+    body = json.dumps({"kind": kind, "payload": payload or {}, "priority": priority}).encode("utf-8")
+    req = urllib.request.Request(url, data=body, method="POST")
+    for k, v in _write_headers().items():
+        req.add_header(k, v)
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return json.loads(resp.read())
+
+
 def post_bars_ingest(rows: List[Dict[str, Any]], timeout: int = 60) -> Dict[str, Any]:
     """POST rows to /stocks/bars/ingest. Returns {"ok": True, "written": N} on success."""
     url = f"{_plugin_base_url()}/stocks/bars/ingest"
