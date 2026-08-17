@@ -82,16 +82,29 @@ def redis_hash_field_truthy(h: Dict[str, Any], field: str = "connected") -> bool
     return s in ("1", "true", "yes", "on")
 
 
-def hgetall_massive_ws_status(r: Any) -> Dict[str, str]:
-    """Massive WS / options ingest health hash (same field names as before)."""
-    for key in (
-        BIFROST_HEALTH_MASSIVE_WS,
-        LEGACY_BIFROST_MASSIVE_WS,
-        LEGACY_MASSIVE_META_STATUS,
-    ):
-        h = r.hgetall(key)
-        if h:
-            return dict(h)
+def hgetall_massive_ws_status(r: Any, r_massive: Any = None) -> Dict[str, str]:
+    """Massive WS / options ingest health hash.
+
+    When *r_massive* is provided (Plugin redis-massive bus), try it first — the
+    Polygon WS ingestor now writes to the shared ``redis-massive`` in the data NS.
+    Falls back to *r* (env-local redis-live) for backward compatibility during the
+    transition period.
+    """
+    clients = [r_massive, r] if r_massive is not None else [r]
+    for client in clients:
+        if client is None:
+            continue
+        for key in (
+            BIFROST_HEALTH_MASSIVE_WS,
+            LEGACY_BIFROST_MASSIVE_WS,
+            LEGACY_MASSIVE_META_STATUS,
+        ):
+            try:
+                h = client.hgetall(key)
+            except Exception:
+                continue
+            if h:
+                return dict(h)
     return {}
 
 

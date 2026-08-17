@@ -100,6 +100,47 @@ def ib_redis_url_from_config(config: Dict[str, Any]) -> Optional[str]:
     return format_redis_url(effective_ib_redis_dict(config, default_db=0))
 
 
+def effective_massive_redis_dict(
+    config: Optional[Dict[str, Any]] = None,
+    *,
+    default_db: int = 0,
+) -> Dict[str, Any]:
+    """Normalize ``redis_massive`` block — shared Polygon Options WS bus (Plugin data NS)."""
+    config = config or {}
+    rm = config.get("redis_massive") or {}
+    if not (rm.get("host") or os.environ.get("REDIS_MASSIVE_HOST") or "").strip():
+        return effective_redis_dict(config, default_db=default_db)
+    base = dict(config.get("redis") or {})
+    for key in ("host", "port", "db", "password", "username", "enabled"):
+        if key in rm and rm[key] not in (None, ""):
+            base[key] = rm[key]
+    if (os.environ.get("REDIS_MASSIVE_HOST") or "").strip():
+        base["host"] = os.environ["REDIS_MASSIVE_HOST"].strip()
+    if (os.environ.get("REDIS_MASSIVE_PORT") or "").strip():
+        base["port"] = int(os.environ["REDIS_MASSIVE_PORT"])
+    if (os.environ.get("REDIS_MASSIVE_PASSWORD") or "").strip():
+        base["password"] = os.environ["REDIS_MASSIVE_PASSWORD"].strip()
+    if (os.environ.get("REDIS_MASSIVE_USERNAME") or "").strip():
+        base["username"] = os.environ["REDIS_MASSIVE_USERNAME"].strip()
+    if os.environ.get("REDIS_MASSIVE_DB", "").strip() != "":
+        base["db"] = int(os.environ["REDIS_MASSIVE_DB"])
+    return effective_redis_dict({"redis": base}, default_db=default_db)
+
+
+def massive_redis_url_from_config(config: Dict[str, Any]) -> Optional[str]:
+    """Return Plugin redis-massive URL when ``redis_massive`` host is configured; else fall back to ``redis``."""
+    rm_cfg = config.get("redis_massive") or {}
+    if rm_cfg.get("enabled") is False:
+        return None
+    has_host = bool(
+        (rm_cfg.get("host") or "").strip()
+        or (os.environ.get("REDIS_MASSIVE_HOST") or "").strip()
+    )
+    if not has_host:
+        return redis_url_from_config(config)
+    return format_redis_url(effective_massive_redis_dict(config, default_db=0))
+
+
 def celery_redis_url_from_config(config: Optional[Dict[str, Any]] = None) -> str:
     """Celery broker/backend URL — prefers ``redis_queue`` when set (phase ⑥ split).
 
