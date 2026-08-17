@@ -161,7 +161,7 @@ def _socket_segment(
     ib_account_agent: Optional[Dict[str, Any]],
     quotes_redis_reader_ok: bool,
 ) -> tuple[int, List[str]]:
-    """Socket / quotes path: Massive WS meta, IB ingestor, IB Account Agent, Monitor quotes Redis reader."""
+    """Socket / quotes path: Polygon WS meta (legacy field ``massive``), IB ingestor, IB Account Agent, Monitor quotes Redis reader."""
     reasons: List[str] = []
     rank = 1
     if massive and massive.get("configured") and massive.get("ws_connected") is False:

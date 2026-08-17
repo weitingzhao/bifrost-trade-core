@@ -1,11 +1,12 @@
 """Canonical Redis keys for Socket ingest health under ``bifrost:health:*``.
 
-Service **ids** in Ops YAML: official ``polygon_ws`` (dual-accept legacy ``massive_ws``
-for ≥1 release) / ``ib_ingestor`` / ``ib_operator``. Redis **health** hashes use the
+Service **ids** in Ops YAML: official ``polygon_ws`` (YAML may still list legacy
+``massive_ws``; callers normalize once — FE/API comparison never treats it as a
+separate legal id) / ``ib_ingestor`` / ``ib_operator``. Redis **health** hashes use the
 ``ws_*`` suffix names below — **string values are stable** (do not rename keys).
 Strategy Trading Daemon health + Ops lease use ``bifrost:health:daemon_strategy_trading``.
 
-Readers fall back to prior bifrost key names and (Massive/Polygon only)
+Readers fall back to prior bifrost key names and (Polygon Options WS only)
 ``massive:meta:status`` when the canonical hash is empty.
 """
 
@@ -37,7 +38,7 @@ _OPS_LEASE_SERVICE_ID_ALIASES: Dict[str, str] = {
 def ops_lease_key_for_service(service_id: str) -> str:
     """Return the legacy Ops control-lease Redis key for a service_id.
 
-    ``polygon_ws`` dual-accepts onto the historical ``…:massive_ws`` lease key.
+    ``polygon_ws`` maps onto the historical ``…:massive_ws`` lease key (string unchanged).
     """
     sid = service_id.strip()
     sid = _OPS_LEASE_SERVICE_ID_ALIASES.get(sid, sid)
@@ -75,7 +76,11 @@ LEGACY_BIFROST_IB_INGESTOR = "bifrost:health:ib_ingestor"
 LEGACY_BIFROST_IB_OPERATOR = "bifrost:health:ib_operator"
 LEGACY_BIFROST_IB_ACCOUNT_AGENT = "bifrost:health:ib_account_agent"
 
-# Older Massive key (read fallback) — Redis prefix ``massive:`` unchanged.
+# Older IB operator meta health key (read / YAML normalization fallback).
+LEGACY_IB_OPERATOR_META_HEALTH = "ib:operator:meta:health"
+LEGACY_IB_INGESTER_META_HEALTH = "ib:ingester:meta:health"
+
+# Older Polygon Options WS key (read fallback) — Redis prefix ``massive:`` unchanged.
 LEGACY_MASSIVE_META_STATUS = "massive:meta:status"
 
 
@@ -120,7 +125,7 @@ def hgetall_polygon_ws_status(r: Any, r_massive: Any = None) -> Dict[str, str]:
     return {}
 
 
-# Wave B dual-accept alias — prefer ``hgetall_polygon_ws_status``.
+# Deprecated alias — prefer ``hgetall_polygon_ws_status``.
 hgetall_massive_ws_status = hgetall_polygon_ws_status
 
 

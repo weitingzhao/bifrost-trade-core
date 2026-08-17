@@ -271,9 +271,9 @@ class StatusReader:
         source: str = "massive",
         limit: int = 200,
     ) -> List[Dict[str, Any]]:
-        from bifrost_core.monitor.reader import massive_jobs as massive_jobs_module
+        from bifrost_core.monitor.reader import massive_jobs as option_bars_module
 
-        return massive_jobs_module.get_option_bars(
+        return option_bars_module.get_option_bars(
             self._config,
             symbol,
             expiry,

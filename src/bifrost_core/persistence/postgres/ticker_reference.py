@@ -1,4 +1,4 @@
-"""PostgreSQL helpers for Massive reference tickers → ``market.ticker``.
+"""PostgreSQL helpers for Polygon reference tickers → ``market.ticker``.
 
 Legacy ``public.tickers`` + ``public.ticker_overview`` are merged into one row per symbol.
 Function names kept for API / Celery compat; ``tickers_id`` is no longer a real FK.

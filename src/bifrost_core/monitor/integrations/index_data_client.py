@@ -1,7 +1,8 @@
 """Refresh US reference index daily bars via Plugin Market Data ingest.
 
 Used by POST /indices/refresh. Enqueues ``stock_daily`` jobs so Plugin workers
-write ``market.stock_daily`` in Golden Source. Does not import Trade Massive.
+write ``market.stock_daily`` in Golden Source. Does not import Trade Massive Celery paths
+(P7 retired — ingest is Market Data Plugin).
 """
 
 from __future__ import annotations

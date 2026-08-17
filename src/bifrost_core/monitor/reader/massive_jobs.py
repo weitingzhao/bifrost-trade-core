@@ -1,4 +1,7 @@
-"""Massive-backed option bars via Plugin Market Data API."""
+"""Option bars via Market Data Plugin API (legacy module name: massive_jobs).
+
+Wire ``source='massive'`` and Redis/DB contracts are unchanged.
+"""
 
 from __future__ import annotations
 
