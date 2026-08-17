@@ -15,7 +15,6 @@ from bifrost_core.ib_operator.config import effective_ib_operator_settings
 from bifrost_core.ib_operator.health_redis import (
     normalize_operator_health_payload,
     operator_health_dict_from_redis_hash,
-    operator_health_dict_to_redis_hash,
 )
 from bifrost_core.ib_operator.protocol import PROTOCOL_VERSION, new_req_id, result_key
 from bifrost_core.monitor.integrations.ib_socket_status import build_ib_socket_status

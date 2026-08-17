@@ -11,10 +11,8 @@ from bifrost_core.core.redis_health_keys import (
     LEGACY_IB_OPERATOR_META_HEALTH,
 )
 from bifrost_core.core.redis_url import (
-    effective_redis_dict,
     format_redis_url,
     ib_redis_url_from_config,
-    redis_url_from_config,
 )
 
 logger = logging.getLogger(__name__)

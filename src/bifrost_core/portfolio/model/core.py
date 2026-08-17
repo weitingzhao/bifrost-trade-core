@@ -9,18 +9,16 @@ from __future__ import annotations
 import logging
 import math
 from collections import defaultdict
-from dataclasses import asdict
 from datetime import date, datetime
 from typing import Any, Dict, List, Optional, Tuple
 
 from psycopg2.extras import RealDictCursor
 
+from bifrost_core.persistence.postgres.brokerage_tables import ACCOUNT, CONTRACT_QUOTE_LIVE, POSITIONS
 from bifrost_core.portfolio.model.payoff import (
-    EnvelopeResult,
     RiskPosition,
     ScenarioBreakdown,
     compute_risk_profile,
-    get_risk_grid_rows,
 )
 
 logger = logging.getLogger(__name__)
@@ -40,7 +38,7 @@ def _fetch_positions(conn: Any, account_id: str) -> List[Dict[str, Any]]:
     """Fetch positions with joined live quotes for a single account."""
     with conn.cursor(cursor_factory=RealDictCursor) as cur:
         cur.execute(
-            """
+            f"""
             SELECT
                 ap.symbol,
                 ap.sec_type,
@@ -52,8 +50,8 @@ def _fetch_positions(conn: Any, account_id: str) -> List[Dict[str, Any]]:
                 ap.contract_key,
                 cq.mid  AS price_mid,
                 cq.last AS price_last
-            FROM account_positions ap
-            LEFT JOIN contract_quote_live cq ON ap.contract_key = cq.contract_key
+            FROM {POSITIONS} ap
+            LEFT JOIN {CONTRACT_QUOTE_LIVE} cq ON ap.contract_key = cq.contract_key
             WHERE ap.account_id = %s
             ORDER BY ap.symbol, ap.sec_type, ap.contract_key
             """,
@@ -65,7 +63,7 @@ def _fetch_positions(conn: Any, account_id: str) -> List[Dict[str, Any]]:
 def _fetch_account_summary(conn: Any, account_id: str) -> Dict[str, Any]:
     with conn.cursor(cursor_factory=RealDictCursor) as cur:
         cur.execute(
-            "SELECT net_liquidation, total_cash, buying_power FROM account WHERE account_id = %s",
+            f"SELECT net_liquidation, total_cash, buying_power FROM {ACCOUNT} WHERE account_id = %s",
             (account_id,),
         )
         row = cur.fetchone()
@@ -326,7 +324,6 @@ def _compute_greeks_for_group(
     per_leg: List[Dict[str, Any]] = []
 
     for p in opt_positions:
-        exp = farthest_expiry
         t = T if T is not None and T > 0 else 0.0
         mid_key = (p.strike, p.right)
         mid = opt_mid_prices.get(mid_key)

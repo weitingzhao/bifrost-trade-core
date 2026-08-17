@@ -10,6 +10,7 @@ from typing import Any, Dict, List, Optional
 import psycopg2
 from psycopg2.extras import RealDictCursor
 
+from bifrost_core.persistence.postgres.brokerage_tables import OPEN_ORDERS
 from bifrost_core.persistence.postgres.connection import _get_conn_params
 
 logger = logging.getLogger(__name__)
@@ -233,11 +234,11 @@ def get_open_orders(conn: Any) -> List[Dict[str, Any]]:
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(
-                """
+                f"""
                 SELECT order_id, perm_id, account_id, symbol, sec_type, action,
                        total_quantity, filled, remaining, limit_price, status, contract_key,
                        extract(epoch from updated_ts) AS updated_ts
-                FROM daemon_open_orders
+                FROM {OPEN_ORDERS}
                 ORDER BY updated_ts DESC NULLS LAST
                 """
             )

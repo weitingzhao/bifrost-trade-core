@@ -2,7 +2,6 @@
 
 from datetime import datetime, timedelta, timezone
 
-import pytest
 
 from bifrost_core.portfolio.positions.portfolio import OptionLeg, get_option_legs, get_stock_shares, portfolio_delta
 

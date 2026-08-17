@@ -19,6 +19,7 @@ from bifrost_core.persistence.status_sink import (
 from bifrost_core.persistence.postgres.connection import (
     _DAEMON_LOCK_TABLES,
     _get_conn_params,
+    _get_golden_source_conn_params,
     _is_lock_timeout_error,
     release_pg_locks_for_tables,
 )
@@ -26,6 +27,14 @@ from bifrost_core.persistence.postgres.ddl import _ensure_tables
 from bifrost_core.persistence.postgres.accounts_sync import (
     _has_meaningful_commission,
     sync_accounts_snapshot_to_tables,
+)
+from bifrost_core.persistence.postgres.brokerage_tables import (
+    COMMISSIONS,
+    CONTRACT_QUOTE_LIVE,
+    EXECUTIONS,
+    EXECUTIONS_RAW_TWS,
+    OPEN_ORDERS,
+    POSITIONS,
 )
 
 logger = logging.getLogger(__name__)
@@ -37,7 +46,9 @@ class PostgreSQLSink(StatusSink):
     def __init__(self, config: dict):
         self._config = config
         self._conn: Optional[Any] = None
+        self._golden_conn: Optional[Any] = None
         self._connect()
+        self._connect_golden()
 
     def _connect(self) -> None:
         params = _get_conn_params(self._config)
@@ -73,6 +84,39 @@ class PostgreSQLSink(StatusSink):
                 logger.warning("PostgreSQL sink connect failed: %s", e)
                 return
 
+    def _connect_golden(self) -> None:
+        """Connect to bifrost_golden_source for brokerage.* writes."""
+        params = _get_golden_source_conn_params(self._config)
+        try:
+            self._golden_conn = psycopg2.connect(**{**params, "connect_timeout": 10})
+            with self._golden_conn.cursor() as cur:
+                cur.execute("SET lock_timeout = '5s'")
+                cur.execute("SET idle_in_transaction_session_timeout = '60s'")
+            self._golden_conn.commit()
+            try:
+                from bifrost_core.persistence.postgres.brokerage_ddl import (
+                    ensure_brokerage_schema,
+                )
+
+                ensure_brokerage_schema(self._golden_conn)
+                self._golden_conn.commit()
+            except Exception as ddl_err:
+                try:
+                    self._golden_conn.rollback()
+                except Exception:
+                    pass
+                logger.debug("ensure_brokerage_schema (best-effort): %s", ddl_err)
+            logger.info(
+                "PostgreSQL golden_source connected: %s@%s:%s/%s",
+                params["user"],
+                params["host"],
+                params["port"],
+                params["dbname"],
+            )
+        except Exception as e:
+            self._golden_conn = None
+            logger.warning("PostgreSQL golden_source connect failed: %s", e)
+
     def _ensure_conn(self) -> bool:
         if self._conn is None:
             self._connect()
@@ -84,6 +128,18 @@ class PostgreSQLSink(StatusSink):
                 self._conn = None
                 self._connect()
         return self._conn is not None
+
+    def _ensure_golden_conn(self) -> bool:
+        if self._golden_conn is None:
+            self._connect_golden()
+        if self._golden_conn is not None:
+            try:
+                self._golden_conn.rollback()
+                return True
+            except Exception:
+                self._golden_conn = None
+                self._connect_golden()
+        return self._golden_conn is not None
 
     def write_snapshot(
         self, snapshot: Dict[str, Any], append_history: bool = False
@@ -146,28 +202,35 @@ class PostgreSQLSink(StatusSink):
                         """,
                         (structure_id, ts_val, json.dumps(state_summary)),
                     )
-            # R-A1: sync multi-account snapshot into normalized tables (account + account_positions)
+            # R-A1: sync multi-account snapshot into brokerage.account + brokerage.positions
             # When Account Sync Daemon is enabled, it handles this persistence independently.
             if isinstance(raw_accounts, list) and raw_accounts:
                 if os.environ.get("ACCOUNT_SYNC_DAEMON_ENABLED", "").strip().lower() not in ("1", "true", "yes"):
-                    sync_accounts_snapshot_to_tables(self._conn, raw_accounts)
+                    if self._ensure_golden_conn():
+                        sync_accounts_snapshot_to_tables(self._golden_conn, raw_accounts)
+                        self._golden_conn.commit()
             self._conn.commit()
         except Exception as e:
             self._conn.rollback()
+            if self._golden_conn is not None:
+                try:
+                    self._golden_conn.rollback()
+                except Exception:
+                    pass
             logger.warning("PostgreSQL write_snapshot failed: %s", e, exc_info=True)
 
     def sync_accounts_only(self, accounts_list: Optional[List[Dict[str, Any]]]) -> None:
-        """R-A1 / Secondary: write only the given accounts to account + account_positions (upsert by account_id).
+        """R-A1 / Secondary: write only the given accounts to brokerage.account + brokerage.positions.
         Used by Secondary position callback to push listener_connector_2 data without full snapshot."""
         if not accounts_list or not isinstance(accounts_list, list):
             return
-        if not self._ensure_conn():
+        if not self._ensure_golden_conn():
             return
         try:
-            sync_accounts_snapshot_to_tables(self._conn, accounts_list)
-            self._conn.commit()
+            sync_accounts_snapshot_to_tables(self._golden_conn, accounts_list)
+            self._golden_conn.commit()
         except Exception as e:
-            self._conn.rollback()
+            self._golden_conn.rollback()
             logger.warning("PostgreSQL sync_accounts_only failed: %s", e, exc_info=True)
 
     def write_operation(self, record: Dict[str, Any]) -> None:
@@ -188,11 +251,11 @@ class PostgreSQLSink(StatusSink):
             logger.warning("PostgreSQL write_operation failed: %s", e)
 
     def write_contract_quote_live(self, rows):
-        """R-M6: 写入 contract_quote_live（按 contract_key upsert）。rows: Iterable[Dict]。
+        """R-M6: 写入 brokerage.contract_quote_live（按 contract_key upsert）。rows: Iterable[Dict]。
         过滤 NaN/Null：价格字段若为 NaN、inf 或空则写入 NULL，不污染数据库。若整行无有效价格则跳过该行。"""
         if not rows:
             return
-        if not self._ensure_conn():
+        if not self._ensure_golden_conn():
             return
         logger.info("[R-M6] write_contract_quote_live: %s rows received", len(rows))
 
@@ -206,7 +269,7 @@ class PostgreSQLSink(StatusSink):
                 return None
 
         try:
-            with self._conn.cursor() as cur:
+            with self._golden_conn.cursor() as cur:
                 for r in rows:
                     contract_key = r.get("contract_key")
                     if not contract_key:
@@ -226,8 +289,8 @@ class PostgreSQLSink(StatusSink):
                         )
                         continue
                     cur.execute(
-                        """
-                        INSERT INTO contract_quote_live (
+                        f"""
+                        INSERT INTO {CONTRACT_QUOTE_LIVE} (
                             contract_key, symbol, sec_type, expiry, strike, option_right,
                             last, bid, ask, mid, updated_at
                         )
@@ -257,10 +320,10 @@ class PostgreSQLSink(StatusSink):
                             mid,
                         ),
                     )
-            self._conn.commit()
+            self._golden_conn.commit()
             logger.info("[R-M6] write_contract_quote_live: commit ok")
         except Exception as e:
-            self._conn.rollback()
+            self._golden_conn.rollback()
             logger.warning("write_contract_quote_live failed: %s", e, exc_info=True)
 
     # DECOMMISSION: set EXECUTIONS_WRITE_LEGACY=false to stop writing to account_executions.
@@ -268,15 +331,15 @@ class PostgreSQLSink(StatusSink):
     _write_legacy = os.environ.get("EXECUTIONS_WRITE_LEGACY", "false").strip().lower() != "false"
 
     def write_account_executions(self, rows: Any) -> None:
-        """R-A2: 写入账户执行/成交记录到 account_executions；CommissionReport 写入 account_execution_commissions。
-        Dual-write: also inserts into executions_raw_tws for source-split migration."""
+        """R-A2: 写入账户执行到 brokerage.executions_raw_tws；CommissionReport 写入 brokerage.commissions。
+        Dual-write legacy account_executions skipped when EXECUTIONS_WRITE_LEGACY=false (default)."""
         if not rows:
             return
-        if not self._ensure_conn():
+        if not self._ensure_golden_conn():
             return
         try:
             import json
-            with self._conn.cursor() as cur:
+            with self._golden_conn.cursor() as cur:
                 for r in rows:
                     exec_id = r.get("exec_id")
                     account_id = r.get("account_id")
@@ -398,9 +461,9 @@ class PostgreSQLSink(StatusSink):
                             and (source or "").strip() != "flex_trades"
                         ):
                             cur.execute(
-                                """
+                                f"""
                                 SELECT 1
-                                FROM account_executions
+                                FROM {EXECUTIONS}
                                 WHERE account_id = %s
                                   AND contract_key = %s
                                   AND source = 'flex_trades'
@@ -444,12 +507,12 @@ class PostgreSQLSink(StatusSink):
                                     )
                                     if exec_id:
                                         cur.execute(
-                                            f"INSERT INTO executions_raw_tws ({_skip_cols}) VALUES ({_skip_ph}) "
+                                            f"INSERT INTO {EXECUTIONS_RAW_TWS} ({_skip_cols}) VALUES ({_skip_ph}) "
                                             "ON CONFLICT (exec_id) WHERE exec_id IS NOT NULL AND exec_id != '' DO NOTHING",
                                             _skip_vals,
                                         )
                                     else:
-                                        cur.execute(f"INSERT INTO executions_raw_tws ({_skip_cols}) VALUES ({_skip_ph})", _skip_vals)
+                                        cur.execute(f"INSERT INTO {EXECUTIONS_RAW_TWS} ({_skip_cols}) VALUES ({_skip_ph})", _skip_vals)
                                 except Exception:
                                     pass
                                 continue
@@ -537,12 +600,12 @@ class PostgreSQLSink(StatusSink):
                         model,
                         raw_extra,
                     )
-                    # Legacy write to account_executions (kept for backward compat; disable via EXECUTIONS_WRITE_LEGACY=false)
-                    if self._write_legacy:
+                    # Legacy write to account_executions view is obsolete (brokerage.*); raw_tws is authoritative.
+                    if False and self._write_legacy:
                         if exec_id:
                             cur.execute(
                                 f"""
-                                INSERT INTO account_executions ({cols})
+                                INSERT INTO {EXECUTIONS} ({cols})
                                 VALUES ({placeholders})
                                 ON CONFLICT (exec_id) WHERE exec_id IS NOT NULL AND exec_id != '' DO NOTHING
                                 """,
@@ -551,18 +614,18 @@ class PostgreSQLSink(StatusSink):
                         else:
                             cur.execute(
                                 f"""
-                                INSERT INTO account_executions ({cols})
+                                INSERT INTO {EXECUTIONS} ({cols})
                                 VALUES ({placeholders})
                                 """,
                                 vals,
                             )
 
-                    # Dual-write: executions_raw_tws (no cross-source override logic)
+                    # Write: brokerage.executions_raw_tws
                     try:
                         if exec_id:
                             cur.execute(
                                 f"""
-                                INSERT INTO executions_raw_tws ({cols})
+                                INSERT INTO {EXECUTIONS_RAW_TWS} ({cols})
                                 VALUES ({placeholders})
                                 ON CONFLICT (exec_id) WHERE exec_id IS NOT NULL AND exec_id != '' DO NOTHING
                                 """,
@@ -571,7 +634,7 @@ class PostgreSQLSink(StatusSink):
                         else:
                             cur.execute(
                                 f"""
-                                INSERT INTO executions_raw_tws ({cols})
+                                INSERT INTO {EXECUTIONS_RAW_TWS} ({cols})
                                 VALUES ({placeholders})
                                 """,
                                 vals,
@@ -610,47 +673,47 @@ class PostgreSQLSink(StatusSink):
                     )
                     if exec_id and has_comm:
                         cur.execute(
-                            """
-                            INSERT INTO account_execution_commissions (exec_id, commission, currency, realized_pnl, yield_, yield_redemption_date)
+                            f"""
+                            INSERT INTO {COMMISSIONS} (exec_id, commission, currency, realized_pnl, yield_, yield_redemption_date)
                             VALUES (%s, %s, %s, %s, %s, %s)
                             ON CONFLICT (exec_id) DO UPDATE SET
                                 commission = CASE
                                     WHEN EXCLUDED.commission IS NOT NULL AND EXCLUDED.commission != 0 THEN EXCLUDED.commission
-                                    ELSE account_execution_commissions.commission
+                                    ELSE {COMMISSIONS}.commission
                                 END,
                                 currency = CASE
                                     WHEN EXCLUDED.currency IS NOT NULL AND TRIM(COALESCE(EXCLUDED.currency, '')) != '' THEN EXCLUDED.currency
-                                    ELSE account_execution_commissions.currency
+                                    ELSE {COMMISSIONS}.currency
                                 END,
                                 realized_pnl = CASE
                                     WHEN EXCLUDED.realized_pnl IS NOT NULL AND EXCLUDED.realized_pnl != 0 THEN EXCLUDED.realized_pnl
-                                    ELSE account_execution_commissions.realized_pnl
+                                    ELSE {COMMISSIONS}.realized_pnl
                                 END,
                                 yield_ = CASE
                                     WHEN EXCLUDED.yield_ IS NOT NULL AND EXCLUDED.yield_ != 0 THEN EXCLUDED.yield_
-                                    ELSE account_execution_commissions.yield_
+                                    ELSE {COMMISSIONS}.yield_
                                 END,
                                 yield_redemption_date = CASE
                                     WHEN EXCLUDED.yield_redemption_date IS NOT NULL AND EXCLUDED.yield_redemption_date != 0 THEN EXCLUDED.yield_redemption_date
-                                    ELSE account_execution_commissions.yield_redemption_date
+                                    ELSE {COMMISSIONS}.yield_redemption_date
                                 END
                             """,
                             (exec_id, commission_val, currency_val, realized_pnl_val, yield_val, yield_redemption_date_val),
                         )
-            self._conn.commit()
+            self._golden_conn.commit()
             logger.info("[R-A2] write_account_executions: wrote %s rows", len(rows))
         except Exception as e:
-            self._conn.rollback()
+            self._golden_conn.rollback()
             logger.warning("write_account_executions failed: %s", e, exc_info=True)
 
     def update_execution_commission(
         self, exec_id: str, commission: Any, realized_pnl: Any, currency: Any,
         yield_: Any = None, yield_redemption_date: Any = None,
     ) -> None:
-        """R-A2: 收到 commissionReport 事件时按 exec_id 写入 account_execution_commissions。"""
+        """R-A2: 收到 commissionReport 事件时按 exec_id 写入 brokerage.commissions。"""
         if not exec_id:
             return
-        if not self._ensure_conn():
+        if not self._ensure_golden_conn():
             return
         def _nz(v):
             if v is None:
@@ -667,52 +730,52 @@ class PostgreSQLSink(StatusSink):
         yield_redemption_date_val = _nz(yield_redemption_date)
         currency_val = currency if (currency and str(currency).strip()) else None
         try:
-            with self._conn.cursor() as cur:
+            with self._golden_conn.cursor() as cur:
                 cur.execute(
-                    """
-                    INSERT INTO account_execution_commissions (exec_id, commission, currency, realized_pnl, yield_, yield_redemption_date)
+                    f"""
+                    INSERT INTO {COMMISSIONS} (exec_id, commission, currency, realized_pnl, yield_, yield_redemption_date)
                     VALUES (%s, %s, %s, %s, %s, %s)
                     ON CONFLICT (exec_id) DO UPDATE SET
                         commission = CASE
                             WHEN EXCLUDED.commission IS NOT NULL AND EXCLUDED.commission != 0 THEN EXCLUDED.commission
-                            ELSE account_execution_commissions.commission
+                            ELSE {COMMISSIONS}.commission
                         END,
                         currency = CASE
                             WHEN EXCLUDED.currency IS NOT NULL AND TRIM(COALESCE(EXCLUDED.currency, '')) != '' THEN EXCLUDED.currency
-                            ELSE account_execution_commissions.currency
+                            ELSE {COMMISSIONS}.currency
                         END,
                         realized_pnl = CASE
                             WHEN EXCLUDED.realized_pnl IS NOT NULL AND EXCLUDED.realized_pnl != 0 THEN EXCLUDED.realized_pnl
-                            ELSE account_execution_commissions.realized_pnl
+                            ELSE {COMMISSIONS}.realized_pnl
                         END,
                         yield_ = CASE
                             WHEN EXCLUDED.yield_ IS NOT NULL AND EXCLUDED.yield_ != 0 THEN EXCLUDED.yield_
-                            ELSE account_execution_commissions.yield_
+                            ELSE {COMMISSIONS}.yield_
                         END,
                         yield_redemption_date = CASE
                             WHEN EXCLUDED.yield_redemption_date IS NOT NULL AND EXCLUDED.yield_redemption_date != 0 THEN EXCLUDED.yield_redemption_date
-                            ELSE account_execution_commissions.yield_redemption_date
+                            ELSE {COMMISSIONS}.yield_redemption_date
                         END
                     """,
                     (exec_id, commission_val, currency_val, realized_pnl_val, yield_val, yield_redemption_date_val),
                 )
-            self._conn.commit()
+            self._golden_conn.commit()
         except Exception as e:
-            self._conn.rollback()
+            self._golden_conn.rollback()
             logger.warning("update_execution_commission failed: exec_id=%r %s", exec_id, e)
 
     def write_open_orders(self, orders: List[Dict[str, Any]]) -> None:
-        """R-A5: 写入当前未成交订单快照；全量替换（TRUNCATE + INSERT）。"""
-        if not self._ensure_conn():
+        """R-A5: 写入当前未成交订单快照到 brokerage.open_orders；全量替换（TRUNCATE + INSERT）。"""
+        if not self._ensure_golden_conn():
             return
         try:
-            with self._conn.cursor() as cur:
-                cur.execute("TRUNCATE TABLE daemon_open_orders")
+            with self._golden_conn.cursor() as cur:
+                cur.execute(f"TRUNCATE TABLE {OPEN_ORDERS}")
                 if orders:
                     for o in orders:
                         cur.execute(
-                            """
-                            INSERT INTO daemon_open_orders
+                            f"""
+                            INSERT INTO {OPEN_ORDERS}
                             (order_id, perm_id, account_id, symbol, sec_type, action, total_quantity,
                              filled, remaining, limit_price, status, contract_key, updated_ts)
                             VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, now())
@@ -732,9 +795,9 @@ class PostgreSQLSink(StatusSink):
                                 o.get("contract_key"),
                             ),
                         )
-            self._conn.commit()
+            self._golden_conn.commit()
         except Exception as e:
-            self._conn.rollback()
+            self._golden_conn.rollback()
             logger.warning("write_open_orders failed: %s", e, exc_info=True)
 
     def write_ohlc_bars(self, rows: Any) -> None:
@@ -1074,7 +1137,7 @@ class PostgreSQLSink(StatusSink):
             return []
 
     def get_contract_quotes(self, contract_keys: List[str]) -> List[Dict[str, Any]]:
-        """Return bid/ask/last/mid from contract_quote_live for given contract_keys. Used by GET /quotes for OPT rows."""
+        """Return bid/ask/last/mid from brokerage.contract_quote_live (via per-env FDW) for given contract_keys."""
         if not contract_keys or not self._ensure_conn():
             return []
         keys = [k for k in contract_keys if k and str(k).strip()]
@@ -1084,9 +1147,9 @@ class PostgreSQLSink(StatusSink):
             with self._conn.cursor() as cur:
                 placeholders = ", ".join("%s" for _ in keys)
                 cur.execute(
-                    """
+                    f"""
                     SELECT contract_key, symbol, sec_type, expiry, strike, option_right, bid, ask, last, mid
-                    FROM contract_quote_live
+                    FROM {CONTRACT_QUOTE_LIVE}
                     WHERE contract_key IN (""" + placeholders + """)
                     """,
                     tuple(keys),
@@ -1115,7 +1178,8 @@ class PostgreSQLSink(StatusSink):
             return []
 
     def get_stream_position_stk_symbols(self) -> List[str]:
-        """Return distinct STK symbols from account_positions for stream host/secondary accounts (settings.stream_host_account_id, stream_secondary_account_id). Used by daemon to include Market Streams position symbols in ticker subscription."""
+        """Return distinct STK symbols from brokerage.positions for stream host/secondary accounts.
+        JOINs settings on per-env conn (FDW-qualified positions)."""
         if not self._ensure_conn():
             return []
         try:
@@ -1136,9 +1200,9 @@ class PostgreSQLSink(StatusSink):
             placeholders = ", ".join("%s" for _ in account_ids)
             with self._conn.cursor() as cur:
                 cur.execute(
-                    """
+                    f"""
                     SELECT DISTINCT TRIM(ap.symbol) AS sym
-                    FROM account_positions ap
+                    FROM {POSITIONS} ap
                     WHERE ap.account_id IN (""" + placeholders + """)
                     AND ap.symbol IS NOT NULL AND TRIM(ap.symbol) != ''
                     AND (ap.sec_type IS NULL OR UPPER(TRIM(ap.sec_type)) = 'STK')

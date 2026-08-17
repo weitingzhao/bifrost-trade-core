@@ -156,3 +156,13 @@ massive:
     ttl_off_hours_sec: 43200
     stale_while_revalidate: true
     beat_batch_size: 12
+
+# Brokerage Golden Source (shared IB account/position/execution data).
+# Same CNPG host as postgres; database bifrost_golden_source; schema brokerage.*.
+# Env overrides: GOLDEN_SOURCE_HOST/PORT/DATABASE/USER/PASSWORD
+golden_source:
+  # host/port omit → reuse postgres.host/port
+  database: "bifrost_golden_source"
+  user: "bifrost"  # or brokerage_writer when that role exists
+  # password: ""  # or GOLDEN_SOURCE_PASSWORD / PGPASSWORD
+  # fdw_user: "brokerage_reader"  # remote user for per-env FDW mapping

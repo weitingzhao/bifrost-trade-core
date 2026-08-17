@@ -17,11 +17,8 @@ os.chdir(_PROJECT_ROOT)
 # Re-use engine reporting tables list (canonical expected objects)
 from scripts.db._schema_report import (  # noqa: E402
     CATEGORY_ORDER,
-    EXPECTED_TABLES_BY_CATEGORY,
     TABLE_TO_CATEGORY,
     _c,
-    _color_enabled,
-    _log_table,
     _progress,
     _step,
 )

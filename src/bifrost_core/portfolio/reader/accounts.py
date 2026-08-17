@@ -6,21 +6,34 @@ import logging
 import math
 import os
 import uuid
-from datetime import date, datetime, timezone, timedelta
+from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
 import psycopg2
 from psycopg2.extras import RealDictCursor
 
 from bifrost_core.persistence.postgres.accounts_sync import sync_accounts_snapshot_to_tables
-from bifrost_core.persistence.postgres.connection import _get_conn_params
+from bifrost_core.persistence.postgres.brokerage_tables import (
+    ACCOUNT,
+    COMMISSIONS,
+    CONTRACT_QUOTE_LIVE,
+    EXECUTIONS,
+    EXECUTIONS_RAW_FLEX,
+    EXECUTIONS_RAW_JOURNAL,
+    EXECUTIONS_RAW_TWS,
+    INSTANCE_ALLOCATION,
+    POSITIONS,
+    TRANSACTIONS,
+)
+from bifrost_core.persistence.postgres.connection import (
+    _get_conn_params,
+    _get_golden_source_conn_params,
+)
 
 from bifrost_core.monitor.reader import market as market_module
 from bifrost_core.portfolio.reader.accounts_helpers import (
     _exec_time_to_dt,
-    _fill_contract_key_for_opt,
     _has_meaningful_commission,
-    _norm_option_right,
     stk_contract_quote_stale_for_positions,
 )
 
@@ -28,6 +41,7 @@ logger = logging.getLogger(__name__)
 
 # Logical account_executions_id in unified views → physical raw table + PK (see persistence postgres ddl account_executions / account_executions_final).
 _JOURNAL_ID_OFFSET = 1000000000
+_EXEC_READ_TABLE = EXECUTIONS
 
 
 def _normalized_signed_qty_from_raw(source: Any, side: Any, quantity: Any) -> float:
@@ -52,19 +66,26 @@ def _apply_instance_allocations_on_cursor(
     pk_col: str,
     pk_val: int,
     body_allocations: List[Dict[str, Any]],
+    *,
+    raw_cur: Any = None,
 ) -> bool:
-    """DELETE + optional INSERT; clear raw strategy columns when non-empty allocations."""
-    cur.execute(
+    """DELETE + optional INSERT on per-env INSTANCE_ALLOCATION; clear strategy cols on raw (golden).
+
+    ``cur`` is the per-env cursor (instance allocation + strategy_instance).
+    ``raw_cur`` is the golden_source cursor for raw execution tables; defaults to ``cur``.
+    """
+    rcur = raw_cur if raw_cur is not None else cur
+    rcur.execute(
         f"SELECT account_id, quantity, side, source FROM {raw_tbl} WHERE {pk_col} = %s",
         (pk_val,),
     )
-    row = cur.fetchone()
+    row = rcur.fetchone()
     if not row:
         return False
     acc_id = (row[0] or "").strip()
     expected = _normalized_signed_qty_from_raw(row[3], row[2], row[1])
     cur.execute(
-        "DELETE FROM account_execution_instance_allocation WHERE account_executions_id = %s",
+        f"DELETE FROM {INSTANCE_ALLOCATION} WHERE account_executions_id = %s",
         (int(account_executions_id),),
     )
     if not body_allocations:
@@ -98,14 +119,14 @@ def _apply_instance_allocations_on_cursor(
         return False
     for si_id, aq in inserts:
         cur.execute(
-            """
-            INSERT INTO account_execution_instance_allocation (
+            f"""
+            INSERT INTO {INSTANCE_ALLOCATION} (
                 account_id, account_executions_id, strategy_instance_id, allocated_quantity
             ) VALUES (%s, %s, %s, %s)
             """,
             (acc_id, int(account_executions_id), si_id, aq),
         )
-    cur.execute(
+    rcur.execute(
         f"UPDATE {raw_tbl} SET strategy_instance_id = NULL, strategy_opportunity_id = NULL WHERE {pk_col} = %s",
         (pk_val,),
     )
@@ -127,16 +148,23 @@ def replace_execution_instance_allocations(
     raw_tbl, pk_col, pk_val = _raw_table_pk_for_account_executions_id(account_executions_id)
     try:
         params = _get_conn_params(status_config)
+        gs_params = _get_golden_source_conn_params(status_config)
         conn = psycopg2.connect(**params)
+        golden = psycopg2.connect(**{**gs_params, "connect_timeout": 10})
         try:
-            with conn.cursor() as cur:
-                if not _apply_instance_allocations_on_cursor(cur, account_executions_id, raw_tbl, pk_col, pk_val, body_allocations):
+            with conn.cursor() as cur, golden.cursor() as gcur:
+                if not _apply_instance_allocations_on_cursor(
+                    cur, account_executions_id, raw_tbl, pk_col, pk_val, body_allocations, raw_cur=gcur
+                ):
                     conn.rollback()
+                    golden.rollback()
                     return False
             conn.commit()
+            golden.commit()
             return True
         finally:
             conn.close()
+            golden.close()
     except Exception as e:
         logger.warning("replace_execution_instance_allocations failed: %s", e)
         return False
@@ -155,10 +183,10 @@ def _raw_table_pk_for_account_executions_id(account_executions_id: int) -> Tuple
     """
     aid = int(account_executions_id)
     if aid > 0:
-        return ("executions_raw_flex", "executions_raw_flex_id", aid)
+        return (EXECUTIONS_RAW_FLEX, "executions_raw_flex_id", aid)
     if aid <= -_JOURNAL_ID_OFFSET:
-        return ("executions_raw_journal", "executions_raw_journal_id", -aid - _JOURNAL_ID_OFFSET)
-    return ("executions_raw_tws", "executions_raw_tws_id", -aid)
+        return (EXECUTIONS_RAW_JOURNAL, "executions_raw_journal_id", -aid - _JOURNAL_ID_OFFSET)
+    return (EXECUTIONS_RAW_TWS, "executions_raw_tws_id", -aid)
 
 
 def get_accounts_from_tables(conn: Any) -> Optional[List[Dict[str, Any]]]:
@@ -167,7 +195,7 @@ def get_accounts_from_tables(conn: Any) -> Optional[List[Dict[str, Any]]]:
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(
-                "SELECT account_id, updated_at, net_liquidation, total_cash, buying_power, summary_extra FROM account ORDER BY account_id"
+                f"SELECT account_id, updated_at, net_liquidation, total_cash, buying_power, summary_extra FROM {ACCOUNT} ORDER BY account_id"
             )
             acc_rows = cur.fetchall()
         if not acc_rows:
@@ -188,7 +216,7 @@ def get_accounts_from_tables(conn: Any) -> Optional[List[Dict[str, Any]]]:
             if isinstance(extra, dict):
                 for k, v in extra.items():
                     summary[k] = v if isinstance(v, str) else str(v)
-            _exec_tbl = "account_executions"
+            _exec_tbl = _EXEC_READ_TABLE
             with conn.cursor(cursor_factory=RealDictCursor) as cur2:
                 cur2.execute(
                     f"""
@@ -263,8 +291,8 @@ def get_accounts_from_tables(conn: Any) -> Optional[List[Dict[str, Any]]]:
                         pct.category_id AS position_category_id,
                         pc.name AS position_category_name,
                         w.optionable AS watchlist_optionable
-                    FROM account_positions ap
-                    LEFT JOIN contract_quote_live ip
+                    FROM {POSITIONS} ap
+                    LEFT JOIN {CONTRACT_QUOTE_LIVE} ip
                         ON ap.contract_key = ip.contract_key
                     LEFT JOIN preference_position_category_tags pct
                         ON ap.account_id = pct.account_id AND ap.contract_key = pct.contract_key
@@ -517,7 +545,7 @@ def get_accounts_fetched_at(conn: Any) -> Optional[float]:
         return None
     try:
         with conn.cursor() as cur:
-            cur.execute("SELECT max(updated_at) AS t FROM account")
+            cur.execute(f"SELECT max(updated_at) AS t FROM {ACCOUNT}")
             row = cur.fetchone()
         if row and row[0] is not None:
             ts = row[0]
@@ -539,8 +567,8 @@ def sync_accounts_snapshot_to_db(
     if not accounts_list:
         return True
     try:
-        params = _get_conn_params(status_config)
-        conn = psycopg2.connect(**params)
+        gs_params = _get_golden_source_conn_params(status_config)
+        conn = psycopg2.connect(**{**gs_params, "connect_timeout": 10})
         try:
             with conn.cursor() as cur:
                 cur.execute("SET lock_timeout = '5s'")
@@ -580,8 +608,8 @@ def write_account_executions_to_db(
         stats_out["tws_raw_updated_ids"] = []
         stats_out["tws_raw_skipped_ids"] = []
     try:
-        params = _get_conn_params(status_config)
-        conn = psycopg2.connect(**params)
+        gs_params = _get_golden_source_conn_params(status_config)
+        conn = psycopg2.connect(**{**gs_params, "connect_timeout": 10})
         try:
             with conn.cursor() as cur:
                 for r in rows:
@@ -702,9 +730,9 @@ def write_account_executions_to_db(
                             and (source or "").strip() != "flex_trades"
                         ):
                             cur.execute(
-                                """
+                                f"""
                                 SELECT 1
-                                FROM account_executions
+                                FROM {EXECUTIONS}
                                 WHERE account_id = %s
                                   AND contract_key = %s
                                   AND source = 'flex_trades'
@@ -808,7 +836,7 @@ def write_account_executions_to_db(
                                 )
                                 cur.execute(
                                     f"""
-                                    INSERT INTO account_executions ({cols})
+                                    INSERT INTO {EXECUTIONS} ({cols})
                                     VALUES ({placeholders})
                                     ON CONFLICT (exec_id) WHERE exec_id IS NOT NULL AND exec_id != ''
                                     DO UPDATE SET {update_set}
@@ -818,7 +846,7 @@ def write_account_executions_to_db(
                             else:
                                 cur.execute(
                                     f"""
-                                    INSERT INTO account_executions ({cols})
+                                    INSERT INTO {EXECUTIONS} ({cols})
                                     VALUES ({placeholders})
                                     ON CONFLICT (exec_id) WHERE exec_id IS NOT NULL AND exec_id != '' DO NOTHING
                                     """,
@@ -827,7 +855,7 @@ def write_account_executions_to_db(
                         else:
                             cur.execute(
                                 f"""
-                                INSERT INTO account_executions ({cols})
+                                INSERT INTO {EXECUTIONS} ({cols})
                                 VALUES ({placeholders})
                                 """,
                                 vals,
@@ -838,11 +866,11 @@ def write_account_executions_to_db(
                         is_flex_source = (source == "flex_trades")
                         is_journal_source = (source == "journal_closed")
                         if is_flex_source:
-                            raw_table = "executions_raw_flex"
+                            raw_table = EXECUTIONS_RAW_FLEX
                         elif is_journal_source:
-                            raw_table = "executions_raw_journal"
+                            raw_table = EXECUTIONS_RAW_JOURNAL
                         else:
-                            raw_table = "executions_raw_tws"
+                            raw_table = EXECUTIONS_RAW_TWS
                         if exec_id:
                             if is_flex_source:
                                 raw_update_set = ", ".join(
@@ -860,7 +888,7 @@ def write_account_executions_to_db(
                             else:
                                 _ret = (
                                     "\nRETURNING executions_raw_tws_id"
-                                    if raw_table == "executions_raw_tws"
+                                    if raw_table == EXECUTIONS_RAW_TWS
                                     else ""
                                 )
                                 cur.execute(
@@ -871,7 +899,7 @@ def write_account_executions_to_db(
                                     """,
                                     vals,
                                 )
-                                if stats_out is not None and raw_table == "executions_raw_tws":
+                                if stats_out is not None and raw_table == EXECUTIONS_RAW_TWS:
                                     ins_row = cur.fetchone()
                                     if ins_row and ins_row[0] is not None:
                                         stats_out["tws_raw_inserted"] += 1
@@ -879,9 +907,9 @@ def write_account_executions_to_db(
                                     else:
                                         stats_out["tws_raw_skipped_duplicate"] += 1
                                         cur.execute(
-                                            """
+                                            f"""
                                             SELECT executions_raw_tws_id
-                                            FROM executions_raw_tws
+                                            FROM {EXECUTIONS_RAW_TWS}
                                             WHERE exec_id = %s
                                             LIMIT 1
                                             """,
@@ -893,7 +921,7 @@ def write_account_executions_to_db(
                         else:
                             _ret_ins = (
                                 "\nRETURNING executions_raw_tws_id"
-                                if raw_table == "executions_raw_tws"
+                                if raw_table == EXECUTIONS_RAW_TWS
                                 else ""
                             )
                             cur.execute(
@@ -903,7 +931,7 @@ def write_account_executions_to_db(
                                 """,
                                 vals,
                             )
-                            if stats_out is not None and raw_table == "executions_raw_tws":
+                            if stats_out is not None and raw_table == EXECUTIONS_RAW_TWS:
                                 ins_row = cur.fetchone() if _ret_ins else None
                                 if ins_row and ins_row[0] is not None:
                                     stats_out["tws_raw_inserted"] += 1
@@ -954,29 +982,29 @@ def write_account_executions_to_db(
                     )
                     if exec_id and has_comm:
                         cur.execute(
-                            """
-                            INSERT INTO account_execution_commissions (exec_id, commission, currency, realized_pnl, yield_, yield_redemption_date)
+                            f"""
+                            INSERT INTO {COMMISSIONS} (exec_id, commission, currency, realized_pnl, yield_, yield_redemption_date)
                             VALUES (%s, %s, %s, %s, %s, %s)
                             ON CONFLICT (exec_id) DO UPDATE SET
                                 commission = CASE
                                     WHEN EXCLUDED.commission IS NOT NULL AND EXCLUDED.commission != 0 THEN EXCLUDED.commission
-                                    ELSE account_execution_commissions.commission
+                                    ELSE {COMMISSIONS}.commission
                                 END,
                                 currency = CASE
                                     WHEN EXCLUDED.currency IS NOT NULL AND TRIM(COALESCE(EXCLUDED.currency, '')) != '' THEN EXCLUDED.currency
-                                    ELSE account_execution_commissions.currency
+                                    ELSE {COMMISSIONS}.currency
                                 END,
                                 realized_pnl = CASE
                                     WHEN EXCLUDED.realized_pnl IS NOT NULL AND EXCLUDED.realized_pnl != 0 THEN EXCLUDED.realized_pnl
-                                    ELSE account_execution_commissions.realized_pnl
+                                    ELSE {COMMISSIONS}.realized_pnl
                                 END,
                                 yield_ = CASE
                                     WHEN EXCLUDED.yield_ IS NOT NULL AND EXCLUDED.yield_ != 0 THEN EXCLUDED.yield_
-                                    ELSE account_execution_commissions.yield_
+                                    ELSE {COMMISSIONS}.yield_
                                 END,
                                 yield_redemption_date = CASE
                                     WHEN EXCLUDED.yield_redemption_date IS NOT NULL AND EXCLUDED.yield_redemption_date != 0 THEN EXCLUDED.yield_redemption_date
-                                    ELSE account_execution_commissions.yield_redemption_date
+                                    ELSE {COMMISSIONS}.yield_redemption_date
                                 END
                             """,
                             (exec_id, commission_val, currency_val, realized_pnl_val, yield_val, yield_redemption_date_val),
@@ -1005,9 +1033,11 @@ def update_execution_commission(
     if not exec_id or not status_config or (status_config.get("sink") != "postgres" and not status_config.get("postgres")):
         return False
     def _nz(v):
-        if v is None: return None
+        if v is None:
+            return None
         try:
-            if float(v) == 0: return None
+            if float(v) == 0:
+                return None
         except (TypeError, ValueError):
             pass
         return v
@@ -1017,34 +1047,34 @@ def update_execution_commission(
     yield_redemption_date_val = _nz(yield_redemption_date)
     currency_val = currency if (currency and str(currency).strip()) else None
     try:
-        params = _get_conn_params(status_config)
-        conn = psycopg2.connect(**params)
+        gs_params = _get_golden_source_conn_params(status_config)
+        conn = psycopg2.connect(**{**gs_params, "connect_timeout": 10})
         try:
             with conn.cursor() as cur:
                 cur.execute(
-                    """
-                    INSERT INTO account_execution_commissions (exec_id, commission, currency, realized_pnl, yield_, yield_redemption_date)
+                    f"""
+                    INSERT INTO {COMMISSIONS} (exec_id, commission, currency, realized_pnl, yield_, yield_redemption_date)
                     VALUES (%s, %s, %s, %s, %s, %s)
                     ON CONFLICT (exec_id) DO UPDATE SET
                         commission = CASE
                             WHEN EXCLUDED.commission IS NOT NULL AND EXCLUDED.commission != 0 THEN EXCLUDED.commission
-                            ELSE account_execution_commissions.commission
+                            ELSE {COMMISSIONS}.commission
                         END,
                         currency = CASE
                             WHEN EXCLUDED.currency IS NOT NULL AND TRIM(COALESCE(EXCLUDED.currency, '')) != '' THEN EXCLUDED.currency
-                            ELSE account_execution_commissions.currency
+                            ELSE {COMMISSIONS}.currency
                         END,
                         realized_pnl = CASE
                             WHEN EXCLUDED.realized_pnl IS NOT NULL AND EXCLUDED.realized_pnl != 0 THEN EXCLUDED.realized_pnl
-                            ELSE account_execution_commissions.realized_pnl
+                            ELSE {COMMISSIONS}.realized_pnl
                         END,
                         yield_ = CASE
                             WHEN EXCLUDED.yield_ IS NOT NULL AND EXCLUDED.yield_ != 0 THEN EXCLUDED.yield_
-                            ELSE account_execution_commissions.yield_
+                            ELSE {COMMISSIONS}.yield_
                         END,
                         yield_redemption_date = CASE
                             WHEN EXCLUDED.yield_redemption_date IS NOT NULL AND EXCLUDED.yield_redemption_date != 0 THEN EXCLUDED.yield_redemption_date
-                            ELSE account_execution_commissions.yield_redemption_date
+                            ELSE {COMMISSIONS}.yield_redemption_date
                         END
                     """,
                     (exec_id, commission_val, currency_val, realized_pnl_val, yield_val, yield_redemption_date_val),
@@ -1103,18 +1133,20 @@ def insert_one_execution(status_config: dict, body: Dict[str, Any]) -> Optional[
     exec_dt = _exec_time_to_dt(exec_time)
     try:
         params = _get_conn_params(status_config)
-        conn = psycopg2.connect(**params)
+        gs_params = _get_golden_source_conn_params(status_config)
+        env_conn = psycopg2.connect(**params)
+        golden = psycopg2.connect(**{**gs_params, "connect_timeout": 10})
         try:
-            with conn.cursor() as cur:
+            with golden.cursor() as cur, env_conn.cursor() as env_cur:
                 cols = "account_id, exec_id, exec_time, symbol, sec_type, side, quantity, price, source, expiry, strike, option_right, exchange, order_id, cum_qty, contract_key, raw_extra, strategy_opportunity_id, strategy_instance_id"
                 placeholders = "%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s"
                 vals = (account_id, exec_id, exec_dt, symbol, sec_type, side, quantity, price, source, expiry, strike, option_right, exchange, order_id, cum_qty, contract_key, raw_extra, strategy_opportunity_id, strategy_instance_id)
                 new_id = None
-                # account_executions is a read-only UNION view: journal rows must be inserted into executions_raw_journal only.
+                # Write physical raw tables on golden_source (executions view is read-only).
                 if source == "journal_closed":
                     cur.execute(
                         f"""
-                        INSERT INTO executions_raw_journal ({cols}, legacy_account_executions_id)
+                        INSERT INTO {EXECUTIONS_RAW_JOURNAL} ({cols}, legacy_account_executions_id)
                         VALUES ({placeholders}, NULL)
                         RETURNING executions_raw_journal_id
                         """,
@@ -1126,54 +1158,55 @@ def insert_one_execution(status_config: dict, body: Dict[str, Any]) -> Optional[
                         new_id = -(1000000000 + int(raw_jid))
                 else:
                     cur.execute(
-                        f"INSERT INTO account_executions ({cols}) VALUES ({placeholders}) RETURNING account_executions_id",
+                        f"""
+                        INSERT INTO {EXECUTIONS_RAW_TWS} ({cols}, legacy_account_executions_id)
+                        VALUES ({placeholders}, NULL)
+                        RETURNING executions_raw_tws_id
+                        """,
                         vals,
                     )
                     row = cur.fetchone()
-                    new_id = row[0] if row else None
-                    _raw_tbl = "executions_raw_tws"
-                    try:
-                        cur.execute(
-                            f"""
-                            INSERT INTO {_raw_tbl} ({cols}, legacy_account_executions_id)
-                            VALUES ({placeholders}, %s)
-                            ON CONFLICT (exec_id) WHERE exec_id IS NOT NULL AND exec_id != '' DO NOTHING
-                            """,
-                            vals + (new_id,),
-                        )
-                    except Exception:
-                        pass
+                    raw_tid = row[0] if row else None
+                    if raw_tid is not None:
+                        new_id = -int(raw_tid)
                 commission = body.get("commission")
                 realized_pnl = body.get("realized_pnl")
                 currency = body.get("currency")
                 if commission is not None or realized_pnl is not None or (currency and str(currency).strip()):
                     cur.execute(
-                        """
-                        INSERT INTO account_execution_commissions (exec_id, commission, currency, realized_pnl, yield_, yield_redemption_date)
+                        f"""
+                        INSERT INTO {COMMISSIONS} (exec_id, commission, currency, realized_pnl, yield_, yield_redemption_date)
                         VALUES (%s, %s, %s, %s, NULL, NULL)
                         ON CONFLICT (exec_id) DO UPDATE SET
-                            commission = COALESCE(EXCLUDED.commission, account_execution_commissions.commission),
-                            currency = COALESCE(NULLIF(TRIM(COALESCE(EXCLUDED.currency, '')), ''), account_execution_commissions.currency),
-                            realized_pnl = COALESCE(EXCLUDED.realized_pnl, account_execution_commissions.realized_pnl)
+                            commission = COALESCE(EXCLUDED.commission, {COMMISSIONS}.commission),
+                            currency = COALESCE(NULLIF(TRIM(COALESCE(EXCLUDED.currency, '')), ''), {COMMISSIONS}.currency),
+                            realized_pnl = COALESCE(EXCLUDED.realized_pnl, {COMMISSIONS}.realized_pnl)
                         """,
                         (exec_id, commission, currency or None, realized_pnl),
                     )
                 if new_id is not None and body.get("instance_allocations") is not None:
                     ia = body.get("instance_allocations")
                     if not isinstance(ia, list):
-                        conn.rollback()
+                        env_conn.rollback()
+                        golden.rollback()
                         return None
                     rtbl, rpkc, rpkv = _raw_table_pk_for_account_executions_id(new_id)
-                    if not _apply_instance_allocations_on_cursor(cur, new_id, rtbl, rpkc, rpkv, ia):
-                        conn.rollback()
+                    if not _apply_instance_allocations_on_cursor(
+                        env_cur, new_id, rtbl, rpkc, rpkv, ia, raw_cur=cur
+                    ):
+                        env_conn.rollback()
+                        golden.rollback()
                         return None
-            conn.commit()
+            golden.commit()
+            env_conn.commit()
             return new_id
         finally:
-            conn.close()
+            env_conn.close()
+            golden.close()
     except Exception as e:
         logger.warning("insert_one_execution failed: %s", e)
         return None
+
 
 
 def upsert_account_transactions(status_config: dict, rows: List[Dict[str, Any]]) -> int:
@@ -1188,8 +1221,8 @@ def upsert_account_transactions(status_config: dict, rows: List[Dict[str, Any]])
     if not rows:
         return 0
     try:
-        params = _get_conn_params(status_config)
-        conn = psycopg2.connect(**params)
+        gs_params = _get_golden_source_conn_params(status_config)
+        conn = psycopg2.connect(**{**gs_params, "connect_timeout": 10})
         try:
             with conn.cursor() as cur:
                 for r in rows:
@@ -1238,8 +1271,8 @@ def upsert_account_transactions(status_config: dict, rows: List[Dict[str, Any]])
                     raw_extra = r.get("raw_extra")
 
                     cur.execute(
-                        """
-                        INSERT INTO account_transactions (
+                        f"""
+                        INSERT INTO {TRANSACTIONS} (
                             account_id, ts, amount, type, currency, description,
                             flex_transaction_id, flex_type, flex_code,
                             asset_category, asset_subcategory,
@@ -1256,22 +1289,22 @@ def upsert_account_transactions(status_config: dict, rows: List[Dict[str, Any]])
                             %s, %s
                         )
                         ON CONFLICT (account_id, ts, amount, type) DO UPDATE SET
-                            currency = COALESCE(EXCLUDED.currency, account_transactions.currency),
-                            description = COALESCE(EXCLUDED.description, account_transactions.description),
-                            flex_transaction_id = COALESCE(EXCLUDED.flex_transaction_id, account_transactions.flex_transaction_id),
-                            flex_type = COALESCE(EXCLUDED.flex_type, account_transactions.flex_type),
-                            flex_code = COALESCE(EXCLUDED.flex_code, account_transactions.flex_code),
-                            asset_category = COALESCE(EXCLUDED.asset_category, account_transactions.asset_category),
-                            asset_subcategory = COALESCE(EXCLUDED.asset_subcategory, account_transactions.asset_subcategory),
-                            symbol = COALESCE(EXCLUDED.symbol, account_transactions.symbol),
-                            conid = COALESCE(EXCLUDED.conid, account_transactions.conid),
-                            security_id = COALESCE(EXCLUDED.security_id, account_transactions.security_id),
-                            security_id_type = COALESCE(EXCLUDED.security_id_type, account_transactions.security_id_type),
-                            listing_exchange = COALESCE(EXCLUDED.listing_exchange, account_transactions.listing_exchange),
-                            report_date = COALESCE(EXCLUDED.report_date, account_transactions.report_date),
-                            available_for_trading_date = COALESCE(EXCLUDED.available_for_trading_date, account_transactions.available_for_trading_date),
-                            fx_rate_to_base = COALESCE(EXCLUDED.fx_rate_to_base, account_transactions.fx_rate_to_base),
-                            raw_extra = COALESCE(EXCLUDED.raw_extra, account_transactions.raw_extra)
+                            currency = COALESCE(EXCLUDED.currency, {TRANSACTIONS}.currency),
+                            description = COALESCE(EXCLUDED.description, {TRANSACTIONS}.description),
+                            flex_transaction_id = COALESCE(EXCLUDED.flex_transaction_id, {TRANSACTIONS}.flex_transaction_id),
+                            flex_type = COALESCE(EXCLUDED.flex_type, {TRANSACTIONS}.flex_type),
+                            flex_code = COALESCE(EXCLUDED.flex_code, {TRANSACTIONS}.flex_code),
+                            asset_category = COALESCE(EXCLUDED.asset_category, {TRANSACTIONS}.asset_category),
+                            asset_subcategory = COALESCE(EXCLUDED.asset_subcategory, {TRANSACTIONS}.asset_subcategory),
+                            symbol = COALESCE(EXCLUDED.symbol, {TRANSACTIONS}.symbol),
+                            conid = COALESCE(EXCLUDED.conid, {TRANSACTIONS}.conid),
+                            security_id = COALESCE(EXCLUDED.security_id, {TRANSACTIONS}.security_id),
+                            security_id_type = COALESCE(EXCLUDED.security_id_type, {TRANSACTIONS}.security_id_type),
+                            listing_exchange = COALESCE(EXCLUDED.listing_exchange, {TRANSACTIONS}.listing_exchange),
+                            report_date = COALESCE(EXCLUDED.report_date, {TRANSACTIONS}.report_date),
+                            available_for_trading_date = COALESCE(EXCLUDED.available_for_trading_date, {TRANSACTIONS}.available_for_trading_date),
+                            fx_rate_to_base = COALESCE(EXCLUDED.fx_rate_to_base, {TRANSACTIONS}.fx_rate_to_base),
+                            raw_extra = COALESCE(EXCLUDED.raw_extra, {TRANSACTIONS}.raw_extra)
                         """,
                         (
                             account_id,
@@ -1338,16 +1371,19 @@ def update_one_execution(status_config: dict, account_executions_id: int, body: 
     values.append(pk_val)
     try:
         params = _get_conn_params(status_config)
-        conn = psycopg2.connect(**params)
+        gs_params = _get_golden_source_conn_params(status_config)
+        env_conn = psycopg2.connect(**params)
+        golden = psycopg2.connect(**{**gs_params, "connect_timeout": 10})
         try:
-            with conn.cursor() as cur:
+            with golden.cursor() as cur, env_conn.cursor() as env_cur:
                 if updates:
                     cur.execute(
                         f"UPDATE {raw_tbl} SET " + ", ".join(updates) + f" WHERE {pk_col} = %s",
                         values,
                     )
                     if cur.rowcount == 0:
-                        conn.rollback()
+                        golden.rollback()
+                        env_conn.rollback()
                         logger.warning(
                             "update_one_execution: no row in %s for %s=%s (account_executions_id=%s)",
                             raw_tbl,
@@ -1361,13 +1397,15 @@ def update_one_execution(status_config: dict, account_executions_id: int, body: 
                 if "instance_allocations" in body:
                     ia = body.get("instance_allocations")
                     if ia is not None and not isinstance(ia, list):
-                        conn.rollback()
+                        golden.rollback()
+                        env_conn.rollback()
                         return False
                     if ia is not None:
                         if not _apply_instance_allocations_on_cursor(
-                            cur, account_executions_id, raw_tbl, pk_col, pk_val, ia
+                            env_cur, account_executions_id, raw_tbl, pk_col, pk_val, ia, raw_cur=cur
                         ):
-                            conn.rollback()
+                            golden.rollback()
+                            env_conn.rollback()
                             return False
                 # commission 相关（exec_id 从物理表读取）
                 if any(k in body for k in commission_keys):
@@ -1384,55 +1422,64 @@ def update_one_execution(status_config: dict, account_executions_id: int, body: 
                     pnl = body.get("realized_pnl")
                     cur_ = body.get("currency")
                     cur.execute(
-                        """
-                        INSERT INTO account_execution_commissions (exec_id, commission, currency, realized_pnl, yield_, yield_redemption_date)
+                        f"""
+                        INSERT INTO {COMMISSIONS} (exec_id, commission, currency, realized_pnl, yield_, yield_redemption_date)
                         VALUES (%s, %s, %s, %s, NULL, NULL)
                         ON CONFLICT (exec_id) DO UPDATE SET
-                            commission = CASE WHEN EXCLUDED.commission IS NOT NULL THEN EXCLUDED.commission ELSE account_execution_commissions.commission END,
-                            currency = CASE WHEN EXCLUDED.currency IS NOT NULL AND TRIM(EXCLUDED.currency) != '' THEN EXCLUDED.currency ELSE account_execution_commissions.currency END,
-                            realized_pnl = CASE WHEN EXCLUDED.realized_pnl IS NOT NULL THEN EXCLUDED.realized_pnl ELSE account_execution_commissions.realized_pnl END
+                            commission = CASE WHEN EXCLUDED.commission IS NOT NULL THEN EXCLUDED.commission ELSE {COMMISSIONS}.commission END,
+                            currency = CASE WHEN EXCLUDED.currency IS NOT NULL AND TRIM(EXCLUDED.currency) != '' THEN EXCLUDED.currency ELSE {COMMISSIONS}.currency END,
+                            realized_pnl = CASE WHEN EXCLUDED.realized_pnl IS NOT NULL THEN EXCLUDED.realized_pnl ELSE {COMMISSIONS}.realized_pnl END
                         """,
                         (exec_id, comm, cur_, pnl),
                     )
-            conn.commit()
+            golden.commit()
+            env_conn.commit()
             return True
         finally:
-            conn.close()
+            env_conn.close()
+            golden.close()
     except Exception as e:
         logger.warning("update_one_execution failed: account_executions_id=%s %s", account_executions_id, e)
         return False
 
 
+
 def delete_one_execution(status_config: dict, account_executions_id: int) -> bool:
-    """R-A2 扩展：按 account_executions_id 删除一条执行记录。删除物理表行（与 account_executions 视图编码一致），并清理 account_execution_commissions。"""
+    """R-A2 扩展：按 account_executions_id 删除一条执行记录。删除 golden raw 行 + commissions；清理 per-env instance_allocation。"""
     if not status_config or (status_config.get("sink") != "postgres" and not status_config.get("postgres")):
         return False
     raw_tbl, pk_col, pk_val = _raw_table_pk_for_account_executions_id(account_executions_id)
     try:
         params = _get_conn_params(status_config)
-        conn = psycopg2.connect(**params)
+        gs_params = _get_golden_source_conn_params(status_config)
+        env_conn = psycopg2.connect(**params)
+        golden = psycopg2.connect(**{**gs_params, "connect_timeout": 10})
         try:
-            with conn.cursor() as cur:
+            with golden.cursor() as cur, env_conn.cursor() as env_cur:
                 cur.execute(f"SELECT exec_id FROM {raw_tbl} WHERE {pk_col} = %s", (pk_val,))
                 row = cur.fetchone()
                 exec_id = row[0] if row and row[0] and str(row[0]).strip() else None
-                cur.execute(
-                    "DELETE FROM account_execution_instance_allocation WHERE account_executions_id = %s",
+                env_cur.execute(
+                    f"DELETE FROM {INSTANCE_ALLOCATION} WHERE account_executions_id = %s",
                     (int(account_executions_id),),
                 )
                 if exec_id:
-                    cur.execute("DELETE FROM account_execution_commissions WHERE exec_id = %s", (exec_id,))
+                    cur.execute(f"DELETE FROM {COMMISSIONS} WHERE exec_id = %s", (exec_id,))
                 cur.execute(f"DELETE FROM {raw_tbl} WHERE {pk_col} = %s", (pk_val,))
                 if cur.rowcount == 0:
-                    conn.rollback()
+                    golden.rollback()
+                    env_conn.rollback()
                     return False
-            conn.commit()
+            golden.commit()
+            env_conn.commit()
             return True
         finally:
-            conn.close()
+            env_conn.close()
+            golden.close()
     except Exception as e:
         logger.warning("delete_one_execution failed: account_executions_id=%s %s", account_executions_id, e)
         return False
+
 
 
 def batch_update_execution_strategy(
@@ -1453,7 +1500,7 @@ def batch_update_execution_strategy(
         with conn.cursor() as cur:
             if execution_ids:
                 cur.execute(
-                    "SELECT 1 FROM account_execution_instance_allocation WHERE account_executions_id = ANY(%s) LIMIT 1",
+                    f"SELECT 1 FROM {INSTANCE_ALLOCATION} WHERE account_executions_id = ANY(%s) LIMIT 1",
                     (execution_ids,),
                 )
                 if cur.fetchone():
@@ -1476,11 +1523,11 @@ def batch_update_execution_strategy(
             elif contract_key and contract_key.strip():
                 ck = contract_key.strip()
                 cur.execute(
-                    """
-                    SELECT 1 FROM account_execution_instance_allocation a
+                    f"""
+                    SELECT 1 FROM {INSTANCE_ALLOCATION} a
                     WHERE a.account_id = %s
                       AND EXISTS (
-                        SELECT 1 FROM account_executions e
+                        SELECT 1 FROM {EXECUTIONS} e
                         WHERE e.account_executions_id = a.account_executions_id
                           AND e.account_id IS NOT DISTINCT FROM a.account_id
                           AND trim(COALESCE(e.contract_key, '')) = trim(COALESCE(%s, ''))
@@ -1492,7 +1539,7 @@ def batch_update_execution_strategy(
                 if cur.fetchone():
                     conn.rollback()
                     return -1
-                for raw_tbl in ("executions_raw_tws", "executions_raw_flex", "executions_raw_journal"):
+                for raw_tbl in (EXECUTIONS_RAW_TWS, EXECUTIONS_RAW_FLEX, EXECUTIONS_RAW_JOURNAL):
                     cur.execute(
                         f"""
                         UPDATE {raw_tbl}

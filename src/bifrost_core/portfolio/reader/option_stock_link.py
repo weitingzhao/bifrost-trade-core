@@ -11,12 +11,13 @@ from typing import Any, Dict, List, Optional, Tuple
 import psycopg2
 from psycopg2.extras import RealDictCursor
 
+from bifrost_core.persistence.postgres.brokerage_tables import EXECUTIONS_FINAL, OPTION_STOCK_LINK
 from bifrost_core.persistence.postgres.connection import _get_conn_params
 
 logger = logging.getLogger(__name__)
 
-_EXEC_FINAL = "account_executions_final"
-_LINK_TABLE = "account_execution_option_stock_link"
+_EXEC_FINAL = EXECUTIONS_FINAL
+_LINK_TABLE = OPTION_STOCK_LINK
 
 # Match portfolio reader executions._QTY_NORM_E (alias e) for consistent signed qty.
 _QTY_NORM_E = (

@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import re
-import shutil
 from pathlib import Path
 
 ENGINE = Path(__file__).resolve().parents[2] / "bifrost-trader-engine" / "tests"

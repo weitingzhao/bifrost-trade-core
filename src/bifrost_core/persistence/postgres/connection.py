@@ -71,21 +71,26 @@ def release_pg_locks_for_tables(
     return terminated
 
 
-def _get_conn_params(config: dict) -> dict:
-    """Build connection params from root postgres config, with env overrides."""
-    pg = config.get("postgres", {}) or {}
-    # Database: support database, Database, db, or any key that lower() in ("database", "db")
-    db = pg.get("database") or pg.get("Database") or pg.get("db")
+def _pg_block_dbname(pg: dict) -> str | None:
+    """Extract database name from a postgres-like config block."""
+    db = pg.get("database") or pg.get("Database") or pg.get("db") or pg.get("dbname")
     if not db and pg:
         for k, v in pg.items():
             if (
                 k
                 and isinstance(v, str)
                 and v.strip()
-                and k.strip().lower() in ("database", "db")
+                and k.strip().lower() in ("database", "db", "dbname")
             ):
                 db = v.strip()
                 break
+    return db
+
+
+def _get_conn_params(config: dict) -> dict:
+    """Build connection params from root postgres config, with env overrides."""
+    pg = config.get("postgres", {}) or {}
+    db = _pg_block_dbname(pg)
     return {
         "host": pg.get("host") or os.environ.get("PGHOST", "127.0.0.1"),
         "port": int(pg.get("port") or os.environ.get("PGPORT", "5432")),
@@ -93,3 +98,54 @@ def _get_conn_params(config: dict) -> dict:
         "user": pg.get("user") or os.environ.get("PGUSER", "bifrost"),
         "password": pg.get("password") or os.environ.get("PGPASSWORD", ""),
     }
+
+
+def _get_golden_source_conn_params(config: dict) -> dict:
+    """Build connection params for bifrost_golden_source (brokerage.* writes).
+
+    Reads ``config.golden_source`` with env overrides:
+    GOLDEN_SOURCE_HOST / PORT / DATABASE / USER / PASSWORD.
+    Falls back to postgres host/port when golden_source host is omitted
+    (same CNPG cluster, different database).
+    """
+    gs = config.get("golden_source", {}) or {}
+    pg = config.get("postgres", {}) or {}
+    db = _pg_block_dbname(gs)
+    return {
+        "host": (
+            gs.get("host")
+            or os.environ.get("GOLDEN_SOURCE_HOST")
+            or pg.get("host")
+            or os.environ.get("PGHOST", "127.0.0.1")
+        ),
+        "port": int(
+            gs.get("port")
+            or os.environ.get("GOLDEN_SOURCE_PORT")
+            or pg.get("port")
+            or os.environ.get("PGPORT", "5432")
+        ),
+        "dbname": (
+            db
+            or os.environ.get("GOLDEN_SOURCE_DATABASE")
+            or "bifrost_golden_source"
+        ),
+        "user": (
+            gs.get("user")
+            or os.environ.get("GOLDEN_SOURCE_USER")
+            or pg.get("user")
+            or os.environ.get("PGUSER", "bifrost")
+        ),
+        "password": (
+            gs.get("password")
+            or os.environ.get("GOLDEN_SOURCE_PASSWORD")
+            or pg.get("password")
+            or os.environ.get("PGPASSWORD", "")
+        ),
+    }
+
+
+def connect_golden_source(config: dict, *, connect_timeout: int = 10):
+    """Open a psycopg2 connection to bifrost_golden_source."""
+    params = _get_golden_source_conn_params(config)
+    params = {**params, "connect_timeout": connect_timeout}
+    return psycopg2.connect(**params)

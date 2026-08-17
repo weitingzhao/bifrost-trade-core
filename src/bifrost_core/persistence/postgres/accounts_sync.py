@@ -1,12 +1,15 @@
-"""Normalize and write accounts_snapshot into account and account_positions tables.
+"""Normalize and write accounts_snapshot into brokerage.account / brokerage.positions.
 
 Used by PostgreSQLSink (write_snapshot) and by the legacy reader. See docs/DATABASE.md.
+Writers must pass a connection to bifrost_golden_source (not per-env FDW).
 """
 
 import math
 from typing import Any, Dict, List, Optional, Tuple
 
 from psycopg2.extras import Json
+
+from bifrost_core.persistence.postgres.brokerage_tables import ACCOUNT, POSITIONS
 
 
 def _has_meaningful_commission(v: Any, is_numeric: bool = True) -> bool:
@@ -69,9 +72,10 @@ def _parse_summary_floats(
 def sync_accounts_snapshot_to_tables(
     conn, accounts_list: Optional[List[Dict[str, Any]]]
 ) -> None:
-    """Write normalized accounts_snapshot into account + account_positions.
-    account: upsert by account_id. account_positions: upsert by (account_id, symbol, sec_type);
+    """Write normalized accounts_snapshot into brokerage.account + brokerage.positions.
+    account: upsert by account_id. positions: upsert by (account_id, contract_key);
     only delete rows for an account that are no longer in the snapshot (position closed).
+    ``conn`` must target bifrost_golden_source.
     """
     if not accounts_list or not isinstance(accounts_list, list):
         return
@@ -92,8 +96,8 @@ def sync_accounts_snapshot_to_tables(
             summary_extra_json = _json_safe(summary_extra) if summary_extra else None
             # account: upsert by account_id (no delete)
             cur.execute(
-                """
-                INSERT INTO account (account_id, updated_at, net_liquidation, total_cash, buying_power, summary_extra)
+                f"""
+                INSERT INTO {ACCOUNT} (account_id, updated_at, net_liquidation, total_cash, buying_power, summary_extra)
                 VALUES (%s, now(), %s, %s, %s, %s)
                 ON CONFLICT (account_id) DO UPDATE SET
                     updated_at = now(),
@@ -114,7 +118,7 @@ def sync_accounts_snapshot_to_tables(
                     ),
                 ),
             )
-            # account_positions: upsert by (account_id, contract_key); contract_key distinguishes OPT by expiry/strike/right
+            # positions: upsert by (account_id, contract_key); contract_key distinguishes OPT by expiry/strike/right
             positions = acc.get("positions") or []
             seen_keys: List[str] = []
             if isinstance(positions, list):
@@ -153,8 +157,8 @@ def sync_accounts_snapshot_to_tables(
                     else:
                         contract_key = f"{sym}|{sec}|||"
                     cur.execute(
-                        """
-                        INSERT INTO account_positions (account_id, symbol, sec_type, exchange, currency, position, avg_cost, expiry, strike, option_right, contract_key, updated_at)
+                        f"""
+                        INSERT INTO {POSITIONS} (account_id, symbol, sec_type, exchange, currency, position, avg_cost, expiry, strike, option_right, contract_key, updated_at)
                         VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, now())
                         ON CONFLICT (account_id, contract_key) DO UPDATE SET
                             exchange = EXCLUDED.exchange,
@@ -184,13 +188,13 @@ def sync_accounts_snapshot_to_tables(
             # Remove positions for this account that are no longer in snapshot (closed)
             if seen_keys:
                 cur.execute(
-                    """
-                    DELETE FROM account_positions
+                    f"""
+                    DELETE FROM {POSITIONS}
                     WHERE account_id = %s AND (contract_key IS NULL OR contract_key != ALL(%s::text[]))
                     """,
                     (account_id, seen_keys),
                 )
             else:
                 cur.execute(
-                    "DELETE FROM account_positions WHERE account_id = %s", (account_id,)
+                    f"DELETE FROM {POSITIONS} WHERE account_id = %s", (account_id,)
                 )

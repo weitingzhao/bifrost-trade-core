@@ -13,6 +13,7 @@ from typing import Any, Dict, List, Optional, TypedDict
 
 from psycopg2.extras import RealDictCursor
 
+from bifrost_core.persistence.postgres.brokerage_tables import EXECUTIONS_FINAL, INSTANCE_ALLOCATION
 from bifrost_core.monitor.reader.strategy_instance import list_instances
 from bifrost_core.portfolio.model.payoff import RiskPosition, compute_risk_profile
 from bifrost_core.portfolio.reader.executions import get_executions
@@ -23,8 +24,8 @@ from bifrost_core.portfolio.reader.instance_exec_net_pnl import (
 
 logger = logging.getLogger(__name__)
 
-_EXEC_FINAL = "account_executions_final"
-_ALLOC_TABLE = "account_execution_instance_allocation"
+_EXEC_FINAL = EXECUTIONS_FINAL
+_ALLOC_TABLE = INSTANCE_ALLOCATION
 
 
 class WinRatePayload(TypedDict, total=False):

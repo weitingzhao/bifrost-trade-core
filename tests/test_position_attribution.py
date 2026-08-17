@@ -9,7 +9,6 @@ Tests _build_attribution_rows from bifrost_core.monitor.reader.executions to ver
 - Opposite-sign contribution exclusion
 """
 
-import math
 
 import pytest
 

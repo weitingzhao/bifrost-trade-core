@@ -7,11 +7,15 @@ from typing import Any, Dict, List, Optional, Tuple
 import psycopg2
 from psycopg2.extras import RealDictCursor
 
-from bifrost_core.persistence.postgres.connection import _get_conn_params
+from bifrost_core.persistence.postgres.brokerage_tables import EXECUTIONS, SETTINGS_FLEX
+from bifrost_core.persistence.postgres.connection import (
+    _get_conn_params,
+    _get_golden_source_conn_params,
+)
 
 logger = logging.getLogger(__name__)
 
-_EXEC_READ_TABLE = "account_executions"
+_EXEC_READ_TABLE = EXECUTIONS
 
 # ----- Conn-based (for common.StatusReader delegation) -----
 
@@ -75,12 +79,12 @@ def get_flex_config(conn: Any, purpose: Optional[str] = None) -> Any:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             if purpose is not None:
                 cur.execute(
-                    "SELECT query_host_id, query_secondary_id, query_label, purpose FROM settings_ib_flex WHERE purpose = %s ORDER BY sort_order, id",
+                    f"SELECT query_host_id, query_secondary_id, query_label, purpose FROM {SETTINGS_FLEX} WHERE purpose = %s ORDER BY sort_order, id",
                     (purpose,),
                 )
             else:
                 cur.execute(
-                    "SELECT query_host_id, query_secondary_id, query_label, purpose FROM settings_ib_flex ORDER BY sort_order, id"
+                    f"SELECT query_host_id, query_secondary_id, query_label, purpose FROM {SETTINGS_FLEX} ORDER BY sort_order, id"
                 )
             rows = cur.fetchall()
         if purpose is not None:
@@ -227,12 +231,14 @@ def write_flex_config(
     flex_default_range_days: Optional[int] = None,
     flex_init_range_days: Optional[int] = None,
 ) -> bool:
-    """Write Flex tokens to settings and replace settings_ib_flex with rows. Returns True on success."""
+    """Write Flex tokens to settings (per-env) and replace brokerage.settings_flex on golden_source."""
     if not status_config or (status_config.get("sink") != "postgres" and not status_config.get("postgres")):
         return False
     try:
         params = _get_conn_params(status_config)
+        gs_params = _get_golden_source_conn_params(status_config)
         conn = psycopg2.connect(**params)
+        golden = psycopg2.connect(**{**gs_params, "connect_timeout": 10})
         try:
             with conn.cursor() as cur:
                 days_val = max(1, int(flex_default_range_days)) if flex_default_range_days is not None else None
@@ -242,7 +248,9 @@ def write_flex_config(
                     "flex_default_range_days = COALESCE(%s, flex_default_range_days), flex_init_range_days = COALESCE(%s, flex_init_range_days) WHERE id = 1",
                     ((host_token or "").strip() or None, (secondary_token or "").strip() or None, days_val, init_val),
                 )
-                cur.execute("DELETE FROM settings_ib_flex")
+            conn.commit()
+            with golden.cursor() as cur:
+                cur.execute(f"DELETE FROM {SETTINGS_FLEX}")
                 for i, a in enumerate(accounts):
                     if not isinstance(a, dict):
                         continue
@@ -253,14 +261,19 @@ def write_flex_config(
                     query_label = (a.get("query_label") or "").strip() or None
                     purpose = (a.get("purpose") or "cash_transactions").strip() or "cash_transactions"
                     cur.execute(
-                        "INSERT INTO settings_ib_flex (sort_order, query_label, purpose, query_host_id, query_secondary_id) VALUES (%s, %s, %s, %s, %s)",
+                        f"INSERT INTO {SETTINGS_FLEX} (sort_order, query_label, purpose, query_host_id, query_secondary_id) VALUES (%s, %s, %s, %s, %s)",
                         (i, query_label, purpose, qh, qs),
                     )
-            conn.commit()
-            logger.info("write_flex_config: wrote tokens to settings and %d Flex row(s)", len([x for x in accounts if isinstance(x, dict) and (x.get("query_host_id") or "").strip()]))
+            golden.commit()
+            logger.info(
+                "write_flex_config: wrote tokens to settings and %d Flex row(s) to %s",
+                len([x for x in accounts if isinstance(x, dict) and (x.get("query_host_id") or "").strip()]),
+                SETTINGS_FLEX,
+            )
             return True
         finally:
             conn.close()
+            golden.close()
     except Exception as e:
         logger.warning("write_flex_config failed: %s", e)
         return False

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import pytest
 
 from bifrost_core.persistence.status_sink import StatusSink
 from bifrost_core.persistence.postgres.postgres_sink import PostgreSQLSink

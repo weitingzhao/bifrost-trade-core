@@ -7,10 +7,17 @@ from typing import Any, Dict, List, Optional
 
 from psycopg2.extras import RealDictCursor
 
+from bifrost_core.persistence.postgres.brokerage_tables import (
+    CONTRACT_QUOTE_LIVE,
+    EXECUTIONS_FINAL,
+    INSTANCE_ALLOCATION,
+    POSITIONS,
+)
+
 logger = logging.getLogger(__name__)
 
-_EXEC_READ_TABLE = "account_executions_final"
-_ALLOC_TABLE = "account_execution_instance_allocation"
+_EXEC_READ_TABLE = EXECUTIONS_FINAL
+_ALLOC_TABLE = INSTANCE_ALLOCATION
 
 
 def list_instances(
@@ -267,14 +274,14 @@ def get_instance_open_option_legs(conn: Any, strategy_instance_id: int) -> List[
                 SELECT ap.account_id, ap.contract_key, ap.symbol, ap.sec_type,
                        ap.position, ap.avg_cost, ap.expiry, ap.strike, ap.option_right,
                        ip.mid AS price_mid, ip.last AS price_last, ip.updated_at AS price_updated_at
-                FROM account_positions ap
+                FROM {POSITIONS} ap
                 INNER JOIN (
                     SELECT DISTINCT account_id, contract_key
                     FROM {_EXEC_READ_TABLE}
                     WHERE strategy_instance_id = %s
                       AND upper(trim(COALESCE(sec_type, ''))) = 'OPT'
                 ) tagged ON ap.account_id = tagged.account_id AND ap.contract_key = tagged.contract_key
-                LEFT JOIN contract_quote_live ip ON ap.contract_key = ip.contract_key
+                LEFT JOIN {CONTRACT_QUOTE_LIVE} ip ON ap.contract_key = ip.contract_key
                 WHERE ap.position IS NOT NULL AND ap.position != 0
                 ORDER BY ap.contract_key
                 """,

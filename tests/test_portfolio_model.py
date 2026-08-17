@@ -1,13 +1,10 @@
 """Unit tests for servers.portfolio_model — payoff, CAR, annualization, BS/IV, stress."""
 
-import math
-import pytest
 from bifrost_core.portfolio.model.payoff import (
     RiskPosition,
     compute_risk_profile,
     payoff_options_at_price,
     payoff_stock_at_price,
-    get_risk_grid_rows,
 )
 from bifrost_core.portfolio.model.core import (
     _compute_car,

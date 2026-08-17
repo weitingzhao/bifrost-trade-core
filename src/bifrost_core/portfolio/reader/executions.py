@@ -9,6 +9,17 @@ from zoneinfo import ZoneInfo
 
 from psycopg2.extras import RealDictCursor
 
+from bifrost_core.persistence.postgres.brokerage_tables import (
+    COMMISSIONS,
+    CONTRACT_QUOTE_LIVE,
+    EXECUTIONS,
+    EXECUTIONS_FINAL,
+    EXECUTIONS_FLY,
+    EXECUTIONS_RAW_TWS,
+    INSTANCE_ALLOCATION,
+    POSITIONS,
+    TRANSACTIONS,
+)
 from bifrost_core.portfolio.reader.accounts_helpers import (
     _compute_opt_pair_map_and_pairs,
     _compute_opt_realized_calendar,
@@ -27,14 +38,14 @@ def _unix_ts_to_chicago_date(ts: float) -> date:
 
 
 # All-source canonical view (Flex > TWS dedup + journal).
-_EXEC_READ_TABLE = "account_executions"
+_EXEC_READ_TABLE = EXECUTIONS
 # Official performance book: Flex + journal only (no TWS gap-fill rows).
-_EXEC_FINAL_TABLE = "account_executions_final"
+_EXEC_FINAL_TABLE = EXECUTIONS_FINAL
 # On-the-fly: TWS rows whose (account_id, contract_key) is not in final; excludes BAG (see view DDL).
-_EXEC_FLY_TABLE = "account_executions_fly"
+_EXEC_FLY_TABLE = EXECUTIONS_FLY
 
-# Multi–strategy_instance splits for one execution row (physical table; see DATABASE §2.24.11d).
-_EXEC_INST_ALLOC_TABLE = "account_execution_instance_allocation"
+# Multi–strategy_instance splits for one execution row (physical bridge table; see DATABASE §2.24.11d).
+_EXEC_INST_ALLOC_TABLE = INSTANCE_ALLOCATION
 
 # Raw TWS table (all rows); same canonical columns as account_executions TWS branch, with synthetic id.
 _EXEC_TWS_RAW_SUBQUERY = (
@@ -49,7 +60,7 @@ _EXEC_TWS_RAW_SUBQUERY = (
     "proceeds, taxes, net_cash, close_price, open_close_indicator, notes, cost, "
     "fifo_pnl_realized, mtm_pnl, trade_money, fx_rate_to_base, acct_alias, model, "
     "raw_extra, strategy_opportunity_id, strategy_instance_id, created_at "
-    "FROM executions_raw_tws)"
+    f"FROM {EXECUTIONS_RAW_TWS})"
 )
 
 
@@ -390,7 +401,7 @@ def get_executions(
                            so.name AS strategy_opportunity_name, si.label AS strategy_instance_label,
                            EXTRACT(EPOCH FROM si.opened_at)::bigint AS strategy_instance_opened_at_epoch
                     FROM {from_table} e
-                    LEFT JOIN account_execution_commissions c ON e.exec_id = c.exec_id AND e.exec_id IS NOT NULL
+                    LEFT JOIN {COMMISSIONS} c ON e.exec_id = c.exec_id AND e.exec_id IS NOT NULL
                     LEFT JOIN strategy_opportunity so ON e.strategy_opportunity_id = so.strategy_opportunity_id
                     LEFT JOIN strategy_instance si ON e.strategy_instance_id = si.strategy_instance_id
                     {where}
@@ -410,7 +421,7 @@ def get_executions(
                                    {_REALIZED_PNL_COALESCE_E}, e.contract_key, c.currency, c.yield_, c.yield_redemption_date,
                                    e.trade_date, e.raw_extra, {_CREATED_AT_E}
                             FROM {from_table} e
-                            LEFT JOIN account_execution_commissions c ON e.exec_id = c.exec_id
+                            LEFT JOIN {COMMISSIONS} c ON e.exec_id = c.exec_id
                             {where}
                             ORDER BY e.trade_date DESC NULLS LAST, e.exec_time DESC NULLS LAST{limit_clause}
                             """,
@@ -513,7 +524,7 @@ def get_executions_by_contract_keys(
                            e.trade_date, e.report_date, e.settle_date_target, e.transaction_type, e.taxes, e.net_cash,
                            e.raw_extra, {_CREATED_AT_E}
                     FROM {_EXEC_READ_TABLE} e
-                    LEFT JOIN account_execution_commissions c ON e.exec_id = c.exec_id AND e.exec_id IS NOT NULL
+                    LEFT JOIN {COMMISSIONS} c ON e.exec_id = c.exec_id AND e.exec_id IS NOT NULL
                     WHERE {where}
                     ORDER BY e.trade_date ASC NULLS LAST, e.exec_time ASC NULLS LAST
                     LIMIT %s
@@ -534,7 +545,7 @@ def get_executions_by_contract_keys(
                                    {_REALIZED_PNL_COALESCE_E}, e.contract_key, c.currency, c.yield_, c.yield_redemption_date,
                                    e.trade_date, e.raw_extra, {_CREATED_AT_E}
                             FROM {_EXEC_READ_TABLE} e
-                            LEFT JOIN account_execution_commissions c ON e.exec_id = c.exec_id
+                            LEFT JOIN {COMMISSIONS} c ON e.exec_id = c.exec_id
                             WHERE {where}
                             ORDER BY e.trade_date ASC NULLS LAST, e.exec_time ASC NULLS LAST
                             LIMIT %s
@@ -690,7 +701,7 @@ def get_executions_for_strategy_link(
                            so.name AS strategy_opportunity_name, si.label AS strategy_instance_label,
                            EXTRACT(EPOCH FROM si.opened_at)::bigint AS strategy_instance_opened_at_epoch
                     FROM {_EXEC_READ_TABLE} e
-                    LEFT JOIN account_execution_commissions c ON e.exec_id = c.exec_id AND e.exec_id IS NOT NULL
+                    LEFT JOIN {COMMISSIONS} c ON e.exec_id = c.exec_id AND e.exec_id IS NOT NULL
                     LEFT JOIN strategy_opportunity so ON e.strategy_opportunity_id = so.strategy_opportunity_id
                     LEFT JOIN strategy_instance si ON e.strategy_instance_id = si.strategy_instance_id
                     WHERE {where_sql}
@@ -716,7 +727,7 @@ def get_executions_for_strategy_link(
                                    so.name AS strategy_opportunity_name, si.label AS strategy_instance_label,
                                    EXTRACT(EPOCH FROM si.opened_at)::bigint AS strategy_instance_opened_at_epoch
                             FROM {_EXEC_READ_TABLE} e
-                            LEFT JOIN account_execution_commissions c ON e.exec_id = c.exec_id
+                            LEFT JOIN {COMMISSIONS} c ON e.exec_id = c.exec_id
                             LEFT JOIN strategy_opportunity so ON e.strategy_opportunity_id = so.strategy_opportunity_id
                             LEFT JOIN strategy_instance si ON e.strategy_instance_id = si.strategy_instance_id
                             WHERE {where_sql}
@@ -941,7 +952,7 @@ all_legs AS (
   FROM {from_table} e
   INNER JOIN day_keys k ON e.symbol = k.symbol AND e.expiry = k.expiry
     AND COALESCE(e.strike::text,'') = k.strike_s AND e.account_id = k.account_id
-  LEFT JOIN account_execution_commissions c ON e.exec_id = c.exec_id AND e.exec_id IS NOT NULL
+  LEFT JOIN {COMMISSIONS} c ON e.exec_id = c.exec_id AND e.exec_id IS NOT NULL
   WHERE upper(trim(COALESCE(e.sec_type,''))) = 'OPT'
     AND e.trade_date >= %s
     AND e.trade_date <= %s
@@ -1005,7 +1016,7 @@ all_legs AS (
   FROM {from_table} e
   INNER JOIN day_keys k ON e.symbol = k.symbol AND e.expiry = k.expiry
     AND COALESCE(e.strike::text,'') = k.strike_s AND e.account_id = k.account_id
-  LEFT JOIN account_execution_commissions c ON e.exec_id = c.exec_id AND e.exec_id IS NOT NULL
+  LEFT JOIN {COMMISSIONS} c ON e.exec_id = c.exec_id AND e.exec_id IS NOT NULL
   WHERE upper(trim(COALESCE(e.sec_type,''))) = 'OPT'
     AND e.trade_date >= %s
     AND e.trade_date <= %s
@@ -1043,7 +1054,7 @@ def get_net_cash_flow(
         return 0.0
     try:
         with conn.cursor() as cur:
-            q = "SELECT COALESCE(SUM(amount), 0) AS total FROM account_transactions WHERE 1=1"
+            q = f"SELECT COALESCE(SUM(amount), 0) AS total FROM {TRANSACTIONS} WHERE 1=1"
             args: List[Any] = []
             if since_ts is not None:
                 q += " AND ts >= to_timestamp(%s)"
@@ -1076,9 +1087,9 @@ def get_transactions(
         return []
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            q = """
+            q = f"""
                 SELECT account_transactions_id, account_id, extract(epoch from ts) AS ts, amount, type, currency, description, created_at
-                FROM account_transactions WHERE 1=1
+                FROM {TRANSACTIONS} WHERE 1=1
             """
             args: List[Any] = []
             if since_ts is not None:
@@ -1670,8 +1681,8 @@ def get_position_instance_attribution(
             SELECT ap.account_id, ap.contract_key, ap.symbol, ap.sec_type,
                    ap.position, ap.avg_cost, ap.expiry, ap.strike, ap.option_right,
                    cql.mid AS price_mid, cql.last AS price_last
-            FROM account_positions ap
-            LEFT JOIN contract_quote_live cql ON ap.contract_key = cql.contract_key
+            FROM {POSITIONS} ap
+            LEFT JOIN {CONTRACT_QUOTE_LIVE} cql ON ap.contract_key = cql.contract_key
             WHERE {pos_where}
         ),
         pos_has_final AS (
@@ -1710,7 +1721,7 @@ def get_position_instance_attribution(
                    COALESCE(e.strategy_opportunity_id, si2.strategy_opportunity_id) AS strategy_opportunity_id,
                    {_SIGNED_QTY_TWS_RAW_ROW_E} AS signed_qty
             FROM pos p
-            INNER JOIN executions_raw_tws e ON p.account_id = e.account_id AND {_POS_EXEC_JOIN_PE}
+            INNER JOIN {EXECUTIONS_RAW_TWS} e ON p.account_id = e.account_id AND {_POS_EXEC_JOIN_PE}
             LEFT JOIN strategy_instance si2 ON e.strategy_instance_id = si2.strategy_instance_id
             WHERE NOT EXISTS (
                 SELECT 1 FROM pos_has_final hf
@@ -1727,7 +1738,7 @@ def get_position_instance_attribution(
                    COALESCE(si_a.strategy_opportunity_id, e.strategy_opportunity_id) AS strategy_opportunity_id,
                    a.allocated_quantity AS signed_qty
             FROM pos p
-            INNER JOIN executions_raw_tws e ON p.account_id = e.account_id AND {_POS_EXEC_JOIN_PE}
+            INNER JOIN {EXECUTIONS_RAW_TWS} e ON p.account_id = e.account_id AND {_POS_EXEC_JOIN_PE}
             INNER JOIN {_EXEC_INST_ALLOC_TABLE} a ON a.account_executions_id = -(e.executions_raw_tws_id)
               AND a.account_id IS NOT DISTINCT FROM e.account_id
             LEFT JOIN strategy_instance si_a ON a.strategy_instance_id = si_a.strategy_instance_id

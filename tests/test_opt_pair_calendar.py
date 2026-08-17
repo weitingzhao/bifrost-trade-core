@@ -1,6 +1,5 @@
 """Tests for OPT pair FIFO and _compute_opt_realized_calendar alignment."""
 
-import math
 from bifrost_core.portfolio.reader.accounts_helpers import (
     _compute_opt_pair_map_and_pairs,
     _compute_opt_realized_calendar,

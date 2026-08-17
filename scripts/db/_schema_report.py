@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 import sys
-from typing import Dict, List, Tuple
+from typing import Dict, List
 
 RESET = "\033[0m"
 BOLD = "\033[1m"

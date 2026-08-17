@@ -1,4 +1,4 @@
-.PHONY: install install-dev test test-all lint clean db-init seed-call-spread-templates
+.PHONY: install install-dev test test-all lint clean db-init db-init-brokerage seed-call-spread-templates
 
 install:
 	pip install -e .
@@ -23,6 +23,13 @@ lint-fix:
 
 db-init:
 	python scripts/db/db_refresh_schema.py
+	python scripts/db/db_init_brokerage.py
+
+db-init-brokerage:
+	python scripts/db/db_init_brokerage.py
+
+db-init-brokerage-fdw:
+	python scripts/db/db_init_brokerage.py --with-fdw
 
 seed-call-spread-templates:
 	python scripts/db/seed_call_spread_templates.py

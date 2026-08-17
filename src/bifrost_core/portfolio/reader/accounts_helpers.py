@@ -7,6 +7,8 @@ import os
 from datetime import date, datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
+from bifrost_core.persistence.postgres.brokerage_tables import ACCOUNT
+
 logger = logging.getLogger(__name__)
 
 
@@ -307,7 +309,7 @@ def _get_current_equity(conn: Any) -> Optional[float]:
         return None
     try:
         with conn.cursor() as cur:
-            cur.execute("SELECT COALESCE(SUM(net_liquidation), 0) AS total FROM account")
+            cur.execute(f"SELECT COALESCE(SUM(net_liquidation), 0) AS total FROM {ACCOUNT}")
             row = cur.fetchone()
         if row and row[0] is not None:
             v = float(row[0])

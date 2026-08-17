@@ -9,6 +9,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import psycopg2
 from psycopg2.extras import RealDictCursor
 
+from bifrost_core.persistence.postgres.brokerage_tables import CONTRACT_QUOTE_LIVE
 from bifrost_core.persistence.postgres.connection import _get_conn_params
 
 logger = logging.getLogger(__name__)
@@ -248,10 +249,10 @@ def get_contract_quotes_conn(conn: Any, contract_keys: List[str]) -> List[Dict[s
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             placeholders = ", ".join("%s" for _ in keys)
             cur.execute(
-                """
+                f"""
                 SELECT contract_key, symbol, sec_type, expiry, strike, option_right, bid, ask, last, mid,
                        extract(epoch from updated_at) AS ts
-                FROM contract_quote_live
+                FROM {CONTRACT_QUOTE_LIVE}
                 WHERE contract_key IN (""" + placeholders + """)
                 """,
                 tuple(keys),

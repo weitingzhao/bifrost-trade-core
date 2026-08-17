@@ -1,6 +1,5 @@
 """Tests for config/settings: gates structure, get_hedge_config, get_structure_config."""
 
-import pytest
 
 from bifrost_core.config.settings import (
     get_hedge_config,
