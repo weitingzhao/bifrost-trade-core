@@ -98,43 +98,17 @@ ops:
     allow_unauthenticated_reads: true
   celery:
     default_max_worker_instances: 1
-    massive_worker_concurrency: 1
-    massive_pending_dispatch_inflight_cap: 15
     # Hostnames (Celery nodename suffix) for Worker instance situation Dev/Prod columns when
     # Redis presence lacks config_profile (legacy Linux prod workers). Example: server-app-ubt
     prod_worker_hostnames: []
     dev_worker_hostnames: []
     canonical_queue_order:
       - stocks_ib
-      - stocks_massive_high
-      - stocks_massive
-      - options_massive_high
-      - options_massive
     broker_queue_display_names:
       stocks_ib: "Stocks IB"
-      options_massive: "Options Massive"
-      options_massive_high: "Massive Options (H)"
-      stocks_massive: "Stocks Massive"
-      stocks_massive_high: "Stocks Massive (H)"
   worker_profiles:
     stocks_ib:
       queues: ["stocks_ib"]
-      max_worker_instances: 1
-    options_massive:
-      queues: ["options_massive"]
-      pool: solo
-      max_worker_instances: 4
-    options_massive_high:
-      queues: ["options_massive_high"]
-      pool: solo
-      max_worker_instances: 1
-    stocks_massive:
-      queues: ["stocks_massive"]
-      pool: solo
-      max_worker_instances: 2
-    stocks_massive_high:
-      queues: ["stocks_massive_high"]
-      pool: solo
       max_worker_instances: 1
 
 history_backfill:
