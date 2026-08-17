@@ -80,7 +80,7 @@ server:
     market_port: 8772
     strategy_port: 8770
   feed:
-    massive_port: 8766
+    massive_port: 8766  # legacy — api-massive retired (P7)
 
 frontend:
   port: 5173
