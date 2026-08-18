@@ -62,9 +62,8 @@ def main() -> int:
         return 1
     params = _get_conn_params(config)
     params["connect_timeout"] = 10
-    dbname = params["dbname"]
 
-    _progress(f"Using config: {config_path}", no_color)
+    _progress(f"Using config: {config_path} ({params['dbname']})", no_color)
     conn = psycopg2.connect(**params)
     try:
         with conn.cursor() as cur:
@@ -81,6 +80,50 @@ def main() -> int:
         _ensure_tables(conn, log=lambda m: _step(m, no_color), log_table=log_table_by_category)
         conn.commit()
         _progress("Schema refresh complete.", no_color)
+
+        gs_cfg = config.get("golden_source") or {}
+        if not gs_cfg and not os.environ.get("GOLDEN_SOURCE_HOST"):
+            _progress("golden_source not configured; skipping brokerage DDL / FDW.", no_color)
+            return 0
+
+        from bifrost_core.persistence.postgres.brokerage_ddl import (
+            ensure_brokerage_schema,
+            setup_fdw_foreign_tables,
+        )
+        from bifrost_core.persistence.postgres.connection import _get_golden_source_conn_params
+
+        gs_params = _get_golden_source_conn_params(config)
+        gs_params["connect_timeout"] = 15
+        _progress(
+            f"Brokerage Golden Source: {gs_params['user']}@{gs_params['host']}:"
+            f"{gs_params['port']}/{gs_params['dbname']}",
+            no_color,
+        )
+        gs_conn = psycopg2.connect(**gs_params)
+        try:
+            ensure_brokerage_schema(gs_conn, log=lambda m: _step(f"brokerage {m}", no_color))
+            _progress("Brokerage schema ready.", no_color)
+        finally:
+            gs_conn.close()
+
+        fdw_params = dict(gs_params)
+        fdw_params["user"] = gs_cfg.get("fdw_user") or "brokerage_reader"
+        fdw_params["password"] = (
+            gs_cfg.get("fdw_password") or gs_cfg.get("password") or fdw_params.get("password") or ""
+        )
+        try:
+            setup_fdw_foreign_tables(
+                conn,
+                fdw_params,
+                local_user=str(params["user"]),
+                log=lambda m: _step(f"fdw {m}", no_color),
+            )
+            _progress("FDW foreign tables ready.", no_color)
+        except Exception as e:
+            print(
+                f"FDW setup skipped (needs CREATE EXTENSION / SERVER privilege): {e}",
+                file=sys.stderr,
+            )
         return 0
     except Exception as e:
         print(f"Schema refresh failed: {e}", file=sys.stderr)

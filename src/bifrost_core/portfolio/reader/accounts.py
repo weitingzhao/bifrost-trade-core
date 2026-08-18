@@ -719,26 +719,6 @@ def write_account_executions_to_db(
                                         ]
                                     )
 
-                    # DECOMMISSION-CANDIDATE: cross-source override check
-                    if _WRITE_LEGACY:
-                        if (
-                            account_id
-                            and contract_key
-                            and (source or "").strip() != "flex_trades"
-                        ):
-                            cur.execute(
-                                f"""
-                                SELECT 1
-                                FROM {EXECUTIONS}
-                                WHERE account_id = %s
-                                  AND contract_key = %s
-                                  AND source = 'flex_trades'
-                                LIMIT 1
-                                """,
-                                (account_id, contract_key),
-                            )
-                            if cur.fetchone():
-                                continue
                     if exec_time is not None:
                         try:
                             if isinstance(exec_time, (int, float)):
@@ -823,42 +803,7 @@ def write_account_executions_to_db(
                         model,
                         raw_extra,
                     )
-                    # DECOMMISSION-CANDIDATE: legacy write to account_executions
-                    if _WRITE_LEGACY:
-                        if exec_id:
-                            is_flex = (source == "flex_trades")
-                            if is_flex:
-                                update_set = ", ".join(
-                                    f"{c.strip()} = EXCLUDED.{c.strip()}" for c in cols.split(",")
-                                )
-                                cur.execute(
-                                    f"""
-                                    INSERT INTO {EXECUTIONS} ({cols})
-                                    VALUES ({placeholders})
-                                    ON CONFLICT (exec_id) WHERE exec_id IS NOT NULL AND exec_id != ''
-                                    DO UPDATE SET {update_set}
-                                    """,
-                                    vals,
-                                )
-                            else:
-                                cur.execute(
-                                    f"""
-                                    INSERT INTO {EXECUTIONS} ({cols})
-                                    VALUES ({placeholders})
-                                    ON CONFLICT (exec_id) WHERE exec_id IS NOT NULL AND exec_id != '' DO NOTHING
-                                    """,
-                                    vals,
-                                )
-                        else:
-                            cur.execute(
-                                f"""
-                                INSERT INTO {EXECUTIONS} ({cols})
-                                VALUES ({placeholders})
-                                """,
-                                vals,
-                            )
-
-                    # ── Dual-write to source-split raw tables ──
+                    # ── Write to source-split raw tables (brokerage.*) ──
                     try:
                         is_flex_source = (source == "flex_trades")
                         is_journal_source = (source == "journal_closed")

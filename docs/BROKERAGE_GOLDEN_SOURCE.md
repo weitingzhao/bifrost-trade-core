@@ -40,8 +40,14 @@ make db-init-brokerage-fdw      # + FDW into current per-env DB (needs superuser
 - `account_execution_instance_allocation` — FK to `strategy_instance`; exec id integrity at app layer
 - `account_execution_option_stock_link` — same pattern
 
+## Per-env DDL
+
+`ddl.py` `_ensure_tables()` skips migrated brokerage tables/views (core `0.6.1`).
+K8s `db_refresh_schema.py` also runs `ensure_brokerage_schema()` + FDW when
+`golden_source` is present in config.
+
 ## Cleanup
 
 Legacy `public.account*` / `executions_raw_*` / `daemon_open_orders` /
-`contract_quote_live` / `settings_ib_flex` are retained for a 30-day observation
-window before DROP.
+`contract_quote_live` / `settings_ib_flex` were renamed `*_legacy_bak`
+and are retained for a 30-day observation window before DROP.

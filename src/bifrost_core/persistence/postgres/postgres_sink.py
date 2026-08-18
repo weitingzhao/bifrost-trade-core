@@ -325,13 +325,8 @@ class PostgreSQLSink(StatusSink):
             self._golden_conn.rollback()
             logger.warning("write_contract_quote_live failed: %s", e, exc_info=True)
 
-    # DECOMMISSION: set EXECUTIONS_WRITE_LEGACY=false to stop writing to account_executions.
-    # Only do this after raw tables are backfilled, canonical view verified, and reads switched.
-    _write_legacy = os.environ.get("EXECUTIONS_WRITE_LEGACY", "false").strip().lower() != "false"
-
     def write_account_executions(self, rows: Any) -> None:
-        """R-A2: 写入账户执行到 brokerage.executions_raw_tws；CommissionReport 写入 brokerage.commissions。
-        Dual-write legacy account_executions skipped when EXECUTIONS_WRITE_LEGACY=false (default)."""
+        """R-A2: write executions to brokerage.executions_raw_tws; commissions to brokerage.commissions."""
         if not rows:
             return
         if not self._ensure_golden_conn():
@@ -451,70 +446,6 @@ class PostgreSQLSink(StatusSink):
                                     right_key,
                                 ]
                             )
-                    # DECOMMISSION-CANDIDATE: cross-source override check (skip TWS if flex exists)
-                    # Remove this block after canonical view is live and EXECUTIONS_WRITE_LEGACY=false.
-                    if self._write_legacy:
-                        if (
-                            account_id
-                            and contract_key
-                            and (source or "").strip() != "flex_trades"
-                        ):
-                            cur.execute(
-                                f"""
-                                SELECT 1
-                                FROM {EXECUTIONS}
-                                WHERE account_id = %s
-                                  AND contract_key = %s
-                                  AND source = 'flex_trades'
-                                LIMIT 1
-                                """,
-                                (account_id, contract_key),
-                            )
-                            if cur.fetchone():
-                                # Still write to raw_tws even when skipping legacy
-                                try:
-                                    if exec_time is not None:
-                                        try:
-                                            from datetime import datetime as _dt, timezone as _tz
-                                            _exec_dt = _dt.fromtimestamp(float(exec_time), tz=_tz.utc) if isinstance(exec_time, (int, float)) else exec_time
-                                        except Exception:
-                                            _exec_dt = None
-                                    else:
-                                        _exec_dt = None
-                                    _skip_cols = (
-                                        "account_id, exec_id, exec_time, symbol, sec_type, side, quantity, price, source, "
-                                        "expiry, strike, option_right, exchange, order_id, cum_qty, contract_key, "
-                                        "asset_category, sub_category, description, conid, security_id, security_id_type, "
-                                        "cusip, isin, figi, listing_exchange, underlying_conid, underlying_symbol, "
-                                        "underlying_security_id, underlying_listing_exchange, issuer, issuer_country_code, "
-                                        "trade_id, related_trade_id, report_date, trade_date, settle_date_target, "
-                                        "transaction_type, multiplier, principal_adjust_factor, proceeds, taxes, net_cash, "
-                                        "close_price, open_close_indicator, notes, cost, fifo_pnl_realized, mtm_pnl, "
-                                        "trade_money, fx_rate_to_base, acct_alias, model, raw_extra"
-                                    )
-                                    _skip_ph = ", ".join(["%s"] * 54)
-                                    _skip_vals = (
-                                        account_id, exec_id, _exec_dt, symbol, sec_type, side, quantity, price, source,
-                                        expiry, strike, option_right, exchange, order_id, cum_qty, contract_key,
-                                        asset_category, sub_category, description, conid, security_id, security_id_type,
-                                        cusip, isin, figi, listing_exchange, underlying_conid, underlying_symbol,
-                                        underlying_security_id, underlying_listing_exchange, issuer, issuer_country_code,
-                                        trade_id, related_trade_id, report_date, trade_date, settle_date_target,
-                                        transaction_type, multiplier, principal_adjust_factor, proceeds, taxes, net_cash,
-                                        close_price, open_close_indicator, notes, cost, fifo_pnl_realized, mtm_pnl,
-                                        trade_money, fx_rate_to_base, acct_alias, model, raw_extra,
-                                    )
-                                    if exec_id:
-                                        cur.execute(
-                                            f"INSERT INTO {EXECUTIONS_RAW_TWS} ({_skip_cols}) VALUES ({_skip_ph}) "
-                                            "ON CONFLICT (exec_id) WHERE exec_id IS NOT NULL AND exec_id != '' DO NOTHING",
-                                            _skip_vals,
-                                        )
-                                    else:
-                                        cur.execute(f"INSERT INTO {EXECUTIONS_RAW_TWS} ({_skip_cols}) VALUES ({_skip_ph})", _skip_vals)
-                                except Exception:
-                                    pass
-                                continue
                     if exec_time is not None:
                         try:
                             from datetime import datetime, timezone
@@ -599,26 +530,6 @@ class PostgreSQLSink(StatusSink):
                         model,
                         raw_extra,
                     )
-                    # Legacy write to account_executions view is obsolete (brokerage.*); raw_tws is authoritative.
-                    if False and self._write_legacy:
-                        if exec_id:
-                            cur.execute(
-                                f"""
-                                INSERT INTO {EXECUTIONS} ({cols})
-                                VALUES ({placeholders})
-                                ON CONFLICT (exec_id) WHERE exec_id IS NOT NULL AND exec_id != '' DO NOTHING
-                                """,
-                                vals,
-                            )
-                        else:
-                            cur.execute(
-                                f"""
-                                INSERT INTO {EXECUTIONS} ({cols})
-                                VALUES ({placeholders})
-                                """,
-                                vals,
-                            )
-
                     # Write: brokerage.executions_raw_tws
                     try:
                         if exec_id:
