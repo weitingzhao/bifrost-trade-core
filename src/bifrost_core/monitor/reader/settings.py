@@ -223,40 +223,78 @@ def write_ib_config(
         return False
 
 
+def _flex_token_column_value(token: str) -> Optional[str]:
+    return token.strip() or None
+
+
 def write_flex_config(
     status_config: dict,
     host_token: Optional[str],
     secondary_token: Optional[str],
-    accounts: List[Dict[str, Any]],
+    accounts: Optional[List[Dict[str, Any]]] = None,
     flex_default_range_days: Optional[int] = None,
     flex_init_range_days: Optional[int] = None,
 ) -> bool:
-    """Write Flex tokens to settings (per-env) and replace brokerage.settings_flex on golden_source."""
+    """Write Flex tokens to settings (per-env) and optionally replace GS query rows.
+
+    Token columns: ``None`` leaves the column unchanged; ``""`` stores NULL.
+    ``accounts``: ``None`` does not touch ``brokerage.settings_flex``; an empty
+    list (no ``query_host_id``) is refused and does not DELETE; a non-empty list
+    replaces GS rows.
+    """
     if not status_config or (status_config.get("sink") != "postgres" and not status_config.get("postgres")):
         return False
+    valid_accounts: Optional[List[Dict[str, Any]]]
+    if accounts is None:
+        valid_accounts = None
+    else:
+        valid_accounts = [
+            a
+            for a in accounts
+            if isinstance(a, dict) and (a.get("query_host_id") or "").strip()
+        ]
+        if not valid_accounts:
+            return False
+
+    sets: List[str] = []
+    args: List[Any] = []
+    if host_token is not None:
+        sets.append("ib_flex_host_token = %s")
+        args.append(_flex_token_column_value(host_token))
+    if secondary_token is not None:
+        sets.append("ib_flex_secondary_token = %s")
+        args.append(_flex_token_column_value(secondary_token))
+    days_val = max(1, int(flex_default_range_days)) if flex_default_range_days is not None else None
+    init_val = max(1, int(flex_init_range_days)) if flex_init_range_days is not None else None
+    if days_val is not None:
+        sets.append("flex_default_range_days = COALESCE(%s, flex_default_range_days)")
+        args.append(days_val)
+    if init_val is not None:
+        sets.append("flex_init_range_days = COALESCE(%s, flex_init_range_days)")
+        args.append(init_val)
+
+    if not sets and valid_accounts is None:
+        return True
+
+    conn = None
+    golden = None
     try:
-        params = _get_conn_params(status_config)
-        gs_params = _get_golden_source_conn_params(status_config)
-        conn = psycopg2.connect(**params)
-        golden = psycopg2.connect(**{**gs_params, "connect_timeout": 10})
-        try:
+        if sets:
+            params = _get_conn_params(status_config)
+            conn = psycopg2.connect(**params)
             with conn.cursor() as cur:
-                days_val = max(1, int(flex_default_range_days)) if flex_default_range_days is not None else None
-                init_val = max(1, int(flex_init_range_days)) if flex_init_range_days is not None else None
                 cur.execute(
-                    "UPDATE settings SET ib_flex_host_token = %s, ib_flex_secondary_token = %s, "
-                    "flex_default_range_days = COALESCE(%s, flex_default_range_days), flex_init_range_days = COALESCE(%s, flex_init_range_days) WHERE id = 1",
-                    ((host_token or "").strip() or None, (secondary_token or "").strip() or None, days_val, init_val),
+                    "UPDATE settings SET " + ", ".join(sets) + " WHERE id = 1",
+                    tuple(args),
                 )
             conn.commit()
+        if valid_accounts is not None:
+            gs_params = _get_golden_source_conn_params(status_config)
+            golden = psycopg2.connect(**{**gs_params, "connect_timeout": 10})
             with golden.cursor() as cur:
                 cur.execute(f"DELETE FROM {SETTINGS_FLEX}")
-                for i, a in enumerate(accounts):
-                    if not isinstance(a, dict):
-                        continue
+                for i, a in enumerate(valid_accounts):
                     qh = (a.get("query_host_id") or "").strip()
-                    if not qh:
-                        continue
                     qs = (a.get("query_secondary_id") or "").strip() or None
                     query_label = (a.get("query_label") or "").strip() or None
                     purpose = (a.get("purpose") or "cash_transactions").strip() or "cash_transactions"
@@ -265,18 +303,20 @@ def write_flex_config(
                         (i, query_label, purpose, qh, qs),
                     )
             golden.commit()
-            logger.info(
-                "write_flex_config: wrote tokens to settings and %d Flex row(s) to %s",
-                len([x for x in accounts if isinstance(x, dict) and (x.get("query_host_id") or "").strip()]),
-                SETTINGS_FLEX,
-            )
-            return True
-        finally:
-            conn.close()
-            golden.close()
+        logger.info(
+            "write_flex_config: settings_sets=%d gs_rows=%s",
+            len(sets),
+            None if valid_accounts is None else len(valid_accounts),
+        )
+        return True
     except Exception as e:
         logger.warning("write_flex_config failed: %s", e)
         return False
+    finally:
+        if conn is not None:
+            conn.close()
+        if golden is not None:
+            golden.close()
 
 
 def write_active_strategy_and_gates(
