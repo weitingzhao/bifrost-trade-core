@@ -1,21 +1,15 @@
-"""Settings: IB config, Flex config. Conn-based and status_config-based APIs."""
+"""Settings: IB config. Conn-based and status_config-based APIs."""
 
 import logging
-from datetime import date, timedelta
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Optional
 
 import psycopg2
 from psycopg2.extras import RealDictCursor
 
-from bifrost_core.persistence.postgres.brokerage_tables import EXECUTIONS, SETTINGS_FLEX
-from bifrost_core.persistence.postgres.connection import (
-    _get_conn_params,
-    _get_golden_source_conn_params,
-)
+from bifrost_core.persistence.postgres.connection import _get_conn_params
 
 logger = logging.getLogger(__name__)
 
-_EXEC_READ_TABLE = EXECUTIONS
 
 # ----- Conn-based (for common.StatusReader delegation) -----
 
@@ -23,6 +17,8 @@ def get_ib_config(conn: Any) -> Optional[Dict[str, Any]]:
     """Return settings row id=1: ib_host_account_id, flex ranges, stream account IDs.
 
     IB host/port/client IDs come from config YAML (see get_effective_ib_config), not from DB.
+    Flex range days remain here because they share the settings row; Flex token/query
+    R/W lives in the Flex Query Plugin.
     """
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
@@ -64,116 +60,6 @@ def get_ib_config(conn: Any) -> Optional[Dict[str, Any]]:
     except Exception as e:
         logger.debug("get_ib_config failed: %s", e)
         return None
-
-
-def get_flex_config(conn: Any, purpose: Optional[str] = None) -> Any:
-    """If purpose is None: return { host_token, secondary_token, rows }. If purpose is set: return list of { token, query_id, role, query_label, purpose }."""
-    try:
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute(
-                "SELECT ib_flex_host_token, ib_flex_secondary_token FROM settings WHERE id = 1"
-            )
-            settings_row = cur.fetchone()
-        host_tok = (settings_row.get("ib_flex_host_token") or "").strip() if settings_row else ""
-        sec_tok = (settings_row.get("ib_flex_secondary_token") or "").strip() if settings_row else ""
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            if purpose is not None:
-                cur.execute(
-                    f"SELECT query_host_id, query_secondary_id, query_label, purpose FROM {SETTINGS_FLEX} WHERE purpose = %s ORDER BY sort_order, id",
-                    (purpose,),
-                )
-            else:
-                cur.execute(
-                    f"SELECT query_host_id, query_secondary_id, query_label, purpose FROM {SETTINGS_FLEX} ORDER BY sort_order, id"
-                )
-            rows = cur.fetchall()
-        if purpose is not None:
-            out = []
-            for r in rows:
-                qh_raw = (r.get("query_host_id") or "").strip()
-                qs_raw = (r.get("query_secondary_id") or "").strip()
-                label = (r.get("query_label") or "").strip()
-                purp = (r.get("purpose") or "").strip()
-                qh_ids = [x.strip() for x in qh_raw.split(",") if x.strip()]
-                qs_ids = [x.strip() for x in qs_raw.split(",") if x.strip()]
-                if host_tok:
-                    for qid in qh_ids:
-                        out.append({"token": host_tok, "query_id": qid, "role": "host", "query_label": label or None, "purpose": purp or None})
-                if sec_tok:
-                    for qid in qs_ids:
-                        out.append({"token": sec_tok, "query_id": qid, "role": "secondary", "query_label": label or None, "purpose": purp or None})
-            return out
-        out_rows = []
-        for r in rows:
-            item = {
-                "query_host_id": (r.get("query_host_id") or "").strip(),
-                "query_secondary_id": (r.get("query_secondary_id") or "").strip() or None,
-            }
-            if r.get("query_label") is not None and str(r.get("query_label")).strip():
-                item["query_label"] = str(r["query_label"]).strip()
-            if r.get("purpose") is not None and str(r.get("purpose")).strip():
-                item["purpose"] = str(r["purpose"]).strip()
-            out_rows.append(item)
-        return {"host_token": host_tok or None, "secondary_token": sec_tok or None, "rows": out_rows}
-    except Exception as e:
-        logger.debug("get_flex_config failed: %s", e)
-        return [] if purpose is not None else {"host_token": None, "secondary_token": None, "rows": []}
-
-
-def get_flex_default_range_dates(conn: Any) -> Tuple[str, str]:
-    """Return (from_date, to_date) in yyyyMMdd for Flex default range. Uses settings.flex_default_range_days; to_date = yesterday."""
-    days = 30
-    try:
-        ib = get_ib_config(conn)
-        if ib and ib.get("flex_default_range_days") is not None:
-            days = max(1, int(ib["flex_default_range_days"]))
-    except Exception:
-        pass
-    yesterday = date.today() - timedelta(days=1)
-    start = yesterday - timedelta(days=days)
-    return start.strftime("%Y%m%d"), yesterday.strftime("%Y%m%d")
-
-
-def get_flex_executions_stats(conn: Any) -> Dict[str, Any]:
-    """Return basic stats for executions imported from Flex (source='flex_trades')."""
-    try:
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute(
-                f"""
-                SELECT
-                    COUNT(*) AS count,
-                    COUNT(DISTINCT account_id) AS accounts,
-                    MIN(exec_time)::date AS min_date,
-                    MAX(exec_time)::date AS max_date
-                FROM {_EXEC_READ_TABLE}
-                WHERE source = %s
-                """,
-                ("flex_trades",),
-            )
-            row = cur.fetchone() or {}
-        return {
-            "count": int(row.get("count") or 0),
-            "accounts": int(row.get("accounts") or 0),
-            "min_date": row.get("min_date"),
-            "max_date": row.get("max_date"),
-        }
-    except Exception as e:
-        logger.warning("get_flex_executions_stats failed: %s", e)
-        return {"count": 0, "accounts": 0, "min_date": None, "max_date": None}
-
-
-def get_flex_init_range_dates(conn: Any) -> Tuple[str, str]:
-    """Return (from_date, to_date) in yyyyMMdd for Flex initial/full pull. Uses settings.flex_init_range_days; to_date = yesterday."""
-    days = 360
-    try:
-        ib = get_ib_config(conn)
-        if ib and ib.get("flex_init_range_days") is not None:
-            days = max(1, int(ib["flex_init_range_days"]))
-    except Exception:
-        pass
-    yesterday = date.today() - timedelta(days=1)
-    start = yesterday - timedelta(days=days)
-    return start.strftime("%Y%m%d"), yesterday.strftime("%Y%m%d")
 
 
 # ----- Module-level (status_config) for re-export -----
@@ -223,102 +109,6 @@ def write_ib_config(
         return False
 
 
-def _flex_token_column_value(token: str) -> Optional[str]:
-    return token.strip() or None
-
-
-def write_flex_config(
-    status_config: dict,
-    host_token: Optional[str],
-    secondary_token: Optional[str],
-    accounts: Optional[List[Dict[str, Any]]] = None,
-    flex_default_range_days: Optional[int] = None,
-    flex_init_range_days: Optional[int] = None,
-) -> bool:
-    """Write Flex tokens to settings (per-env) and optionally replace GS query rows.
-
-    Token columns: ``None`` leaves the column unchanged; ``""`` stores NULL.
-    ``accounts``: ``None`` does not touch ``brokerage.settings_flex``; an empty
-    list (no ``query_host_id``) is refused and does not DELETE; a non-empty list
-    replaces GS rows.
-    """
-    if not status_config or (status_config.get("sink") != "postgres" and not status_config.get("postgres")):
-        return False
-    valid_accounts: Optional[List[Dict[str, Any]]]
-    if accounts is None:
-        valid_accounts = None
-    else:
-        valid_accounts = [
-            a
-            for a in accounts
-            if isinstance(a, dict) and (a.get("query_host_id") or "").strip()
-        ]
-        if not valid_accounts:
-            return False
-
-    sets: List[str] = []
-    args: List[Any] = []
-    if host_token is not None:
-        sets.append("ib_flex_host_token = %s")
-        args.append(_flex_token_column_value(host_token))
-    if secondary_token is not None:
-        sets.append("ib_flex_secondary_token = %s")
-        args.append(_flex_token_column_value(secondary_token))
-    days_val = max(1, int(flex_default_range_days)) if flex_default_range_days is not None else None
-    init_val = max(1, int(flex_init_range_days)) if flex_init_range_days is not None else None
-    if days_val is not None:
-        sets.append("flex_default_range_days = COALESCE(%s, flex_default_range_days)")
-        args.append(days_val)
-    if init_val is not None:
-        sets.append("flex_init_range_days = COALESCE(%s, flex_init_range_days)")
-        args.append(init_val)
-
-    if not sets and valid_accounts is None:
-        return True
-
-    conn = None
-    golden = None
-    try:
-        if sets:
-            params = _get_conn_params(status_config)
-            conn = psycopg2.connect(**params)
-            with conn.cursor() as cur:
-                cur.execute(
-                    "UPDATE settings SET " + ", ".join(sets) + " WHERE id = 1",
-                    tuple(args),
-                )
-            conn.commit()
-        if valid_accounts is not None:
-            gs_params = _get_golden_source_conn_params(status_config)
-            golden = psycopg2.connect(**{**gs_params, "connect_timeout": 10})
-            with golden.cursor() as cur:
-                cur.execute(f"DELETE FROM {SETTINGS_FLEX}")
-                for i, a in enumerate(valid_accounts):
-                    qh = (a.get("query_host_id") or "").strip()
-                    qs = (a.get("query_secondary_id") or "").strip() or None
-                    query_label = (a.get("query_label") or "").strip() or None
-                    purpose = (a.get("purpose") or "cash_transactions").strip() or "cash_transactions"
-                    cur.execute(
-                        f"INSERT INTO {SETTINGS_FLEX} (sort_order, query_label, purpose, query_host_id, query_secondary_id) VALUES (%s, %s, %s, %s, %s)",
-                        (i, query_label, purpose, qh, qs),
-                    )
-            golden.commit()
-        logger.info(
-            "write_flex_config: settings_sets=%d gs_rows=%s",
-            len(sets),
-            None if valid_accounts is None else len(valid_accounts),
-        )
-        return True
-    except Exception as e:
-        logger.warning("write_flex_config failed: %s", e)
-        return False
-    finally:
-        if conn is not None:
-            conn.close()
-        if golden is not None:
-            golden.close()
-
-
 def write_active_strategy_and_gates(
     status_config: dict,
     active_strategy_structure_id: Optional[int] = None,
@@ -358,6 +148,5 @@ def write_active_strategy_and_gates(
 
 __all__ = [
     "write_ib_config",
-    "write_flex_config",
     "write_active_strategy_and_gates",
 ]

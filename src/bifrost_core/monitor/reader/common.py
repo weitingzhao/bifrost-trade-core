@@ -326,34 +326,6 @@ class StatusReader:
             merged.setdefault("stream_secondary_account_id", None)
         return merged
 
-    def get_flex_config(self, purpose: Optional[str] = None) -> Any:
-        if not self._connect():
-            return [] if purpose is not None else {"host_token": None, "secondary_token": None, "rows": []}
-        result = settings_module.get_flex_config(self._conn, purpose=purpose)
-        self._end_read_txn()
-        return result
-
-    def get_flex_default_range_dates(self) -> Tuple[str, str]:
-        if not self._connect():
-            return ("", "")
-        result = settings_module.get_flex_default_range_dates(self._conn)
-        self._end_read_txn()
-        return result
-
-    def get_flex_executions_stats(self) -> Dict[str, Any]:
-        if not self._connect():
-            return {"count": 0, "accounts": 0, "min_date": None, "max_date": None}
-        result = settings_module.get_flex_executions_stats(self._conn)
-        self._end_read_txn()
-        return result
-
-    def get_flex_init_range_dates(self) -> Tuple[str, str]:
-        if not self._connect():
-            return ("", "")
-        result = settings_module.get_flex_init_range_dates(self._conn)
-        self._end_read_txn()
-        return result
-
     # --- Gate safety (strategy & safety boundary from DB) ---
     def get_gates_by_id(self, gate_safety_strategy_id: int) -> Optional[Dict[str, Any]]:
         """Return gates dict (shape of config['gates']) for the given boundary set id. None if missing."""

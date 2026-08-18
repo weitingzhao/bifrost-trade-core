@@ -1,16 +1,14 @@
-"""Public JSON for Monitor GET /status ``config`` (``ib_client`` + ``ib_flex``).
+"""Public JSON for Monitor GET /status ``config`` (``ib_client``).
 
 ``ib_client``: ``client`` (host/TCP ports), ``port`` (IB API client IDs), ``account`` (stream/trading
 account IDs from DB), ``timeout_sec``.
-
-``ib_flex``: default/init range days + Flex tokens/rows (former ``flex_config``).
 
 Internal merged dict from ``StatusReader.get_ib_config()`` still uses YAML/DB keys; transform at HTTP boundary only.
 """
 
 from __future__ import annotations
 
-from typing import Any, Dict, List
+from typing import Any, Dict
 
 
 def _int_merge(m: Dict[str, Any], *keys: str, default: int = 0) -> int:
@@ -115,45 +113,4 @@ def ib_client_public_defaults() -> Dict[str, Any]:
             "event_secondary": None,
         },
         "timeout_sec": 60.0,
-    }
-
-
-def ib_flex_for_status_api(merged_ib: Dict[str, Any], flex_cfg: Any) -> Dict[str, Any]:
-    """``config.ib_flex``: range days from merged settings + token/rows from reader."""
-    m = merged_ib or {}
-    if isinstance(flex_cfg, dict):
-        rows_raw = flex_cfg.get("rows")
-        rows: List[Any] = rows_raw if isinstance(rows_raw, list) else []
-        host_tok = flex_cfg.get("host_token")
-        sec_tok = flex_cfg.get("secondary_token")
-    else:
-        rows = []
-        host_tok = None
-        sec_tok = None
-
-    def _days(key: str, default: int) -> int:
-        v = m.get(key)
-        if v is None:
-            return default
-        try:
-            return max(1, int(v))
-        except (TypeError, ValueError):
-            return default
-
-    return {
-        "default_range_days": _days("flex_default_range_days", 30),
-        "init_range_days": _days("flex_init_range_days", 360),
-        "host_token": host_tok,
-        "secondary_token": sec_tok,
-        "rows": rows,
-    }
-
-
-def ib_flex_public_defaults() -> Dict[str, Any]:
-    return {
-        "default_range_days": 30,
-        "init_range_days": 360,
-        "host_token": None,
-        "secondary_token": None,
-        "rows": [],
     }

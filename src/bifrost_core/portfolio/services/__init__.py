@@ -1,1 +1,1 @@
-"""Portfolio services: model orchestration, Flex fetch, transactions, execution utils."""
+"""Portfolio services: model orchestration, executions, transactions."""

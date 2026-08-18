@@ -38,7 +38,6 @@ from bifrost_core.monitor.reader.market import (
     write_stock_bars,
 )
 from bifrost_core.monitor.reader.settings import (
-    write_flex_config,
     write_ib_config,
 )
 
@@ -69,7 +68,6 @@ __all__ = [
     "write_account_sync_heartbeat_interval",
     "write_account_sync_run_status",
     "write_control_command",
-    "write_flex_config",
     "write_heartbeat_interval",
     "write_ib_config",
     "write_ohlc_bars_to_db",
