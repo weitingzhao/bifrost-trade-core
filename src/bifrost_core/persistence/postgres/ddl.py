@@ -25,6 +25,8 @@ _BROKERAGE_MIGRATED_VIEWS = frozenset(
         "account_executions_fly",
     }
 )
+# P7: Polygon option ticks live in Market Data Plugin, not per-env public.
+_P7_RETIRED_PUBLIC_TABLES = frozenset({"option_trades"})
 
 
 def _ensure_tables(conn, log=None, log_table=None) -> None:
@@ -1275,37 +1277,8 @@ def _ensure_tables(conn, log=None, log_table=None) -> None:
             """
         )
 
-        # P7 (market-data-expand): report_option_max_pain_daily / report_option_atm_iv_daily
-        # retired — analytics live in market_analytics.* (Plugin). DROP via
-        # bifrost-platform-plugin-market-data/scripts/p7_drop_legacy_tables.sql
-        _log_table("option_trades", "Option trades ticks (Massive Developer tier)")
-        cur.execute(
-            """
-            CREATE TABLE IF NOT EXISTS option_trades (
-                option_trades_id bigserial PRIMARY KEY,
-                contract_key text NOT NULL,
-                symbol text NOT NULL,
-                expiry text NOT NULL,
-                strike double precision NOT NULL,
-                option_right text NOT NULL,
-                trade_ts timestamptz NOT NULL,
-                price double precision NOT NULL,
-                size integer NOT NULL,
-                exchange text,
-                conditions text,
-                massive_trade_id text NOT NULL,
-                source text NOT NULL DEFAULT 'massive',
-                created_at timestamptz DEFAULT now(),
-                UNIQUE (massive_trade_id)
-            )
-            """
-        )
-        cur.execute(
-            "CREATE INDEX IF NOT EXISTS option_trades_contract_ts ON option_trades (contract_key, trade_ts DESC)"
-        )
-        cur.execute(
-            "CREATE INDEX IF NOT EXISTS option_trades_symbol_ts ON option_trades (symbol, trade_ts DESC)"
-        )
+        # P7: option_trades / max-pain / ATM IV retired — Plugin market_analytics.*.
+        _log("option_trades skipped (Market Data Plugin)")
         # Brokerage Golden Source owns executions_raw_* + executions views.
         _log("executions_raw_* / account_executions* views skipped (brokerage.*)")
 

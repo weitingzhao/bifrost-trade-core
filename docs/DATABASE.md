@@ -47,6 +47,7 @@ Bridge tables remain per-env (FK to `strategy_instance`):
 - `account_execution_option_stock_link`
 
 `_ensure_tables()` does **not** recreate migrated brokerage objects in `public`.
+`option_trades` is P7-retired (Market Data Plugin) and is also not created.
 
 ## Commands
 

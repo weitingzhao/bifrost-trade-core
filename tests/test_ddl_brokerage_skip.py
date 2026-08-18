@@ -8,6 +8,7 @@ from pathlib import Path
 from bifrost_core.persistence.postgres.ddl import (
     _BROKERAGE_MIGRATED_TABLES,
     _BROKERAGE_MIGRATED_VIEWS,
+    _P7_RETIRED_PUBLIC_TABLES,
 )
 
 DDL_PATH = (
@@ -23,3 +24,6 @@ def test_ddl_does_not_create_migrated_brokerage_tables() -> None:
     for name in _BROKERAGE_MIGRATED_VIEWS:
         pattern = rf"CREATE OR REPLACE VIEW {re.escape(name)}\s+AS"
         assert re.search(pattern, src, re.IGNORECASE) is None, name
+    for name in _P7_RETIRED_PUBLIC_TABLES:
+        pattern = rf"CREATE TABLE IF NOT EXISTS {re.escape(name)}\s*\("
+        assert re.search(pattern, src) is None, name

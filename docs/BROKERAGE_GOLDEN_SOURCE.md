@@ -50,4 +50,7 @@ K8s `db_refresh_schema.py` also runs `ensure_brokerage_schema()` + FDW when
 
 Legacy `public.account*` / `executions_raw_*` / `daemon_open_orders` /
 `contract_quote_live` / `settings_ib_flex` were renamed `*_legacy_bak`
-and are retained for a 30-day observation window before DROP.
+and are retained for a 30-day observation window before DROP (~2026-09-16).
+Empty `public` recreates of those names (0-row shells from old `_ensure_tables`)
+are not the backup: DROP them after workers are on core ≥ 0.6.1. DEV and STG
+dropped 2026-08-18; PROD pending.

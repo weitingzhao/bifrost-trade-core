@@ -15,27 +15,17 @@ MAGENTA = "\033[35m"
 BLUE = "\033[34m"
 
 EXPECTED_TABLES_BY_CATEGORY: Dict[str, List[str]] = {
-    "account": ["account", "account_positions", "account_transactions"],
-    "contract": ["contract_quote_live"],
     "daemon": [
         "daemon_auto_operations",
         "daemon_auto_status_current",
         "daemon_auto_status_history",
         "daemon_control",
         "daemon_heartbeat",
-        "daemon_open_orders",
         "daemon_run_status",
     ],
     "execution": [
-        "account_execution_commissions",
         "account_execution_instance_allocation",
         "account_execution_option_stock_link",
-        "account_executions",
-        "account_executions_final",
-        "account_executions_fly",
-        "executions_raw_flex",
-        "executions_raw_journal",
-        "executions_raw_tws",
     ],
     "gate_safety": [
         "gate_safety_guard",
@@ -45,7 +35,6 @@ EXPECTED_TABLES_BY_CATEGORY: Dict[str, List[str]] = {
         "gate_safety_strategy_earnings_dates",
     ],
     "job": ["job_bars_backfill", "job_ticker_reference_state"],
-    "option": ["option_trades"],
     "preference": [
         "preference_market_streams_symbol_order",
         "preference_position_categories",
@@ -53,7 +42,7 @@ EXPECTED_TABLES_BY_CATEGORY: Dict[str, List[str]] = {
         "preference_data_gap_ack",
     ],
     "reference": ["reference_us_holidays"],
-    "settings": ["settings", "settings_ib_flex"],
+    "settings": ["settings"],
     "stock": [
         "ticker_types",
         "ticker_related_tickers",
