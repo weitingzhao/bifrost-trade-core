@@ -1,5 +1,31 @@
 """PostgreSQL DDL: current schema (CREATE TABLE IF NOT EXISTS + indexes only)."""
 
+# IB / brokerage tables live in bifrost_golden_source.brokerage.* (see brokerage_ddl.py).
+# Per-env DBs expose them via postgres_fdw. Do not recreate in public.
+# Bridge tables (account_execution_instance_allocation, account_execution_option_stock_link)
+# stay in per-env public — they FK strategy_instance.
+_BROKERAGE_MIGRATED_TABLES = frozenset(
+    {
+        "daemon_open_orders",
+        "account",
+        "account_positions",
+        "contract_quote_live",
+        "account_execution_commissions",
+        "account_transactions",
+        "settings_ib_flex",
+        "executions_raw_tws",
+        "executions_raw_flex",
+        "executions_raw_journal",
+    }
+)
+_BROKERAGE_MIGRATED_VIEWS = frozenset(
+    {
+        "account_executions",
+        "account_executions_final",
+        "account_executions_fly",
+    }
+)
+
 
 def _ensure_tables(conn, log=None, log_table=None) -> None:
     """Apply full DDL (per DATABASE.md). CREATE IF NOT EXISTS and index DDL only.
@@ -155,27 +181,7 @@ def _ensure_tables(conn, log=None, log_table=None) -> None:
             ON CONFLICT (id) DO NOTHING
         """
         )
-        _log_table("daemon_open_orders", "R-A5: open/unfilled orders snapshot")
-        cur.execute(
-            """
-            CREATE TABLE IF NOT EXISTS daemon_open_orders (
-                id bigserial PRIMARY KEY,
-                order_id integer NOT NULL,
-                perm_id integer,
-                account_id text,
-                symbol text,
-                sec_type text,
-                action text,
-                total_quantity numeric,
-                filled numeric,
-                remaining numeric,
-                limit_price numeric,
-                status text,
-                contract_key text,
-                updated_ts timestamptz DEFAULT now()
-            )
-        """
-        )
+        _log("daemon_open_orders skipped (brokerage.open_orders)")
         _log("account_sync_control, account_sync_run_status, account_sync_heartbeat")
         _log_table("account_sync_control", "Account Sync Daemon control commands")
         cur.execute(
@@ -257,116 +263,9 @@ def _ensure_tables(conn, log=None, log_table=None) -> None:
             ON CONFLICT (id) DO NOTHING
         """
         )
-        _log("account, account_positions, contract_quote_live")
-        _log_table("account", "Account summaries")
-        cur.execute(
-            """
-            CREATE TABLE IF NOT EXISTS account (
-                account_id text PRIMARY KEY,
-                updated_at timestamptz DEFAULT now(),
-                net_liquidation double precision,
-                total_cash double precision,
-                buying_power double precision,
-                summary_extra jsonb
-            )
-        """
-        )
-        _log_table("account_positions", "Positions per account")
-        # account_positions: (account_id, contract_key) 为主键，无 id；天然按主键 INSERT/UPDATE，仅删除已平仓行
-        cur.execute(
-            """
-            CREATE TABLE IF NOT EXISTS account_positions (
-                account_id text NOT NULL,
-                contract_key text NOT NULL,
-                symbol text,
-                sec_type text,
-                exchange text,
-                currency text,
-                position double precision,
-                avg_cost double precision,
-                expiry text,
-                strike double precision,
-                option_right text,
-                updated_at timestamptz DEFAULT now(),
-                PRIMARY KEY (account_id, contract_key)
-            )
-        """
-        )
-        cur.execute(
-            """
-            CREATE UNIQUE INDEX IF NOT EXISTS account_positions_account_contract_key
-            ON account_positions (account_id, contract_key)
-        """
-        )
-        _log_table("contract_quote_live", "Last prices for positions/watchlist")
-        # R-M6: 每个持仓标的当前价（按 contract_key 聚合），供监控页逐行展示与计算盈亏
-        cur.execute(
-            """
-            CREATE TABLE IF NOT EXISTS contract_quote_live (
-                contract_key text PRIMARY KEY,
-                symbol text,
-                sec_type text,
-                expiry text,
-                strike double precision,
-                option_right text,
-                last double precision,
-                bid double precision,
-                ask double precision,
-                mid double precision,
-                updated_at timestamptz DEFAULT now()
-            )
-        """
-        )
-        _log("account_execution_commissions")
-        _log_table("account_execution_commissions", "Commission records")
-        # R-A2 §2.11.1: CommissionReport 表，与 account_executions 通过 exec_id 关联
-        cur.execute(
-            """
-            CREATE TABLE IF NOT EXISTS account_execution_commissions (
-                exec_id text PRIMARY KEY,
-                commission double precision,
-                currency text,
-                realized_pnl double precision,
-                yield_ double precision,
-                yield_redemption_date integer,
-                created_at timestamptz DEFAULT now()
-            )
-        """
-        )
-        # §2.21: account_transactions (Flex cash transactions for Performance Phase 0)
-        _log("account_transactions")
-        _log_table("account_transactions", "Cash/transaction records")
-        cur.execute(
-            """
-            CREATE TABLE IF NOT EXISTS account_transactions (
-                account_transactions_id bigserial PRIMARY KEY,
-                account_id text NOT NULL,
-                ts timestamptz NOT NULL,
-                amount double precision NOT NULL,
-                type text NOT NULL,
-                currency text,
-                description text,
-                flex_transaction_id text,
-                flex_type text,
-                flex_code text,
-                asset_category text,
-                asset_subcategory text,
-                symbol text,
-                conid bigint,
-                security_id text,
-                security_id_type text,
-                listing_exchange text,
-                report_date date,
-                available_for_trading_date date,
-                fx_rate_to_base double precision,
-                raw_extra jsonb,
-                created_at timestamptz DEFAULT now(),
-                UNIQUE(account_id, ts, amount, type)
-            )
-        """
-        )
-        cur.execute(
-            "CREATE INDEX IF NOT EXISTS account_transactions_account_ts ON account_transactions (account_id, ts DESC)"
+        _log(
+            "account / account_positions / contract_quote_live / commissions / "
+            "transactions skipped (brokerage.* Golden Source)"
         )
         # Market feed tables (stock_day/min, option_*, tickers/ticker_overview, fundamentals,
         # job_massive_backfill, etc.) are owned by bifrost-platform-plugin-market-data
@@ -643,20 +542,7 @@ def _ensure_tables(conn, log=None, log_table=None) -> None:
         cur.execute(
             "CREATE INDEX IF NOT EXISTS idx_reference_us_holidays_status ON reference_us_holidays (exchange, status)"
         )
-        _log("settings_ib_flex")
-        _log_table("settings_ib_flex", "IB Flex query config")
-        cur.execute(
-            """
-            CREATE TABLE IF NOT EXISTS settings_ib_flex (
-                id serial PRIMARY KEY,
-                sort_order integer NOT NULL DEFAULT 0,
-                query_label text,
-                purpose text DEFAULT 'cash_transactions',
-                query_host_id text NOT NULL,
-                query_secondary_id text
-            )
-            """
-        )
+        _log("settings_ib_flex skipped (brokerage.settings_flex)")
         # Strategy & gate_safety tables (DATABASE.md §2.24)
         _log("gate_safety_*, strategy_*, settings active_*")
         _log_table("gate_safety_strategy", "Safety boundary set root + strategy layer")
@@ -1420,401 +1306,8 @@ def _ensure_tables(conn, log=None, log_table=None) -> None:
         cur.execute(
             "CREATE INDEX IF NOT EXISTS option_trades_symbol_ts ON option_trades (symbol, trade_ts DESC)"
         )
-        # ── Executions: raw tables + account_executions view ──
-        # TWS and Flex stored separately; view merges (Flex authoritative, TWS fills gaps).
-        # Match key: exec_id (IB Execution ID = Flex ibExecID).
-        _log("executions_raw_tws, executions_raw_flex, account_executions(view)")
-        _log_table("executions_raw_tws", "Raw TWS/manual executions (tws_event, tws_client, manual)")
-        cur.execute(
-            """
-            CREATE TABLE IF NOT EXISTS executions_raw_tws (
-                executions_raw_tws_id bigserial PRIMARY KEY,
-                account_id text,
-                exec_id text,
-                exec_time timestamptz,
-                symbol text,
-                sec_type text,
-                side text,
-                quantity double precision,
-                price double precision,
-                source text,
-                expiry text,
-                strike double precision,
-                option_right text,
-                exchange text,
-                order_id bigint,
-                cum_qty double precision,
-                contract_key text,
-                currency text,
-                asset_category text,
-                sub_category text,
-                description text,
-                conid bigint,
-                security_id text,
-                security_id_type text,
-                cusip text,
-                isin text,
-                figi text,
-                listing_exchange text,
-                underlying_conid bigint,
-                underlying_symbol text,
-                underlying_security_id text,
-                underlying_listing_exchange text,
-                issuer text,
-                issuer_country_code text,
-                trade_id text,
-                related_trade_id text,
-                report_date date,
-                trade_date date,
-                settle_date_target date,
-                transaction_type text,
-                multiplier double precision,
-                principal_adjust_factor text,
-                proceeds double precision,
-                taxes double precision,
-                net_cash double precision,
-                close_price double precision,
-                open_close_indicator text,
-                notes text,
-                cost double precision,
-                fifo_pnl_realized double precision,
-                mtm_pnl double precision,
-                trade_money double precision,
-                fx_rate_to_base double precision,
-                acct_alias text,
-                model text,
-                raw_extra jsonb,
-                strategy_opportunity_id bigint,
-                strategy_instance_id bigint,
-                legacy_account_executions_id bigint,
-                created_at timestamptz DEFAULT now()
-            )
-        """
-        )
-        cur.execute(
-            "CREATE UNIQUE INDEX IF NOT EXISTS executions_raw_tws_exec_id_key "
-            "ON executions_raw_tws (exec_id) WHERE exec_id IS NOT NULL AND exec_id != ''"
-        )
-        cur.execute(
-            "CREATE INDEX IF NOT EXISTS executions_raw_tws_account_time "
-            "ON executions_raw_tws (account_id, exec_time DESC)"
-        )
-        cur.execute(
-            "CREATE INDEX IF NOT EXISTS executions_raw_tws_contract_key "
-            "ON executions_raw_tws (account_id, contract_key) WHERE contract_key IS NOT NULL"
-        )
-        cur.execute(
-            "CREATE INDEX IF NOT EXISTS executions_raw_tws_strategy_opportunity_id "
-            "ON executions_raw_tws (strategy_opportunity_id) WHERE strategy_opportunity_id IS NOT NULL"
-        )
-        cur.execute(
-            "CREATE INDEX IF NOT EXISTS executions_raw_tws_strategy_instance_id "
-            "ON executions_raw_tws (strategy_instance_id) WHERE strategy_instance_id IS NOT NULL"
-        )
-
-        _log_table("executions_raw_flex", "Raw Flex executions (flex_trades source, authoritative)")
-        cur.execute(
-            """
-            CREATE TABLE IF NOT EXISTS executions_raw_flex (
-                executions_raw_flex_id bigserial PRIMARY KEY,
-                account_id text,
-                exec_id text,
-                exec_time timestamptz,
-                symbol text,
-                sec_type text,
-                side text,
-                quantity double precision,
-                price double precision,
-                source text DEFAULT 'flex_trades',
-                expiry text,
-                strike double precision,
-                option_right text,
-                exchange text,
-                order_id bigint,
-                cum_qty double precision,
-                contract_key text,
-                currency text,
-                asset_category text,
-                sub_category text,
-                description text,
-                conid bigint,
-                security_id text,
-                security_id_type text,
-                cusip text,
-                isin text,
-                figi text,
-                listing_exchange text,
-                underlying_conid bigint,
-                underlying_symbol text,
-                underlying_security_id text,
-                underlying_listing_exchange text,
-                issuer text,
-                issuer_country_code text,
-                trade_id text,
-                related_trade_id text,
-                report_date date,
-                trade_date date,
-                settle_date_target date,
-                transaction_type text,
-                multiplier double precision,
-                principal_adjust_factor text,
-                proceeds double precision,
-                taxes double precision,
-                net_cash double precision,
-                close_price double precision,
-                open_close_indicator text,
-                notes text,
-                cost double precision,
-                fifo_pnl_realized double precision,
-                mtm_pnl double precision,
-                trade_money double precision,
-                fx_rate_to_base double precision,
-                acct_alias text,
-                model text,
-                raw_extra jsonb,
-                strategy_opportunity_id bigint,
-                strategy_instance_id bigint,
-                legacy_account_executions_id bigint,
-                created_at timestamptz DEFAULT now()
-            )
-        """
-        )
-        cur.execute(
-            "CREATE UNIQUE INDEX IF NOT EXISTS executions_raw_flex_exec_id_key "
-            "ON executions_raw_flex (exec_id) WHERE exec_id IS NOT NULL AND exec_id != ''"
-        )
-        cur.execute(
-            "CREATE UNIQUE INDEX IF NOT EXISTS executions_raw_flex_account_trade_id_key "
-            "ON executions_raw_flex (account_id, trade_id) WHERE trade_id IS NOT NULL AND trade_id != ''"
-        )
-        cur.execute(
-            "CREATE INDEX IF NOT EXISTS executions_raw_flex_account_time "
-            "ON executions_raw_flex (account_id, exec_time DESC)"
-        )
-        cur.execute(
-            "CREATE INDEX IF NOT EXISTS executions_raw_flex_contract_key "
-            "ON executions_raw_flex (account_id, contract_key) WHERE contract_key IS NOT NULL"
-        )
-        cur.execute(
-            "CREATE INDEX IF NOT EXISTS executions_raw_flex_trade_date "
-            "ON executions_raw_flex (account_id, trade_date DESC) WHERE trade_date IS NOT NULL"
-        )
-        cur.execute(
-            "CREATE INDEX IF NOT EXISTS executions_raw_flex_strategy_opportunity_id "
-            "ON executions_raw_flex (strategy_opportunity_id) WHERE strategy_opportunity_id IS NOT NULL"
-        )
-        cur.execute(
-            "CREATE INDEX IF NOT EXISTS executions_raw_flex_strategy_instance_id "
-            "ON executions_raw_flex (strategy_instance_id) WHERE strategy_instance_id IS NOT NULL"
-        )
-
-        _log_table("executions_raw_journal", "Raw journal/manual-accounting executions (journal_closed, manual adjustments)")
-        cur.execute(
-            """
-            CREATE TABLE IF NOT EXISTS executions_raw_journal (
-                executions_raw_journal_id bigserial PRIMARY KEY,
-                account_id text,
-                exec_id text,
-                exec_time timestamptz,
-                symbol text,
-                sec_type text,
-                side text,
-                quantity double precision,
-                price double precision,
-                source text,
-                expiry text,
-                strike double precision,
-                option_right text,
-                exchange text,
-                order_id bigint,
-                cum_qty double precision,
-                contract_key text,
-                currency text,
-                asset_category text,
-                sub_category text,
-                description text,
-                conid bigint,
-                security_id text,
-                security_id_type text,
-                cusip text,
-                isin text,
-                figi text,
-                listing_exchange text,
-                underlying_conid bigint,
-                underlying_symbol text,
-                underlying_security_id text,
-                underlying_listing_exchange text,
-                issuer text,
-                issuer_country_code text,
-                trade_id text,
-                related_trade_id text,
-                report_date date,
-                trade_date date,
-                settle_date_target date,
-                transaction_type text,
-                multiplier double precision,
-                principal_adjust_factor text,
-                proceeds double precision,
-                taxes double precision,
-                net_cash double precision,
-                close_price double precision,
-                open_close_indicator text,
-                notes text,
-                cost double precision,
-                fifo_pnl_realized double precision,
-                mtm_pnl double precision,
-                trade_money double precision,
-                fx_rate_to_base double precision,
-                acct_alias text,
-                model text,
-                raw_extra jsonb,
-                strategy_opportunity_id bigint,
-                strategy_instance_id bigint,
-                legacy_account_executions_id bigint,
-                created_at timestamptz DEFAULT now()
-            )
-        """
-        )
-        cur.execute(
-            "CREATE UNIQUE INDEX IF NOT EXISTS executions_raw_journal_exec_id_key "
-            "ON executions_raw_journal (exec_id) WHERE exec_id IS NOT NULL AND exec_id != ''"
-        )
-        cur.execute(
-            "CREATE INDEX IF NOT EXISTS executions_raw_journal_account_time "
-            "ON executions_raw_journal (account_id, exec_time DESC)"
-        )
-        cur.execute(
-            "CREATE INDEX IF NOT EXISTS executions_raw_journal_contract_key "
-            "ON executions_raw_journal (account_id, contract_key) WHERE contract_key IS NOT NULL"
-        )
-        cur.execute(
-            "CREATE INDEX IF NOT EXISTS executions_raw_journal_strategy_opportunity_id "
-            "ON executions_raw_journal (strategy_opportunity_id) WHERE strategy_opportunity_id IS NOT NULL"
-        )
-        cur.execute(
-            "CREATE INDEX IF NOT EXISTS executions_raw_journal_strategy_instance_id "
-            "ON executions_raw_journal (strategy_instance_id) WHERE strategy_instance_id IS NOT NULL"
-        )
-
-        _EXEC_CANONICAL_COLS = (
-            "account_id, exec_id, exec_time, symbol, sec_type, side, quantity, price, source, "
-            "expiry, strike, option_right, exchange, order_id, cum_qty, contract_key, "
-            "currency, asset_category, sub_category, description, conid, "
-            "security_id, security_id_type, cusip, isin, figi, listing_exchange, "
-            "underlying_conid, underlying_symbol, underlying_security_id, underlying_listing_exchange, "
-            "issuer, issuer_country_code, trade_id, related_trade_id, report_date, trade_date, "
-            "settle_date_target, transaction_type, multiplier, principal_adjust_factor, "
-            "proceeds, taxes, net_cash, close_price, open_close_indicator, notes, cost, "
-            "fifo_pnl_realized, mtm_pnl, trade_money, fx_rate_to_base, acct_alias, model, "
-            "raw_extra, strategy_opportunity_id, strategy_instance_id, created_at"
-        )
-        cur.execute("DROP VIEW IF EXISTS executions_canonical")
-        cur.execute(
-            """
-            SELECT c.relkind
-            FROM pg_class c
-            JOIN pg_namespace n ON n.oid = c.relnamespace
-            WHERE n.nspname = current_schema()
-              AND c.relname = 'account_executions'
-            LIMIT 1
-            """
-        )
-        _ae_rel = cur.fetchone()
-        _ae_relkind = _ae_rel[0] if _ae_rel else None
-        if _ae_relkind == "v":
-            cur.execute("DROP VIEW account_executions")
-        elif _ae_relkind == "r":
-            cur.execute("DROP TABLE account_executions")
-        cur.execute(
-            f"""
-            CREATE OR REPLACE VIEW account_executions AS
-            SELECT executions_raw_flex_id AS account_executions_id,
-                   {_EXEC_CANONICAL_COLS}
-            FROM executions_raw_flex
-            UNION ALL
-            SELECT -(executions_raw_tws_id) AS account_executions_id,
-                   {_EXEC_CANONICAL_COLS}
-            FROM executions_raw_tws t
-            WHERE NOT EXISTS (
-                SELECT 1 FROM executions_raw_flex f
-                WHERE f.exec_id = t.exec_id
-                  AND f.exec_id IS NOT NULL AND f.exec_id != ''
-                  AND t.exec_id IS NOT NULL AND t.exec_id != ''
-            )
-            UNION ALL
-            SELECT -(1000000000 + executions_raw_journal_id) AS account_executions_id,
-                   {_EXEC_CANONICAL_COLS}
-            FROM executions_raw_journal
-        """
-        )
-        # Performance-book subset: Flex (authoritative fills) + journal adjustments only (no TWS gap-fill).
-        cur.execute(
-            f"""
-            CREATE OR REPLACE VIEW account_executions_final AS
-            SELECT executions_raw_flex_id AS account_executions_id,
-                   {_EXEC_CANONICAL_COLS}
-            FROM executions_raw_flex
-            UNION ALL
-            SELECT -(1000000000 + executions_raw_journal_id) AS account_executions_id,
-                   {_EXEC_CANONICAL_COLS}
-            FROM executions_raw_journal
-        """
-        )
-        _log("account_executions_final(view: flex + journal only)")
-
-        # TWS-only "on the fly" rows: drop any TWS execution already covered by account_executions_final.
-        # Match (1) exact contract_key trim equality; (2) STK rows where keys differ only in trailing
-        # pipes — IB builds "SYM|STK||||" while Flex uses "SYM|STK|||"; (3) same account + symbol when
-        # TWS sec_type is STK and final row is equity-like (e.g. Flex assetCategory FUND vs IB STK).
-        _exec_canonical_cols_t = ", ".join(
-            f"t.{c.strip()}" for c in _EXEC_CANONICAL_COLS.split(",") if c.strip()
-        )
-        # Equity-like final rows (excludes OPT — same ticker can name a stock and an option).
-        _fly_final_equity_sec_types = (
-            "'STK', 'EQUITY', 'FUND', 'ETF', 'ETN', 'ADR', 'CORP', 'STOCK', 'REIT', 'WAR'"
-        )
-        # Prefer f.sec_type; if null/blank (some Flex rows), infer from contract_key segment 2.
-        _fly_f_sec_norm = (
-            "upper(trim(COALESCE("
-            "NULLIF(trim(COALESCE(f.sec_type, '')), ''), "
-            "NULLIF(trim(split_part(COALESCE(f.contract_key, ''), '|', 2)), '')"
-            ")))"
-        )
-        cur.execute(
-            f"""
-            CREATE OR REPLACE VIEW account_executions_fly AS
-            SELECT -(t.executions_raw_tws_id) AS account_executions_id,
-                   {_exec_canonical_cols_t}
-            FROM executions_raw_tws t
-            WHERE upper(trim(COALESCE(t.sec_type, ''))) <> 'BAG'
-              AND NOT EXISTS (
-                SELECT 1
-                FROM account_executions_final f
-                WHERE f.account_id IS NOT DISTINCT FROM t.account_id
-                  AND (
-                    (
-                      NULLIF(trim(COALESCE(t.contract_key, '')), '') IS NOT NULL
-                      AND NULLIF(trim(COALESCE(f.contract_key, '')), '') IS NOT NULL
-                      AND trim(COALESCE(f.contract_key, '')) = trim(COALESCE(t.contract_key, ''))
-                    )
-                    OR (
-                      upper(trim(COALESCE(t.sec_type, ''))) = 'STK'
-                      AND upper(trim(COALESCE(f.sec_type, ''))) = 'STK'
-                      AND NULLIF(trim(COALESCE(t.contract_key, '')), '') IS NOT NULL
-                      AND NULLIF(trim(COALESCE(f.contract_key, '')), '') IS NOT NULL
-                      AND rtrim(trim(COALESCE(t.contract_key, '')), '|') = rtrim(trim(COALESCE(f.contract_key, '')), '|')
-                    )
-                    OR (
-                      upper(trim(COALESCE(t.sec_type, ''))) = 'STK'
-                      AND {_fly_f_sec_norm} IN ({_fly_final_equity_sec_types})
-                      AND NULLIF(trim(COALESCE(t.symbol, '')), '') IS NOT NULL
-                      AND upper(trim(COALESCE(t.symbol, ''))) = upper(trim(COALESCE(f.symbol, '')))
-                    )
-                  )
-            )
-        """
-        )
-        _log("account_executions_fly(view: TWS minus final-covered contracts, no BAG)")
+        # Brokerage Golden Source owns executions_raw_* + executions views.
+        _log("executions_raw_* / account_executions* views skipped (brokerage.*)")
 
         # One execution row (unified account_executions_id) may attribute quantity to multiple strategy_instance rows.
         _log_table(
