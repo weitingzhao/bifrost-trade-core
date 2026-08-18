@@ -52,5 +52,5 @@ Legacy `public.account*` / `executions_raw_*` / `daemon_open_orders` /
 `contract_quote_live` / `settings_ib_flex` were renamed `*_legacy_bak`
 and are retained for a 30-day observation window before DROP (~2026-09-16).
 Empty `public` recreates of those names (0-row shells from old `_ensure_tables`)
-are not the backup: DROP them after workers are on core ≥ 0.6.1. DEV and STG
-dropped 2026-08-18; PROD pending.
+are not the backup: DROP them after workers are on core ≥ 0.6.1. DEV, STG, and
+PROD dropped 2026-08-18 (`*_legacy_bak` retained until ~2026-09-16).
