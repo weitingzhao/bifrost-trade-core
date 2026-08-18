@@ -4,7 +4,6 @@ Execution/transaction read and preference_position_categories live in executions
 import json
 import logging
 import math
-import os
 import uuid
 from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional, Tuple
@@ -580,8 +579,6 @@ def sync_accounts_snapshot_to_db(
     except Exception as e:
         logger.warning("sync_accounts_snapshot_to_db failed: %s", e)
         return False
-# DECOMMISSION: set EXECUTIONS_WRITE_LEGACY=false to stop writing to account_executions.
-_WRITE_LEGACY = os.environ.get("EXECUTIONS_WRITE_LEGACY", "false").strip().lower() != "false"
 
 
 def write_account_executions_to_db(

@@ -31,7 +31,6 @@ from bifrost_core.persistence.postgres.accounts_sync import (
 from bifrost_core.persistence.postgres.brokerage_tables import (
     COMMISSIONS,
     CONTRACT_QUOTE_LIVE,
-    EXECUTIONS,
     EXECUTIONS_RAW_TWS,
     OPEN_ORDERS,
     POSITIONS,
