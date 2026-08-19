@@ -1016,14 +1016,31 @@ def _ensure_tables(conn, log=None, log_table=None) -> None:
             ON public.cache_stock_snapshot (fetched_at DESC)
             """
         )
-        # Legacy universe/price_readiness tables dropped — now FDW-backed.
-        # setup_fdw_market_tables() creates market.ticker FDW + public.v_us_equity_universe.
+        # Legacy universe/price_readiness physical tables dropped — now FDW-backed.
+        # setup_fdw_market_tables() creates market.ticker FDW + views.
         _log("us_equity_universe / sepa_symbol_price_readiness dropped (FDW-backed)")
         cur.execute("DROP VIEW IF EXISTS public.v_sepa_us_equity_universe CASCADE")
         cur.execute("DROP VIEW IF EXISTS public.v_sepa_symbol_price_readiness CASCADE")
-        cur.execute("DROP VIEW IF EXISTS public.v_us_equity_universe CASCADE")
         cur.execute("DROP TABLE IF EXISTS public.us_equity_universe CASCADE")
         cur.execute("DROP TABLE IF EXISTS public.sepa_symbol_price_readiness CASCADE")
+        # Rebuild FDW backward-compat view if market.v_us_equity_universe exists
+        cur.execute(
+            """
+            DO $fdw_compat$
+            BEGIN
+              IF EXISTS (
+                SELECT 1 FROM pg_views
+                WHERE schemaname = 'market' AND viewname = 'v_us_equity_universe'
+              ) THEN
+                DROP VIEW IF EXISTS public.v_us_equity_universe CASCADE;
+                CREATE VIEW public.v_us_equity_universe AS
+                SELECT *,
+                       hashtext(upper(trim(symbol)))::bigint AS tickers_id
+                FROM market.v_us_equity_universe;
+              END IF;
+            END $fdw_compat$;
+            """
+        )
         _log_table(
             "v_sepa_symbol_fund_cache_readiness",
             "View: valid-row snapshot of research_sepa_fundamentals_cache (created when cache table exists)",
