@@ -19,10 +19,11 @@ bifrost_golden_source
 
 bifrost_{dev,stg,prod}
 ├── public.*          # strategy_*, gate_safety_*, preferences, watchlist, jobs, bridge tables
-└── brokerage.*       # postgres_fdw foreign tables + local views (read JOIN path)
+├── brokerage.*       # postgres_fdw foreign tables + local views (read JOIN path)
+└── market.*          # postgres_fdw foreign table (market.ticker) + local views
 ```
 
-Qualified names: [`brokerage_tables.py`](../src/bifrost_core/persistence/postgres/brokerage_tables.py).
+Qualified names: [`brokerage_tables.py`](../src/bifrost_core/persistence/postgres/brokerage_tables.py), [`market_tables.py`](../src/bifrost_core/persistence/postgres/market_tables.py).
 
 Writers open `connect_golden_source()`. Readers stay on the per-env connection and JOIN `brokerage.*` via FDW.
 
@@ -64,6 +65,18 @@ Bridge tables remain per-env (FK to `strategy_instance`):
 
 `_ensure_tables()` does **not** recreate migrated brokerage objects in `public`.
 `option_trades` is P7-retired (Market Data Plugin) and is also not created.
+
+## Market FDW tables (core 0.8.3)
+
+| Per-env FDW | Golden Source | Purpose |
+|-------------|---------------|---------|
+| `market.ticker` | `market.ticker` | Full ticker catalog (FDW foreign table) |
+| `market.v_us_equity_universe` | — | Local VIEW: active US CS equities (same filter as Golden Source view) |
+| `public.v_us_equity_universe` | — | Backward-compat VIEW over `market.v_us_equity_universe` (adds `tickers_id`) |
+
+Setup: `setup_fdw_market_tables()` in [`brokerage_ddl.py`](../src/bifrost_core/persistence/postgres/brokerage_ddl.py). Requires `golden_source_server` to exist (created by `setup_fdw_foreign_tables`).
+
+Retired (core 0.8.3): `public.us_equity_universe` (physical table), `public.sepa_symbol_price_readiness` (physical table), `public.v_sepa_us_equity_universe` (view), `public.v_sepa_symbol_price_readiness` (view), `universe_sync.py` (Plugin API sync module). Universe data now comes directly from Golden Source via FDW. Price readiness summary is computed at query time from Plugin API `/readiness/bar-aggregate`.
 
 ## Commands
 

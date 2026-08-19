@@ -16,6 +16,11 @@ from bifrost_core.persistence.postgres.brokerage_tables import (
     BROKERAGE_VIEWS,
     SCHEMA,
 )
+from bifrost_core.persistence.postgres.market_tables import (
+    MARKET_FOREIGN_TABLES,
+    MARKET_LOCAL_VIEWS,
+    SCHEMA as MARKET_SCHEMA,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -566,5 +571,82 @@ def setup_fdw_foreign_tables(
 
         cur.execute(f"GRANT USAGE ON SCHEMA {SCHEMA} TO {local_user}")
         cur.execute(f"GRANT SELECT ON ALL TABLES IN SCHEMA {SCHEMA} TO {local_user}")
+
+    env_conn.commit()
+
+
+def setup_fdw_market_tables(
+    env_conn: Any,
+    *,
+    server_name: str = "golden_source_server",
+    local_user: str = "bifrost",
+    log: Optional[Callable[[str], None]] = None,
+) -> None:
+    """Import market.ticker from golden_source and create universe views via FDW.
+
+    Assumes ``golden_source_server`` + user mapping already exist (created by
+    ``setup_fdw_foreign_tables``). Call this *after* the brokerage FDW setup.
+    """
+    _log = log or (lambda m: logger.info("%s", m))
+
+    with env_conn.cursor() as cur:
+        cur.execute(f"CREATE SCHEMA IF NOT EXISTS {MARKET_SCHEMA}")
+
+        for name in list(MARKET_LOCAL_VIEWS) + list(MARKET_FOREIGN_TABLES):
+            cur.execute(f"DROP FOREIGN TABLE IF EXISTS {MARKET_SCHEMA}.{name} CASCADE")
+            cur.execute(f"DROP VIEW IF EXISTS {MARKET_SCHEMA}.{name} CASCADE")
+            cur.execute(f"DROP TABLE IF EXISTS {MARKET_SCHEMA}.{name} CASCADE")
+
+        table_list = ", ".join(MARKET_FOREIGN_TABLES)
+        cur.execute(
+            f"""
+            IMPORT FOREIGN SCHEMA {MARKET_SCHEMA}
+              LIMIT TO ({table_list})
+              FROM SERVER {server_name}
+              INTO {MARKET_SCHEMA}
+            """
+        )
+        _log(f"imported market foreign tables: {table_list}")
+
+        # Local view matching Golden Source market.v_us_equity_universe definition
+        cur.execute(
+            f"""
+            CREATE OR REPLACE VIEW {MARKET_SCHEMA}.v_us_equity_universe AS
+            SELECT symbol, name, market, locale, primary_exchange,
+                   instrument_type, active, sector, industry, list_date, market_cap
+            FROM {MARKET_SCHEMA}.ticker
+            WHERE COALESCE(active, false) = true
+              AND lower(COALESCE(locale, '')) = 'us'
+              AND lower(COALESCE(market, '')) = 'stocks'
+              AND lower(COALESCE(instrument_type, '')) = 'cs'
+            """
+        )
+        _log(f"{MARKET_SCHEMA}.v_us_equity_universe view")
+
+        # Drop legacy public views/tables before creating backward-compat view
+        cur.execute("DROP VIEW IF EXISTS public.v_sepa_us_equity_universe CASCADE")
+        cur.execute("DROP VIEW IF EXISTS public.v_us_equity_universe CASCADE")
+        cur.execute("DROP TABLE IF EXISTS public.us_equity_universe CASCADE")
+
+        # Backward-compat view: all existing SQL references public.v_us_equity_universe
+        cur.execute(
+            f"""
+            CREATE OR REPLACE VIEW public.v_us_equity_universe AS
+            SELECT *,
+                   hashtext(upper(trim(symbol)))::bigint AS tickers_id
+            FROM {MARKET_SCHEMA}.v_us_equity_universe
+            """
+        )
+        _log("public.v_us_equity_universe backward-compat view")
+
+        # Drop legacy price readiness table/view (no longer needed)
+        cur.execute("DROP VIEW IF EXISTS public.v_sepa_symbol_price_readiness CASCADE")
+        cur.execute("DROP TABLE IF EXISTS public.sepa_symbol_price_readiness CASCADE")
+        _log("dropped legacy price readiness table/view")
+
+        cur.execute(f"GRANT USAGE ON SCHEMA {MARKET_SCHEMA} TO {local_user}")
+        cur.execute(
+            f"GRANT SELECT ON ALL TABLES IN SCHEMA {MARKET_SCHEMA} TO {local_user}"
+        )
 
     env_conn.commit()

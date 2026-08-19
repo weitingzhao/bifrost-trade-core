@@ -166,28 +166,7 @@ def _ensure_tables(conn, log=None, log_table=None) -> None:
         # (market.* / data_ops.*). Core DDL no longer creates those public tables.
 
         _log("ticker_types, ticker_related_tickers, job_ticker_reference_state")
-        # Rename legacy ticker_types table (idempotent; fresh DBs use CREATE below).
-        cur.execute(
-            """
-            DO $$
-            BEGIN
-              IF to_regclass('public.ticker_instrument_types') IS NOT NULL
-                 AND to_regclass('public.ticker_types') IS NULL THEN
-                ALTER TABLE ticker_instrument_types RENAME TO ticker_types;
-                IF EXISTS (
-                  SELECT 1 FROM information_schema.columns
-                  WHERE table_schema = 'public' AND table_name = 'ticker_types'
-                    AND column_name = 'ticker_instrument_types_id'
-                ) THEN
-                  ALTER TABLE ticker_types RENAME COLUMN ticker_instrument_types_id TO ticker_types_id;
-                END IF;
-                IF EXISTS (SELECT 1 FROM pg_indexes WHERE schemaname = 'public' AND indexname = 'ticker_instrument_types_code') THEN
-                  ALTER INDEX ticker_instrument_types_code RENAME TO ticker_types_code;
-                END IF;
-              END IF;
-            END $$;
-            """
-        )
+        cur.execute("DROP TABLE IF EXISTS ticker_instrument_types CASCADE")
         _log_table("ticker_types", "Massive ticker instrument type codes (Trade reference)")
         cur.execute(
             """
@@ -631,25 +610,8 @@ def _ensure_tables(conn, log=None, log_table=None) -> None:
         cur.execute(
             "CREATE INDEX IF NOT EXISTS strategy_structure_leg_structure_id ON strategy_structure_leg (strategy_structure_id)"
         )
-        _log_table(
-            "strategy_structure_constraint",
-            "Structure strategy constraint (typed key-value)",
-        )
-        cur.execute(
-            """
-            CREATE TABLE IF NOT EXISTS strategy_structure_constraint (
-                strategy_structure_constraint_id bigserial PRIMARY KEY,
-                strategy_structure_id bigint NOT NULL REFERENCES strategy_structure(strategy_structure_id) ON DELETE CASCADE,
-                constraint_type text NOT NULL,
-                constraint_value_text text,
-                constraint_value_int integer,
-                created_at timestamptz NOT NULL DEFAULT now()
-            )
-            """
-        )
-        cur.execute(
-            "CREATE INDEX IF NOT EXISTS strategy_structure_constraint_structure_id ON strategy_structure_constraint (strategy_structure_id)"
-        )
+        cur.execute("DROP TABLE IF EXISTS strategy_structure_constraint CASCADE")
+        _log("strategy_structure_constraint dropped (over-designed, never used)")
         _log_table("strategy_structure_meta", "Structure strategy metadata key-value")
         cur.execute(
             """
@@ -1054,73 +1016,14 @@ def _ensure_tables(conn, log=None, log_table=None) -> None:
             ON public.cache_stock_snapshot (fetched_at DESC)
             """
         )
-        # Plugin-synced tables: former views over market.ticker / market.stock_daily.
-        # Populated by universe_sync.py from Plugin API (Golden Source).
-        _log_table(
-            "us_equity_universe",
-            "US common-stock universe synced from Plugin GET /market/reference/universe",
-        )
-        cur.execute(
-            """
-            CREATE TABLE IF NOT EXISTS public.us_equity_universe (
-                tickers_id bigint,
-                symbol text PRIMARY KEY,
-                name text,
-                market text,
-                locale text,
-                primary_exchange text,
-                instrument_type text,
-                active boolean,
-                delisted_utc timestamptz,
-                list_date date,
-                sector text,
-                industry text,
-                synced_at timestamptz DEFAULT now()
-            )
-            """
-        )
-        cur.execute(
-            """
-            CREATE OR REPLACE VIEW public.v_us_equity_universe AS
-            SELECT tickers_id, symbol, name, market, locale, primary_exchange,
-                   instrument_type, active, delisted_utc, list_date, sector, industry
-            FROM public.us_equity_universe
-            """
-        )
-        cur.execute(
-            """
-            CREATE OR REPLACE VIEW public.v_sepa_us_equity_universe AS
-            SELECT * FROM public.v_us_equity_universe
-            """
-        )
-        _log_table(
-            "sepa_symbol_price_readiness",
-            "Per-symbol bar counts and price_ready synced from Plugin /readiness/bar-aggregate",
-        )
-        cur.execute(
-            """
-            CREATE TABLE IF NOT EXISTS public.sepa_symbol_price_readiness (
-                as_of_date date,
-                symbol text PRIMARY KEY,
-                price_source text,
-                bar_rows integer,
-                first_bar_date date,
-                last_bar_date date,
-                null_close_rows integer,
-                null_volume_rows integer,
-                price_ready boolean,
-                synced_at timestamptz DEFAULT now()
-            )
-            """
-        )
-        cur.execute(
-            """
-            CREATE OR REPLACE VIEW public.v_sepa_symbol_price_readiness AS
-            SELECT as_of_date, symbol, price_source, bar_rows, first_bar_date,
-                   last_bar_date, null_close_rows, null_volume_rows, price_ready
-            FROM public.sepa_symbol_price_readiness
-            """
-        )
+        # Legacy universe/price_readiness tables dropped — now FDW-backed.
+        # setup_fdw_market_tables() creates market.ticker FDW + public.v_us_equity_universe.
+        _log("us_equity_universe / sepa_symbol_price_readiness dropped (FDW-backed)")
+        cur.execute("DROP VIEW IF EXISTS public.v_sepa_us_equity_universe CASCADE")
+        cur.execute("DROP VIEW IF EXISTS public.v_sepa_symbol_price_readiness CASCADE")
+        cur.execute("DROP VIEW IF EXISTS public.v_us_equity_universe CASCADE")
+        cur.execute("DROP TABLE IF EXISTS public.us_equity_universe CASCADE")
+        cur.execute("DROP TABLE IF EXISTS public.sepa_symbol_price_readiness CASCADE")
         _log_table(
             "v_sepa_symbol_fund_cache_readiness",
             "View: valid-row snapshot of research_sepa_fundamentals_cache (created when cache table exists)",
@@ -1212,18 +1115,3 @@ def _ensure_tables(conn, log=None, log_table=None) -> None:
         )
 
         conn.commit()
-
-        try:
-            from bifrost_core.persistence.postgres.universe_sync import (
-                sync_price_readiness_from_plugin,
-                sync_universe_from_plugin,
-            )
-
-            sync_universe_from_plugin(conn)
-            sync_price_readiness_from_plugin(conn)
-            conn.commit()
-        except Exception:
-            try:
-                conn.rollback()
-            except Exception:
-                pass
