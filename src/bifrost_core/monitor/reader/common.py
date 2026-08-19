@@ -29,13 +29,25 @@ logger = logging.getLogger(__name__)
 
 
 class StatusReader:
-    """Read daemon_auto_status_current and daemon_auto_operations from PostgreSQL. Uses the same root postgres config as daemon.
-    Holds connection and delegates to domain modules (status, watchlist, market, settings, accounts)."""
+    """Read status from Redis daemon IPC + PostgreSQL for business tables."""
 
     def __init__(self, status_config: dict) -> None:
         self._config = status_config
         # Each uvicorn worker thread gets its own DB connection via thread-local.
         self._local = threading.local()
+        self._redis: Optional[Any] = None
+
+    def _ensure_redis(self) -> Optional[Any]:
+        if self._redis is not None:
+            try:
+                self._redis.ping()
+                return self._redis
+            except Exception:
+                self._redis = None
+        from bifrost_core.persistence.redis_daemon_state import connect_daemon_state_redis
+
+        self._redis = connect_daemon_state_redis(self._config)
+        return self._redis
 
     @property
     def _conn(self) -> Any:
@@ -83,35 +95,22 @@ class StatusReader:
             except Exception:
                 pass
             self._conn = None
+        self._redis = None
 
-    # --- Status domain (delegate to status module) ---
+    # --- Status domain (Redis daemon IPC) ---
     def get_status_current(self) -> Optional[Dict[str, Any]]:
-        if not self._connect():
-            return None
-        result = status_module.get_status_current(self._conn)
-        self._end_read_txn()
-        return result
+        return status_module.get_status_current(redis_client=self._ensure_redis(), status_config=self._config)
 
     def get_run_status(self) -> Optional[bool]:
-        if not self._connect():
-            return None
-        result = status_module.get_run_status(self._conn)
-        self._end_read_txn()
-        return result
+        return status_module.get_run_status(redis_client=self._ensure_redis(), status_config=self._config)
 
     def get_daemon_heartbeat(self) -> Optional[Dict[str, Any]]:
-        if not self._connect():
-            return None
-        result = status_module.get_daemon_heartbeat(self._conn)
-        self._end_read_txn()
-        return result
+        return status_module.get_daemon_heartbeat(redis_client=self._ensure_redis(), status_config=self._config)
 
     def get_account_sync_heartbeat(self) -> Optional[Dict[str, Any]]:
-        if not self._connect():
-            return None
-        result = status_module.get_account_sync_heartbeat(self._conn)
-        self._end_read_txn()
-        return result
+        return status_module.get_account_sync_heartbeat(
+            redis_client=self._ensure_redis(), status_config=self._config
+        )
 
     def get_operations(
         self,
@@ -120,13 +119,9 @@ class StatusReader:
         type_filter: Optional[str] = None,
         limit: int = 100,
     ) -> List[Dict[str, Any]]:
-        if not self._connect():
-            return []
-        result = status_module.get_operations(
-            self._conn, since_ts=since_ts, until_ts=until_ts, type_filter=type_filter, limit=limit
+        return status_module.get_operations(
+            None, since_ts=since_ts, until_ts=until_ts, type_filter=type_filter, limit=limit
         )
-        self._end_read_txn()
-        return result
 
     def get_open_orders(self) -> List[Dict[str, Any]]:
         if not self._connect():
@@ -573,13 +568,9 @@ class StatusReader:
         finally:
             self._end_read_txn()
 
-    # --- Risk (delegate to status module) ---
+    # --- Risk (delegate to status module / Redis IPC) ---
     def get_risk_summary(self) -> Dict[str, Any]:
-        if not self._connect():
-            return {"daily_hedge_count": None, "daily_pnl": None, "spot": None, "symbol": None, "operations_count_24h": 0, "block_reasons": [], "ts": None}
-        result = status_module.get_risk_summary(self._conn)
-        self._end_read_txn()
-        return result
+        return status_module.get_risk_summary(status_config=self._config)
 
     # --- Accounts domain (delegate to accounts module) ---
     def get_accounts_from_tables(self) -> Optional[List[Dict[str, Any]]]:

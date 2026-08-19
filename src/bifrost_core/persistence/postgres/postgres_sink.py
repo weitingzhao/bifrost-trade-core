@@ -12,7 +12,6 @@ import psycopg2
 
 from bifrost_core.persistence.status_sink import (
     ACCOUNTS_SNAPSHOT_KEY,
-    OPERATION_KEYS,
     SNAPSHOT_KEYS,
     StatusSink,
 )
@@ -35,26 +34,55 @@ from bifrost_core.persistence.postgres.brokerage_tables import (
     OPEN_ORDERS,
     POSITIONS,
 )
+from bifrost_core.persistence import redis_daemon_state as rds
 
 logger = logging.getLogger(__name__)
 
 
 class PostgreSQLSink(StatusSink):
-    """Writes snapshot to daemon_auto_status_current (and optionally daemon_auto_status_history) and operations to daemon_auto_operations table."""
+    """Daemon IPC state in Redis; PG still used for strategy_history / brokerage / settings."""
 
     def __init__(self, config: dict):
         self._config = config
         self._conn: Optional[Any] = None
         self._golden_conn: Optional[Any] = None
+        self._redis: Optional[Any] = None
         self._connect()
         self._connect_golden()
+        self._connect_redis()
+
+    def _connect_redis(self) -> None:
+        self._redis = rds.connect_daemon_state_redis(self._config)
+        if self._redis is not None:
+            logger.info("Daemon state Redis connected (trading IPC)")
+            # Default suspended=true until explicit Resume (matches former PG seed).
+            state = rds.read_trading_daemon_state(self._redis) or {}
+            if "suspended" not in state:
+                rds.set_trading_run_status(
+                    self._redis, suspended=True, heartbeat_interval_sec=10
+                )
+        else:
+            logger.warning("Daemon state Redis unavailable — IPC writes will no-op")
+
+    def _ensure_redis(self) -> bool:
+        if self._redis is None:
+            self._connect_redis()
+        if self._redis is None:
+            return False
+        try:
+            self._redis.ping()
+            return True
+        except Exception:
+            self._redis = None
+            self._connect_redis()
+            return self._redis is not None
 
     def _connect(self) -> None:
         params = _get_conn_params(self._config)
         for attempt in (1, 2):
             try:
                 self._conn = psycopg2.connect(**params)
-                # Avoid blocking forever if another session holds a lock on daemon_heartbeat/daemon_auto_status_current
+                # Avoid blocking forever if another session holds a lock on shared PG tables.
                 with self._conn.cursor() as cur:
                     cur.execute("SET lock_timeout = '5s'")
                     cur.execute("SET idle_in_transaction_session_timeout = '60s'")
@@ -143,37 +171,30 @@ class PostgreSQLSink(StatusSink):
     def write_snapshot(
         self, snapshot: Dict[str, Any], append_history: bool = False
     ) -> None:
-        if not self._ensure_conn():
-            return
-        # daemon_auto_status_current / daemon_auto_status_history: only SNAPSHOT_KEYS (no account_* or accounts_snapshot; those live in account + account_positions)
+        """Write trading status snapshot to Redis HASH; optionally append strategy_history in PG."""
         keys = tuple(SNAPSHOT_KEYS)
-        cols = ", ".join(keys)
-        placeholders = ", ".join("%s" for _ in keys)
-        values = [snapshot.get(k) for k in keys]
+        fields = {k: snapshot.get(k) for k in keys}
+        if self._ensure_redis():
+            rds.write_trading_daemon_state(self._redis, fields)
+
         raw_accounts = (
             snapshot.get(ACCOUNTS_SNAPSHOT_KEY)
             if ACCOUNTS_SNAPSHOT_KEY in snapshot
             else None
         )
+        # strategy_history + accounts still need PG
+        if not append_history and not (
+            isinstance(raw_accounts, list)
+            and raw_accounts
+            and os.environ.get("ACCOUNT_SYNC_DAEMON_ENABLED", "").strip().lower()
+            not in ("1", "true", "yes")
+        ):
+            return
+        if not self._ensure_conn():
+            return
         try:
             with self._conn.cursor() as cur:
-                # Upsert single row (daemon_auto_status_current_id=1) for daemon_auto_status_current
-                pk_col = "daemon_auto_status_current_id"
-                updates = ", ".join(f"{k} = EXCLUDED.{k}" for k in keys if k != pk_col)
-                cur.execute(
-                    f"""
-                    INSERT INTO daemon_auto_status_current ({pk_col}, {cols})
-                    VALUES (1, {placeholders})
-                    ON CONFLICT ({pk_col}) DO UPDATE SET {updates}
-                    """,
-                    values,
-                )
                 if append_history:
-                    cur.execute(
-                        f"INSERT INTO daemon_auto_status_history ({cols}) VALUES ({placeholders})",
-                        values,
-                    )
-                    # Phase A: append one row to strategy_history (strategy run/state history)
                     cur.execute(
                         "SELECT active_strategy_structure_id FROM settings WHERE id = 1"
                     )
@@ -201,8 +222,6 @@ class PostgreSQLSink(StatusSink):
                         """,
                         (structure_id, ts_val, json.dumps(state_summary)),
                     )
-            # R-A1: sync multi-account snapshot into brokerage.account + brokerage.positions
-            # When Account Sync Daemon is enabled, it handles this persistence independently.
             if isinstance(raw_accounts, list) and raw_accounts:
                 if os.environ.get("ACCOUNT_SYNC_DAEMON_ENABLED", "").strip().lower() not in ("1", "true", "yes"):
                     if self._ensure_golden_conn():
@@ -216,7 +235,7 @@ class PostgreSQLSink(StatusSink):
                     self._golden_conn.rollback()
                 except Exception:
                     pass
-            logger.warning("PostgreSQL write_snapshot failed: %s", e, exc_info=True)
+            logger.warning("PostgreSQL write_snapshot (history/accounts) failed: %s", e, exc_info=True)
 
     def sync_accounts_only(self, accounts_list: Optional[List[Dict[str, Any]]]) -> None:
         """R-A1 / Secondary: write only the given accounts to brokerage.account + brokerage.positions.
@@ -233,21 +252,8 @@ class PostgreSQLSink(StatusSink):
             logger.warning("PostgreSQL sync_accounts_only failed: %s", e, exc_info=True)
 
     def write_operation(self, record: Dict[str, Any]) -> None:
-        if not self._ensure_conn():
-            return
-        cols = ", ".join(OPERATION_KEYS)
-        placeholders = ", ".join("%s" for _ in OPERATION_KEYS)
-        values = [record.get(k) for k in OPERATION_KEYS]
-        try:
-            with self._conn.cursor() as cur:
-                cur.execute(
-                    f"INSERT INTO daemon_auto_operations ({cols}) VALUES ({placeholders})",
-                    values,
-                )
-            self._conn.commit()
-        except Exception as e:
-            self._conn.rollback()
-            logger.warning("PostgreSQL write_operation failed: %s", e)
+        """No-op: daemon_auto_operations retired (Wave 1)."""
+        return
 
     def write_contract_quote_live(self, rows):
         """R-M6: 写入 brokerage.contract_quote_live（按 contract_key upsert）。rows: Iterable[Dict]。
@@ -763,72 +769,38 @@ class PostgreSQLSink(StatusSink):
         except Exception as e:
             logger.warning("write_ohlc_bars failed: %s", e, exc_info=True)
 
-    # Control commands older than this are ignored (consumed but not executed), to avoid executing
-    # a stop from a previous run when the daemon restarts and immediately polls.
+    # Control commands older than this are ignored (consumed but not executed).
     CONTROL_CMD_MAX_AGE_SEC = 60
 
     def poll_and_consume_control(
         self,
         consume_only: Optional[tuple] = None,
     ) -> Optional[str]:
-        """Poll oldest unconsumed control command; optionally only consume certain commands (e.g. consume_only=('stop',)).
-        Mark consumed and return command (stop/flatten/retry_ib) or None. Phase 2: DB-based control channel.
-        Commands older than CONTROL_CMD_MAX_AGE_SEC are still consumed (so they are cleared) but not returned,
-        so the daemon does not execute a stale stop from a previous run."""
-        if not self._ensure_conn():
-            logger.debug("poll_and_consume_control: no DB connection")
+        """Poll Redis STREAM control command; return command or None."""
+        if not self._ensure_redis():
             return None
-        try:
-            with self._conn.cursor() as cur:
-                cur.execute(
-                    "SELECT id, command, created_at FROM daemon_control WHERE consumed_at IS NULL ORDER BY id ASC LIMIT 1"
-                )
-                row = cur.fetchone()
-                if row is None:
-                    self._conn.rollback()
-                    return None
-                row_id, command, created_at = row
-                cmd = (command or "").strip().lower()
-                if cmd not in ("stop", "flatten", "retry_ib", "release_ib", "refresh_accounts", "refresh_replay", "refresh_ticker_subscriptions", "release_ticker_subscriptions", "init_ticker_subscriptions"):
-                    cmd = "stop"  # treat unknown as stop for safety
-                if consume_only is not None and cmd not in consume_only:
-                    return None  # do not consume this command (caller may leave flatten for same process to consume)
-                # Ignore stale commands (e.g. stop from previous run): still consume so queue is cleared, but don't execute
-                now_utc = datetime.now(timezone.utc)
-                if created_at is None:
-                    age_sec = float("inf")  # treat NULL as stale
-                else:
-                    created_utc = created_at
-                    if created_utc.tzinfo is None:
-                        created_utc = created_utc.replace(tzinfo=timezone.utc)
-                    age_sec = (now_utc - created_utc).total_seconds()
-                if age_sec > self.CONTROL_CMD_MAX_AGE_SEC:
-                    cur.execute(
-                        "UPDATE daemon_control SET consumed_at = now() WHERE id = %s",
-                        (row_id,),
-                    )
-                    self._conn.commit()
-                    logger.info(
-                        "Consumed stale control command from daemon_control (id=%s): %s (age %.0fs > %s s, not executed)",
-                        row_id,
-                        cmd,
-                        age_sec,
-                        self.CONTROL_CMD_MAX_AGE_SEC,
-                    )
-                    return None
-                cur.execute(
-                    "UPDATE daemon_control SET consumed_at = now() WHERE id = %s",
-                    (row_id,),
-                )
-            self._conn.commit()
-            logger.info(
-                "Consumed control command from daemon_control (id=%s): %s", row_id, cmd
-            )
-            return cmd
-        except Exception as e:
-            self._conn.rollback()
-            logger.debug("poll_and_consume_control failed: %s", e)
+        cmd = rds.consume_trading_control(self._redis, block_ms=0)
+        if not cmd:
             return None
+        cmd = cmd.strip().lower()
+        if cmd not in (
+            "stop",
+            "flatten",
+            "retry_ib",
+            "release_ib",
+            "refresh_accounts",
+            "refresh_replay",
+            "refresh_ticker_subscriptions",
+            "release_ticker_subscriptions",
+            "init_ticker_subscriptions",
+        ):
+            cmd = "stop"
+        if consume_only is not None and cmd not in consume_only:
+            # Re-publish so another poller can pick it up (rare path).
+            rds.publish_trading_control(self._redis, cmd, source="requeue")
+            return None
+        logger.info("Consumed control command from Redis stream: %s", cmd)
+        return cmd
 
     def write_daemon_heartbeat(
         self,
@@ -845,129 +817,51 @@ class PostgreSQLSink(StatusSink):
         listener_2_client_id: Optional[int] = None,
         mock_hedging: bool = True,
     ) -> None:
-        """Update daemon_heartbeat row (id=1). RE-6: daemon vs hedge; RE-7: ib_connected, ib_client_id, next_retry_ts.
-        seconds_until_retry: relative countdown from daemon clock, avoids clock skew on UI (optional).
-        heartbeat_interval_sec: interval in use by daemon, for monitor countdown.
-        redis_quotes_connected: whether daemon Redis quotes reader is connected (reads IB Ingestor tick keys).
-        event_subscribe_* columns are forced to false (daemon does not publish subscription state).
-        listener_connected/listener_client_id: daemon Listener on Host (config YAML ib.client_id_listener).
-        listener_2_connected/listener_2_client_id: Secondary listener (config YAML ib2_host / ib2_client_id_listener)."""
-        if not self._ensure_conn():
+        """Write trading daemon heartbeat fields to Redis state HASH."""
+        if not self._ensure_redis():
             return
-        for attempt in (1, 2):
-            try:
-                with self._conn.cursor() as cur:
-                    iv = (
-                        int(heartbeat_interval_sec)
-                        if heartbeat_interval_sec is not None
-                        else None
-                    )
-                    if next_retry_ts is not None:
-                        cur.execute(
-                            """
-                            UPDATE daemon_heartbeat
-                            SET last_ts = now(), hedge_running = %s, ib_connected = %s, ib_client_id = %s,
-                                next_retry_ts = to_timestamp(%s) AT TIME ZONE 'UTC', seconds_until_retry = %s,
-                                graceful_shutdown_at = NULL, heartbeat_interval_sec = %s, redis_quotes_connected = %s,
-                                event_subscribe_ticker = false, event_subscribe_positions = false,
-                                event_subscribe_fills = false, event_subscribe_commission = false,
-                                event_subscribe_positions_ib2 = false, event_subscribe_fills_ib2 = false, event_subscribe_commission_ib2 = false,
-                                listener_connected = %s, listener_client_id = %s,
-                                listener_2_connected = %s, listener_2_client_id = %s,
-                                mock_hedging = %s
-                            WHERE id = 1
-                            """,
-                            (
-                                hedge_running,
-                                ib_connected,
-                                ib_client_id,
-                                next_retry_ts,
-                                seconds_until_retry,
-                                iv,
-                                redis_quotes_connected,
-                                listener_connected,
-                                listener_client_id,
-                                listener_2_connected,
-                                listener_2_client_id,
-                                mock_hedging,
-                            ),
-                        )
-                    else:
-                        cur.execute(
-                            """
-                            UPDATE daemon_heartbeat
-                            SET last_ts = now(), hedge_running = %s, ib_connected = %s, ib_client_id = %s,
-                                next_retry_ts = NULL, seconds_until_retry = NULL, graceful_shutdown_at = NULL,
-                                heartbeat_interval_sec = %s, redis_quotes_connected = %s,
-                                event_subscribe_ticker = false, event_subscribe_positions = false,
-                                event_subscribe_fills = false, event_subscribe_commission = false,
-                                event_subscribe_positions_ib2 = false, event_subscribe_fills_ib2 = false, event_subscribe_commission_ib2 = false,
-                                listener_connected = %s, listener_client_id = %s,
-                                listener_2_connected = %s, listener_2_client_id = %s,
-                                mock_hedging = %s
-                            WHERE id = 1
-                            """,
-                            (hedge_running, ib_connected, ib_client_id, iv, redis_quotes_connected,
-                             listener_connected, listener_client_id, listener_2_connected, listener_2_client_id,
-                             mock_hedging),
-                        )
-                self._conn.commit()
-                return
-            except Exception as e:
-                self._conn.rollback()
-                if attempt == 1 and _is_lock_timeout_error(e):
-                    n = release_pg_locks_for_tables(self._config)
-                    if n > 0:
-                        time.sleep(0.5)
-                        continue
-                logger.debug("write_daemon_heartbeat failed: %s", e)
-                return
+        iv = int(heartbeat_interval_sec) if heartbeat_interval_sec is not None else None
+        rds.write_trading_daemon_state(
+            self._redis,
+            {
+                "last_ts": time.time(),
+                "hedge_running": hedge_running,
+                "ib_connected": ib_connected,
+                "ib_client_id": ib_client_id if ib_client_id is not None else "",
+                "graceful_shutdown_at": "",
+                "heartbeat_interval_sec": iv,
+                "redis_quotes_connected": redis_quotes_connected,
+                "mock_hedging": mock_hedging,
+            },
+        )
 
     def write_daemon_control_message(self, message: Optional[str]) -> None:
-        """Set or clear daemon_heartbeat.last_control_message (e.g. init_ticker error). None clears."""
-        if not self._ensure_conn():
+        """Set or clear last_control_message on Redis state HASH."""
+        if not self._ensure_redis():
             return
-        try:
-            with self._conn.cursor() as cur:
-                cur.execute(
-                    "UPDATE daemon_heartbeat SET last_control_message = %s WHERE id = 1",
-                    (message,),
-                )
-            self._conn.commit()
-        except Exception as e:
-            self._conn.rollback()
-            logger.debug("write_daemon_control_message failed: %s", e)
+        rds.write_trading_daemon_state(
+            self._redis, {"last_control_message": message or ""}
+        )
 
     def write_daemon_subscribed_tickers(self, symbols: List[str]) -> None:
-        """Write daemon_heartbeat.subscribed_tickers (actual list from daemon) so status API can return it; keeps UI in sync after Release."""
-        if not self._ensure_conn():
+        """Write subscribed_tickers list to Redis state HASH."""
+        if not self._ensure_redis():
             return
-        try:
-            with self._conn.cursor() as cur:
-                cur.execute(
-                    "UPDATE daemon_heartbeat SET subscribed_tickers = %s WHERE id = 1",
-                    (symbols or [],),
-                )
-            self._conn.commit()
-        except Exception as e:
-            self._conn.rollback()
-            logger.debug("write_daemon_subscribed_tickers failed: %s", e)
+        rds.write_trading_daemon_state(
+            self._redis, {"subscribed_tickers": symbols or []}
+        )
 
     def get_last_ib_client_id(self) -> Optional[int]:
-        """Read daemon_heartbeat.ib_client_id for id=1. Used at startup to pick next client_id (last+1) when last is not null, so restart after crash can avoid 'client id in use'."""
-        if not self._ensure_conn():
+        """Read ib_client_id from Redis trading state."""
+        if not self._ensure_redis():
             return None
+        state = rds.read_trading_daemon_state(self._redis)
+        if not state:
+            return None
+        v = state.get("ib_client_id")
         try:
-            with self._conn.cursor() as cur:
-                cur.execute("SELECT ib_client_id FROM daemon_heartbeat WHERE id = 1")
-                row = cur.fetchone()
-            self._conn.rollback()
-            if row is None or row[0] is None:
-                return None
-            return int(row[0])
-        except Exception as e:
-            self._conn.rollback()
-            logger.debug("get_last_ib_client_id failed: %s", e)
+            return int(v) if v is not None else None
+        except (TypeError, ValueError):
             return None
 
     def get_ib_connection_config(self) -> Optional[Dict[str, Any]]:
@@ -1130,72 +1024,43 @@ class PostgreSQLSink(StatusSink):
             return []
 
     def write_daemon_graceful_shutdown(self) -> None:
-        """Set daemon_heartbeat.graceful_shutdown_at = now() and ib_client_id = NULL so next start uses client_id=1.
-        Call on SIGTERM/SIGINT or after consuming stop (not on SIGKILL - cannot be caught).
-        """
-        if not self._ensure_conn():
+        """Mark graceful shutdown on Redis trading state (for monitoring)."""
+        if not self._ensure_redis():
             return
-        for attempt in (1, 2):
-            try:
-                with self._conn.cursor() as cur:
-                    cur.execute(
-                        "UPDATE daemon_heartbeat SET graceful_shutdown_at = now(), last_ts = now(), ib_client_id = NULL WHERE id = 1"
-                    )
-                self._conn.commit()
-                logger.info(
-                    "Wrote daemon_heartbeat.graceful_shutdown_at and ib_client_id=NULL (graceful stop for monitoring)"
-                )
-                return
-            except Exception as e:
-                self._conn.rollback()
-                if attempt == 1 and _is_lock_timeout_error(e):
-                    n = release_pg_locks_for_tables(self._config)
-                    if n > 0:
-                        time.sleep(0.5)
-                        continue
-                logger.warning("write_daemon_graceful_shutdown failed: %s", e)
-                return
+        ok = rds.write_trading_daemon_state(
+            self._redis,
+            {
+                "graceful_shutdown_at": time.time(),
+                "last_ts": time.time(),
+                "ib_client_id": "",
+                "hedge_running": False,
+            },
+        )
+        if ok:
+            logger.info(
+                "Wrote trading daemon graceful_shutdown_at and cleared ib_client_id (Redis)"
+            )
 
     def poll_run_status(self) -> tuple[bool, Optional[float]]:
-        """Read daemon_run_status (id=1). Returns (suspended, heartbeat_interval_sec). suspended=True => no new hedges; interval from DB or None (use config default).
-        Default when no row or error: suspended=True so Daemon does not connect Trading Client until explicit Resume."""
-        if not self._ensure_conn():
-            logger.debug("poll_run_status: _ensure_conn failed → suspended=True, interval=None (default)")
+        """Read suspended / heartbeat_interval_sec from Redis trading state.
+        Default when missing: suspended=True so Daemon does not hedge until explicit Resume."""
+        if not self._ensure_redis():
+            logger.debug("poll_run_status: no Redis → suspended=True, interval=None")
             return True, None
+        state = rds.read_trading_daemon_state(self._redis)
+        if not state:
+            logger.debug("poll_run_status: empty state → suspended=True, interval=None")
+            return True, None
+        suspended = bool(state.get("suspended", True)) if "suspended" in state else True
+        interval = state.get("heartbeat_interval_sec")
         try:
-            with self._conn.cursor() as cur:
-                cur.execute(
-                    "SELECT suspended, heartbeat_interval_sec FROM daemon_run_status WHERE id = 1"
-                )
-                row = cur.fetchone()
-            self._conn.rollback()
-            if row is None:
-                logger.debug("poll_run_status: no row for id=1 → suspended=True, interval=None (default)")
-                return True, None
-            suspended = bool(row[0])
-            interval = float(row[1]) if row[1] is not None else None
-            logger.debug("poll_run_status: row id=1 → suspended=%s, interval=%s", suspended, interval)
-            return suspended, interval
-        except Exception as e:
-            self._conn.rollback()
-            # heartbeat_interval_sec column may not exist yet
-            if "heartbeat_interval_sec" in str(e).lower() or "column" in str(e).lower():
-                try:
-                    with self._conn.cursor() as cur:
-                        cur.execute(
-                            "SELECT suspended FROM daemon_run_status WHERE id = 1"
-                        )
-                        row = cur.fetchone()
-                    if row is None:
-                        logger.debug("poll_run_status: fallback query no row → suspended=True, interval=None")
-                        return True, None
-                    out = bool(row[0]), None
-                    logger.debug("poll_run_status: fallback query → suspended=%s, interval=None", out[0])
-                    return out
-                except Exception:
-                    pass
-            logger.debug("poll_run_status failed: %s → suspended=True, interval=None (default)", e)
-            return True, None
+            interval_f = float(interval) if interval is not None else None
+        except (TypeError, ValueError):
+            interval_f = None
+        logger.debug(
+            "poll_run_status: Redis → suspended=%s, interval=%s", suspended, interval_f
+        )
+        return suspended, interval_f
 
     def close(self) -> None:
         if self._conn:
@@ -1204,3 +1069,10 @@ class PostgreSQLSink(StatusSink):
             except Exception:
                 pass
             self._conn = None
+        if self._golden_conn:
+            try:
+                self._golden_conn.close()
+            except Exception:
+                pass
+            self._golden_conn = None
+        self._redis = None

@@ -7,8 +7,7 @@ from abc import ABC, abstractmethod
 from typing import Any, Dict, List
 
 
-# Snapshot dict keys (R-M1a). Must match docs/DATABASE.md §2.1.
-# Table daemon_auto_status_current uses PK daemon_auto_status_current_id (not in this tuple; sink upserts with id=1).
+# Snapshot dict keys (R-M1a). Written to Redis trading state HASH.
 SNAPSHOT_KEYS = (
     "daemon_state",
     "trading_state",
@@ -36,34 +35,25 @@ OPTIONAL_SNAPSHOT_KEYS = (
 # R-A1 multi-account: JSON column for list of { account_id, summary, positions }
 ACCOUNTS_SNAPSHOT_KEY = "accounts_snapshot"
 
-# Operation record dict keys (R-M4a). Must match docs/DATABASE.md §2.3.
-# Table daemon_auto_operations uses PK daemon_auto_operations_id (bigserial; not in this tuple).
-OPERATION_KEYS = ("ts", "type", "side", "quantity", "price", "state_reason")
-
-
 class StatusSink(ABC):
-    """Abstract sink for writing current state snapshot and operation records.
+    """Abstract sink for writing current state snapshot.
 
     Implementations (e.g. PostgreSQLSink) persist to backend; caller (GsTrading)
-    decides when to write and whether to append to history (write_snapshot(..., append_history=True)).
+    decides when to write. ``append_history`` still triggers strategy_history append.
     """
 
     @abstractmethod
     def write_snapshot(self, snapshot: Dict[str, Any], append_history: bool = False) -> None:
-        """Write state snapshot. Updates current view; optionally appends to history table.
+        """Write state snapshot. Updates current view; optionally appends to strategy_history.
 
         snapshot: dict with keys from SNAPSHOT_KEYS (daemon_state, trading_state, symbol, spot, ...).
-        append_history: if True, also append one row to daemon_auto_status_history; if False, only update daemon_auto_status_current.
+        append_history: if True, also append one row to strategy_history.
         """
         ...
 
-    @abstractmethod
     def write_operation(self, record: Dict[str, Any]) -> None:
-        """Write one operation record (hedge_intent, order_sent, fill, reject, cancel).
-
-        record: dict with keys from OPERATION_KEYS (ts, type, side, quantity, price, state_reason).
-        """
-        ...
+        """No-op: daemon_auto_operations retired (Wave 1). Kept for call-site compatibility."""
+        return
 
     # 可选：按合约写入 contract_quote_live（R-M6，多标的按 contract_key 逐标的拉价 + 写库）
     # 默认实现为空，具体 sink（如 PostgreSQLSink）可选择性实现。

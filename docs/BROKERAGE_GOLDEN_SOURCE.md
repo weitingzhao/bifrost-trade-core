@@ -17,7 +17,8 @@ bifrost_golden_source
     └── views: executions, executions_final, executions_fly
 
 bifrost_{dev,stg,prod}
-├── public.*          # daemon_*, strategy_*, preferences, bridge tables
+├── public.*          # strategy_*, preferences, execution bridge tables
+│                     # (daemon IPC is Redis — see docs/DAEMON_IPC_REDIS.md)
 └── brokerage.*       # postgres_fdw foreign tables + local views (read path)
 ```
 
@@ -61,3 +62,6 @@ during migration. All cleanup is now complete:
 
 No brokerage-related objects remain in `public` schema. All reads and writes
 go through `brokerage.*` (Golden Source physical / FDW foreign tables).
+
+Daemon heartbeat / control / run_status tables were also dropped from `public`
+(core `0.8.0`); see `docs/DAEMON_IPC_REDIS.md`.

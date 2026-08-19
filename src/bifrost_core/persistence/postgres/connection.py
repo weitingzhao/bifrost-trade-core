@@ -11,8 +11,8 @@ import psycopg2
 
 logger = logging.getLogger(__name__)
 
-# Table(s) to auto-release locks on when daemon hits lock timeout (e.g. after crash restart)
-_DAEMON_LOCK_TABLES: Tuple[str, ...] = ("daemon_heartbeat", "daemon_run_status")
+# Formerly daemon_heartbeat / daemon_run_status; IPC moved to Redis. Keep helper for other PG locks.
+_DAEMON_LOCK_TABLES: Tuple[str, ...] = ()
 
 
 def _is_lock_timeout_error(e: Exception) -> bool:
@@ -29,7 +29,7 @@ def release_pg_locks_for_tables(
 ) -> int:
     """Open a new connection, find backends holding or waiting for locks on the given
     table names, terminate them (pg_terminate_backend), and return the number terminated.
-    Used when the daemon hits lock timeout on daemon_heartbeat or daemon_run_status after crash/restart.
+    Used when the daemon hits lock timeout on shared PG tables after crash/restart.
     """
     params = _get_conn_params(config)
     params["connect_timeout"] = 10

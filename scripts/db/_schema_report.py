@@ -16,12 +16,7 @@ BLUE = "\033[34m"
 
 EXPECTED_TABLES_BY_CATEGORY: Dict[str, List[str]] = {
     "daemon": [
-        "daemon_auto_operations",
-        "daemon_auto_status_current",
-        "daemon_auto_status_history",
-        "daemon_control",
-        "daemon_heartbeat",
-        "daemon_run_status",
+        # IPC tables retired → Redis (redis_daemon_state)
     ],
     "execution": [
         "account_execution_instance_allocation",

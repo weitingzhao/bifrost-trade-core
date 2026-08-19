@@ -9,16 +9,39 @@ import pytest
 pytestmark = pytest.mark.db
 
 
-def test_ddl_creates_daemon_run_status(pg_conn):
-    """Smoke: daemon_run_status exists after _ensure_tables."""
+def test_ddl_creates_settings(pg_conn):
+    """Smoke: settings exists after _ensure_tables (daemon IPC tables are Redis-only)."""
     with pg_conn.cursor() as cur:
         cur.execute(
             """
             SELECT 1 FROM information_schema.tables
-            WHERE table_schema = current_schema() AND table_name = 'daemon_run_status'
+            WHERE table_schema = current_schema() AND table_name = 'settings'
             """
         )
         assert cur.fetchone() is not None
+
+
+def test_ddl_does_not_create_daemon_ipc_tables(pg_conn):
+    """Daemon IPC tables must not be recreated in public (migrated to Redis)."""
+    retired = (
+        "daemon_heartbeat",
+        "daemon_run_status",
+        "daemon_control",
+        "daemon_auto_status_current",
+        "account_sync_heartbeat",
+        "account_sync_run_status",
+        "account_sync_control",
+    )
+    with pg_conn.cursor() as cur:
+        for name in retired:
+            cur.execute(
+                """
+                SELECT 1 FROM information_schema.tables
+                WHERE table_schema = current_schema() AND table_name = %s
+                """,
+                (name,),
+            )
+            assert cur.fetchone() is None, name
 
 
 @pytest.fixture
