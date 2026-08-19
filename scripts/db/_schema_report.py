@@ -23,9 +23,6 @@ EXPECTED_TABLES_BY_CATEGORY: Dict[str, List[str]] = {
         "account_execution_option_stock_link",
     ],
     "gate_safety": [
-        "gate_safety_guard",
-        "gate_safety_intent",
-        "gate_safety_state",
         "gate_safety_strategy",
         "gate_safety_strategy_earnings_dates",
     ],

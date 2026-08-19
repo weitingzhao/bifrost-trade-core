@@ -46,6 +46,30 @@ def test_ddl_does_not_create_daemon_ipc_tables(pg_conn):
             assert cur.fetchone() is None, name
 
 
+def test_ddl_does_not_create_retired_gate_safety_children(pg_conn):
+    """1:1 gate_safety child tables are merged into gate_safety_strategy."""
+    retired = ("gate_safety_state", "gate_safety_intent", "gate_safety_guard")
+    with pg_conn.cursor() as cur:
+        for name in retired:
+            cur.execute(
+                """
+                SELECT 1 FROM information_schema.tables
+                WHERE table_schema = current_schema() AND table_name = %s
+                """,
+                (name,),
+            )
+            assert cur.fetchone() is None, name
+        cur.execute(
+            """
+            SELECT 1 FROM information_schema.columns
+            WHERE table_schema = current_schema()
+              AND table_name = 'gate_safety_strategy'
+              AND column_name = 'epsilon_band'
+            """
+        )
+        assert cur.fetchone() is not None
+
+
 @pytest.fixture
 def pg_conn():
     """PostgreSQL connection from env or skip."""

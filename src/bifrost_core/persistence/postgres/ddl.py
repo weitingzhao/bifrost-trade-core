@@ -27,6 +27,86 @@ _BROKERAGE_MIGRATED_VIEWS = frozenset(
 )
 # P7: Polygon option ticks live in Market Data Plugin, not per-env public.
 _P7_RETIRED_PUBLIC_TABLES = frozenset({"option_trades"})
+# 1:1 child tables merged into gate_safety_strategy (scalar columns; earnings_dates stays 1:N).
+_GATE_SAFETY_RETIRED_CHILD_TABLES = frozenset(
+    {"gate_safety_state", "gate_safety_intent", "gate_safety_guard"}
+)
+_GATE_SAFETY_MERGED_COLUMN_DDL = (
+    "epsilon_band integer NOT NULL DEFAULT 10",
+    "threshold_hedge_shares integer NOT NULL DEFAULT 25",
+    "max_delta_limit integer NOT NULL DEFAULT 500",
+    "vol_window_min integer NOT NULL DEFAULT 5",
+    "stale_ts_threshold_ms integer NOT NULL DEFAULT 5000",
+    "wide_spread_pct double precision NOT NULL DEFAULT 0.1",
+    "extreme_spread_pct double precision NOT NULL DEFAULT 0.5",
+    "data_lag_threshold_ms integer NOT NULL DEFAULT 1000",
+    "min_hedge_shares integer NOT NULL DEFAULT 10",
+    "cooldown_seconds integer NOT NULL DEFAULT 60",
+    "max_hedge_shares_per_order integer NOT NULL DEFAULT 500",
+    "min_price_move_pct double precision NOT NULL DEFAULT 0.2",
+    "max_daily_hedge_count integer NOT NULL DEFAULT 50",
+    "max_position_shares integer NOT NULL DEFAULT 2000",
+    "max_daily_loss_usd double precision NOT NULL DEFAULT 5000.0",
+    "max_net_delta_shares integer NOT NULL DEFAULT 100",
+    "max_spread_pct double precision NOT NULL DEFAULT 0.05",
+    "paper_trade boolean NOT NULL DEFAULT true",
+)
+
+
+def _upgrade_gate_safety_strategy(cur) -> None:
+    """Add merged state/intent/guard columns, copy from 1:1 children, drop children.
+
+    Idempotent: ADD COLUMN IF NOT EXISTS + DROP TABLE IF EXISTS. Safe to re-run.
+    """
+    alters = ", ".join(f"ADD COLUMN IF NOT EXISTS {col}" for col in _GATE_SAFETY_MERGED_COLUMN_DDL)
+    cur.execute(f"ALTER TABLE gate_safety_strategy {alters}")
+    cur.execute("SELECT to_regclass('public.gate_safety_state')")
+    if cur.fetchone()[0] is not None:
+        cur.execute(
+            """
+            UPDATE gate_safety_strategy s SET
+                epsilon_band = st.epsilon_band,
+                threshold_hedge_shares = st.threshold_hedge_shares,
+                max_delta_limit = st.max_delta_limit,
+                vol_window_min = st.vol_window_min,
+                stale_ts_threshold_ms = st.stale_ts_threshold_ms,
+                wide_spread_pct = st.wide_spread_pct,
+                extreme_spread_pct = st.extreme_spread_pct,
+                data_lag_threshold_ms = st.data_lag_threshold_ms
+            FROM gate_safety_state st
+            WHERE s.gate_safety_strategy_id = st.gate_safety_strategy_id
+            """
+        )
+    cur.execute("SELECT to_regclass('public.gate_safety_intent')")
+    if cur.fetchone()[0] is not None:
+        cur.execute(
+            """
+            UPDATE gate_safety_strategy s SET
+                min_hedge_shares = i.min_hedge_shares,
+                cooldown_seconds = i.cooldown_seconds,
+                max_hedge_shares_per_order = i.max_hedge_shares_per_order,
+                min_price_move_pct = i.min_price_move_pct
+            FROM gate_safety_intent i
+            WHERE s.gate_safety_strategy_id = i.gate_safety_strategy_id
+            """
+        )
+    cur.execute("SELECT to_regclass('public.gate_safety_guard')")
+    if cur.fetchone()[0] is not None:
+        cur.execute(
+            """
+            UPDATE gate_safety_strategy s SET
+                max_daily_hedge_count = g.max_daily_hedge_count,
+                max_position_shares = g.max_position_shares,
+                max_daily_loss_usd = g.max_daily_loss_usd,
+                max_net_delta_shares = g.max_net_delta_shares,
+                max_spread_pct = g.max_spread_pct,
+                paper_trade = g.paper_trade
+            FROM gate_safety_guard g
+            WHERE s.gate_safety_strategy_id = g.gate_safety_strategy_id
+            """
+        )
+    for name in _GATE_SAFETY_RETIRED_CHILD_TABLES:
+        cur.execute(f"DROP TABLE IF EXISTS {name} CASCADE")
 
 
 def _ensure_tables(conn, log=None, log_table=None) -> None:
@@ -359,7 +439,7 @@ def _ensure_tables(conn, log=None, log_table=None) -> None:
         _log("settings_ib_flex skipped (brokerage.settings_flex)")
         # Strategy & gate_safety tables (DATABASE.md §2.24)
         _log("gate_safety_*, strategy_*, settings active_*")
-        _log_table("gate_safety_strategy", "Safety boundary set root + strategy layer")
+        _log_table("gate_safety_strategy", "Safety boundary set (strategy + state + intent + guard scalars)")
         cur.execute(
             """
             CREATE TABLE IF NOT EXISTS gate_safety_strategy (
@@ -379,11 +459,31 @@ def _ensure_tables(conn, log=None, log_table=None) -> None:
                 blackout_days_before integer NOT NULL,
                 blackout_days_after integer NOT NULL,
                 trading_hours_only boolean NOT NULL DEFAULT true,
+                epsilon_band integer NOT NULL DEFAULT 10,
+                threshold_hedge_shares integer NOT NULL DEFAULT 25,
+                max_delta_limit integer NOT NULL DEFAULT 500,
+                vol_window_min integer NOT NULL DEFAULT 5,
+                stale_ts_threshold_ms integer NOT NULL DEFAULT 5000,
+                wide_spread_pct double precision NOT NULL DEFAULT 0.1,
+                extreme_spread_pct double precision NOT NULL DEFAULT 0.5,
+                data_lag_threshold_ms integer NOT NULL DEFAULT 1000,
+                min_hedge_shares integer NOT NULL DEFAULT 10,
+                cooldown_seconds integer NOT NULL DEFAULT 60,
+                max_hedge_shares_per_order integer NOT NULL DEFAULT 500,
+                min_price_move_pct double precision NOT NULL DEFAULT 0.2,
+                max_daily_hedge_count integer NOT NULL DEFAULT 50,
+                max_position_shares integer NOT NULL DEFAULT 2000,
+                max_daily_loss_usd double precision NOT NULL DEFAULT 5000.0,
+                max_net_delta_shares integer NOT NULL DEFAULT 100,
+                max_spread_pct double precision NOT NULL DEFAULT 0.05,
+                paper_trade boolean NOT NULL DEFAULT true,
                 created_at timestamptz NOT NULL DEFAULT now(),
                 updated_at timestamptz NOT NULL DEFAULT now()
             )
             """
         )
+        _upgrade_gate_safety_strategy(cur)
+        _log("gate_safety_state / intent / guard skipped (merged into gate_safety_strategy)")
         _log_table(
             "gate_safety_strategy_earnings_dates",
             "Strategy layer earnings blacklist dates",
@@ -394,48 +494,6 @@ def _ensure_tables(conn, log=None, log_table=None) -> None:
                 gate_safety_strategy_id bigint NOT NULL REFERENCES gate_safety_strategy(gate_safety_strategy_id) ON DELETE CASCADE,
                 holiday_date date NOT NULL,
                 PRIMARY KEY (gate_safety_strategy_id, holiday_date)
-            )
-            """
-        )
-        _log_table("gate_safety_state", "State layer")
-        cur.execute(
-            """
-            CREATE TABLE IF NOT EXISTS gate_safety_state (
-                gate_safety_strategy_id bigint PRIMARY KEY REFERENCES gate_safety_strategy(gate_safety_strategy_id) ON DELETE CASCADE,
-                epsilon_band integer NOT NULL,
-                threshold_hedge_shares integer NOT NULL,
-                max_delta_limit integer NOT NULL,
-                vol_window_min integer NOT NULL,
-                stale_ts_threshold_ms integer NOT NULL,
-                wide_spread_pct double precision NOT NULL,
-                extreme_spread_pct double precision NOT NULL,
-                data_lag_threshold_ms integer NOT NULL
-            )
-            """
-        )
-        _log_table("gate_safety_intent", "Intent layer")
-        cur.execute(
-            """
-            CREATE TABLE IF NOT EXISTS gate_safety_intent (
-                gate_safety_strategy_id bigint PRIMARY KEY REFERENCES gate_safety_strategy(gate_safety_strategy_id) ON DELETE CASCADE,
-                min_hedge_shares integer NOT NULL,
-                cooldown_seconds integer NOT NULL,
-                max_hedge_shares_per_order integer NOT NULL,
-                min_price_move_pct double precision NOT NULL
-            )
-            """
-        )
-        _log_table("gate_safety_guard", "Guard layer")
-        cur.execute(
-            """
-            CREATE TABLE IF NOT EXISTS gate_safety_guard (
-                gate_safety_strategy_id bigint PRIMARY KEY REFERENCES gate_safety_strategy(gate_safety_strategy_id) ON DELETE CASCADE,
-                max_daily_hedge_count integer NOT NULL,
-                max_position_shares integer NOT NULL,
-                max_daily_loss_usd double precision NOT NULL,
-                max_net_delta_shares integer NOT NULL,
-                max_spread_pct double precision NOT NULL,
-                paper_trade boolean NOT NULL DEFAULT true
             )
             """
         )

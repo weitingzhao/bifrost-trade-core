@@ -28,6 +28,19 @@ Writers open `connect_golden_source()`. Readers stay on the per-env connection a
 
 Process IPC (heartbeat / run_status / control) is **not** in PostgreSQL. `_ensure_tables()` does not create the retired `daemon_*` / `account_sync_*` IPC tables.
 
+## Gate safety (2 tables)
+
+Safety-boundary config is stored as scalars (no jsonb). Logical grouping (`strategy` / `state` / `intent` / `guard`) exists only in the Python `config['gates']` dict returned by `get_gates_by_id()`.
+
+| Table | Relationship | Purpose |
+|-------|--------------|---------|
+| `gate_safety_strategy` | 1 row = 1 boundary set | Metadata + strategy/state/intent/guard scalars (~32 columns) |
+| `gate_safety_strategy_earnings_dates` | 1:N | Earnings blacklist dates (`holiday_date`) |
+
+Retired (merged into `gate_safety_strategy` in core `0.8.1`): `gate_safety_state`, `gate_safety_intent`, `gate_safety_guard`. `_ensure_tables()` copies remaining child rows then `DROP TABLE`s them.
+
+`settings.active_gate_safety_strategy_id` points at the active set. Opportunity / allocation tables keep FK `*_gate_safety_strategy_id`.
+
 ## Brokerage tables
 
 | Golden Source | Legacy public name |
