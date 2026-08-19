@@ -128,12 +128,12 @@ def rollup_platform_ib_gateway_lamp(
         rollup_ib_broker_lamp(account_agent).get("lamp") or "red",
         rollup_ib_broker_lamp(operator).get("lamp") or "red",
     ]
-    if all(l == "green" for l in lamps):
+    if all(lamp == "green" for lamp in lamps):
         return {
             "lamp": "green",
             "title": "Platform IB Gateway healthy (ingestor + account + operator via redis-ib).",
         }
-    if any(l == "red" for l in lamps):
+    if any(lamp == "red" for lamp in lamps):
         return {
             "lamp": "red",
             "title": "Platform IB Gateway degraded — one or more redis-ib health components red.",
@@ -200,7 +200,7 @@ def derive_daemon_ib_heartbeat_from_redis(
         rollup_ib_broker_lamp(account_agent).get("lamp") or "red",
         rollup_ib_broker_lamp(operator).get("lamp") or "red",
     ]
-    connected = len(lamps) == 3 and all(l == "green" for l in lamps)
+    connected = len(lamps) == 3 and all(lamp == "green" for lamp in lamps)
 
     client_id: Optional[int] = None
     if connected:

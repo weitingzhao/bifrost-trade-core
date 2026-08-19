@@ -11,9 +11,9 @@ from typing import Any, Dict, Optional
 
 import yaml
 
-logger = logging.getLogger(__name__)
-
 from bifrost_core.core.dict_merge import deep_merge
+
+logger = logging.getLogger(__name__)
 
 # Lazy-loaded example config (single source of truth for defaults)
 _EXAMPLE_CONFIG: Optional[Dict[str, Any]] = None
