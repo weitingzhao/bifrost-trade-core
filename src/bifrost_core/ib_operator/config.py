@@ -11,6 +11,7 @@ from bifrost_core.core.redis_health_keys import (
     LEGACY_IB_OPERATOR_META_HEALTH,
 )
 from bifrost_core.core.redis_url import (
+    effective_ib_redis_dict,
     format_redis_url,
     ib_redis_url_from_config,
 )
