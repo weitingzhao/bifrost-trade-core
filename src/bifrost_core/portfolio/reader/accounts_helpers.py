@@ -454,6 +454,44 @@ def _rows_to_executions(rows: Any, cur: Any) -> List[Dict[str, Any]]:
 STK_LIVE_STALE_SEC = float(os.environ.get("POSITIONS_STK_LIVE_STALE_SEC", str(4 * 3600)))
 
 
+def resolve_daily_prev_close_from_fallback(
+    close: float,
+    bar_time_epoch: float,
+    prev_close: Optional[float],
+    *,
+    today: Optional[date] = None,
+) -> Optional[float]:
+    """Yesterday's close for Daily % from stock_day fallback (close, bar_time, prev_close).
+
+    Plugin fallback-price returns the latest daily bar plus the prior bar's close.
+    If that latest bar is today, prev_close is yesterday's close.
+    If that latest bar is not today, the bar's own close is yesterday's close.
+    bar_time is UTC epoch of bar_date (midnight UTC).
+    """
+    try:
+        bar_date = datetime.fromtimestamp(float(bar_time_epoch), tz=timezone.utc).date()
+    except (TypeError, ValueError, OSError):
+        bar_date = None
+    ref = today or datetime.now(timezone.utc).date()
+    if bar_date is not None and bar_date >= ref:
+        if prev_close is None:
+            return None
+        try:
+            pc = float(prev_close)
+        except (TypeError, ValueError):
+            return None
+        if math.isfinite(pc) and pc > 0:
+            return pc
+        return None
+    try:
+        c = float(close)
+    except (TypeError, ValueError):
+        return None
+    if math.isfinite(c) and c > 0:
+        return c
+    return None
+
+
 def stk_contract_quote_stale_for_positions(p: Dict[str, Any]) -> bool:
     """True when NBBO or heartbeat suggests IB live should not drive STK display price."""
     bid = p.get("price_bid")

@@ -33,6 +33,7 @@ from bifrost_core.monitor.reader import market as market_module
 from bifrost_core.portfolio.reader.accounts_helpers import (
     _exec_time_to_dt,
     _has_meaningful_commission,
+    resolve_daily_prev_close_from_fallback,
     stk_contract_quote_stale_for_positions,
 )
 
@@ -400,8 +401,10 @@ def get_accounts_from_tables(conn: Any) -> Optional[List[Dict[str, Any]]]:
                         price_val = fb[0]
                         used_stock_day_price = True
                         pos_dict["price_updated_at"] = fb[1]
-                        if fb[2] is not None:
-                            pos_dict["daily_prev_close"] = fb[2]
+                        # Latest bar today → prev_close is yesterday; otherwise bar close is yesterday.
+                        dpc = resolve_daily_prev_close_from_fallback(fb[0], fb[1], fb[2])
+                        if dpc is not None:
+                            pos_dict["daily_prev_close"] = dpc
                     elif from_live is not None:
                         price_val = from_live
                 else:
