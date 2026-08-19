@@ -28,6 +28,8 @@ def test_ddl_does_not_create_daemon_ipc_tables(pg_conn):
         "daemon_run_status",
         "daemon_control",
         "daemon_auto_status_current",
+        "daemon_auto_status_history",
+        "daemon_auto_operations",
         "account_sync_heartbeat",
         "account_sync_run_status",
         "account_sync_control",

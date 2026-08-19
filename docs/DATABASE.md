@@ -4,7 +4,8 @@ Authoritative runtime DDL:
 
 | Domain | Module | Database |
 |--------|--------|----------|
-| Per-env Trade (`daemon_*`, `strategy_*`, `preference_*`, `watchlist`, bridge tables) | [`ddl.py`](../src/bifrost_core/persistence/postgres/ddl.py) `_ensure_tables()` | `bifrost_{dev,stg,prod}` `public.*` |
+| Per-env Trade (`strategy_*`, `gate_safety_*`, `preference_*`, `watchlist`, jobs, bridge tables) | [`ddl.py`](../src/bifrost_core/persistence/postgres/ddl.py) `_ensure_tables()` | `bifrost_{dev,stg,prod}` `public.*` |
+| Daemon / Account Sync process IPC | [`redis_daemon_state.py`](../src/bifrost_core/persistence/redis_daemon_state.py) — see [DAEMON_IPC_REDIS.md](DAEMON_IPC_REDIS.md) | per-env Redis (`config.redis`) |
 | Brokerage Golden Source (IB account / positions / executions) | [`brokerage_ddl.py`](../src/bifrost_core/persistence/postgres/brokerage_ddl.py) | `bifrost_golden_source` `brokerage.*` |
 | Market Data (Polygon) | Market Data Plugin (`market.*` / `data_ops.*`) | `bifrost_golden_source` |
 
@@ -17,13 +18,15 @@ bifrost_golden_source
 └── flex_ops.*                                   # Flex Query Plugin job queue (Wave 2)
 
 bifrost_{dev,stg,prod}
-├── public.*          # daemon_*, strategy_*, preferences, watchlist, bridge tables
+├── public.*          # strategy_*, gate_safety_*, preferences, watchlist, jobs, bridge tables
 └── brokerage.*       # postgres_fdw foreign tables + local views (read JOIN path)
 ```
 
 Qualified names: [`brokerage_tables.py`](../src/bifrost_core/persistence/postgres/brokerage_tables.py).
 
 Writers open `connect_golden_source()`. Readers stay on the per-env connection and JOIN `brokerage.*` via FDW.
+
+Process IPC (heartbeat / run_status / control) is **not** in PostgreSQL. `_ensure_tables()` does not create the retired `daemon_*` / `account_sync_*` IPC tables.
 
 ## Brokerage tables
 
@@ -57,4 +60,4 @@ make db-init-brokerage       # Golden Source brokerage DDL only
 make db-init-brokerage-fdw   # + FDW into current per-env DB (needs superuser)
 ```
 
-See also [BROKERAGE_GOLDEN_SOURCE.md](BROKERAGE_GOLDEN_SOURCE.md).
+See also [BROKERAGE_GOLDEN_SOURCE.md](BROKERAGE_GOLDEN_SOURCE.md) and [DAEMON_IPC_REDIS.md](DAEMON_IPC_REDIS.md).

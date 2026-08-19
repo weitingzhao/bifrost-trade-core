@@ -720,7 +720,7 @@ class PostgreSQLSink(StatusSink):
         """Write stock OHLC bars via Plugin Market Data API (POST /stocks/bars/ingest).
 
         Delegates to the same HTTP client used by monitor/reader/market.py.
-        StatusSink's PG connection is preserved for daemon_*/account_* writes.
+        StatusSink's PG connection is preserved for settings / brokerage writes; daemon IPC is Redis.
         Failure logs a warning but does not crash the daemon.
         """
         if not rows:
