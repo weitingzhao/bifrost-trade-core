@@ -46,11 +46,18 @@ make db-init-brokerage-fdw      # + FDW into current per-env DB (needs superuser
 K8s `db_refresh_schema.py` also runs `ensure_brokerage_schema()` + FDW when
 `golden_source` is present in config.
 
-## Cleanup
+## Cleanup (completed 2026-08-18)
 
 Legacy `public.account*` / `executions_raw_*` / `daemon_open_orders` /
 `contract_quote_live` / `settings_ib_flex` were renamed `*_legacy_bak`
-and are retained for a 30-day observation window before DROP (~2026-09-16).
-Empty `public` recreates of those names (0-row shells from old `_ensure_tables`)
-are not the backup: DROP them after workers are on core ≥ 0.6.1. DEV, STG, and
-PROD dropped 2026-08-18 (`*_legacy_bak` retained until ~2026-09-16).
+during migration. All cleanup is now complete:
+
+- **Empty public shells** (0-row recreates from old `_ensure_tables`): dropped
+  in DEV/STG/PROD on 2026-08-18 after workers upgraded to core ≥ 0.7.1.
+- **`*_legacy_bak` tables/views** (10 tables + 3 views per env): dropped in
+  DEV/STG/PROD on 2026-08-18 after confirming Golden Source is a strict
+  superset (+4 flex / +4 commissions / +8 transactions of new production data)
+  and zero code references remain.
+
+No brokerage-related objects remain in `public` schema. All reads and writes
+go through `brokerage.*` (Golden Source physical / FDW foreign tables).
