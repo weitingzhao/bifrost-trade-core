@@ -4,12 +4,18 @@ Used by PostgreSQLSink (write_snapshot) and by the legacy reader. See docs/DATAB
 Writers must pass a connection to bifrost_golden_source (not per-env FDW).
 """
 
+import logging
 import math
+import re
 from typing import Any, Dict, List, Optional, Tuple
 
 from psycopg2.extras import Json
 
 from bifrost_core.persistence.postgres.brokerage_tables import ACCOUNT, POSITIONS
+
+logger = logging.getLogger(__name__)
+
+_IB_ACCOUNT_ID_RE = re.compile(r"^[A-Z]{1,2}\d+$")
 
 
 def _has_meaningful_commission(v: Any, is_numeric: bool = True) -> bool:
@@ -87,6 +93,12 @@ def sync_accounts_snapshot_to_tables(
             if not account_id:
                 continue
             account_id = str(account_id).strip()
+            if not _IB_ACCOUNT_ID_RE.match(account_id):
+                logger.warning(
+                    "Skipping non-IB account_id %r (expected U/DU prefix)",
+                    account_id,
+                )
+                continue
             summary = acc.get("summary") or {}
             if not isinstance(summary, dict):
                 summary = {}
