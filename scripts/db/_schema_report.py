@@ -51,7 +51,6 @@ EXPECTED_TABLES_BY_CATEGORY: Dict[str, List[str]] = {
         "strategy_opportunity_entry_condition",
         "strategy_opportunity_symbol",
         "strategy_structure",
-        "strategy_structure_constraint",
         "strategy_structure_leg",
         "strategy_structure_meta",
         "strategy_template",

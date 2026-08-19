@@ -6,7 +6,7 @@ from psycopg2.extras import RealDictCursor
 
 
 def get_structure_by_id(conn: Any, strategy_structure_id: int) -> Optional[Dict[str, Any]]:
-    """Return one strategy_structure as dict with legs, constraints, metadata assembled from child tables."""
+    """Return one strategy_structure as dict with legs and metadata assembled from child tables."""
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(
@@ -56,26 +56,6 @@ def get_structure_by_id(conn: Any, strategy_structure_id: int) -> Optional[Dict[
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(
                 """
-                SELECT constraint_type, constraint_value_text, constraint_value_int
-                FROM strategy_structure_constraint
-                WHERE strategy_structure_id = %s
-                """,
-                (strategy_structure_id,),
-            )
-            constraint_rows = cur.fetchall()
-        constraints = [
-            {
-                "constraint_type": r.get("constraint_type"),
-                "constraint_value_text": r.get("constraint_value_text"),
-                "constraint_value_int": r.get("constraint_value_int"),
-            }
-            for r in constraint_rows
-        ]
-        out["constraints"] = constraints
-
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute(
-                """
                 SELECT meta_key, meta_value_text
                 FROM strategy_structure_meta
                 WHERE strategy_structure_id = %s
@@ -92,7 +72,7 @@ def get_structure_by_id(conn: Any, strategy_structure_id: int) -> Optional[Dict[
 
 
 def list_structures(conn: Any, active_only: bool = True) -> List[Dict[str, Any]]:
-    """Return list of strategy_structure rows with legs and constraints for sheet summarization."""
+    """Return list of strategy_structure rows with legs for sheet summarization."""
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             if active_only:
@@ -159,29 +139,8 @@ def list_structures(conn: Any, active_only: bool = True) -> List[Dict[str, Any]]
                     }
                 )
 
-        constraints_by_id: Dict[int, List[Dict[str, Any]]] = {i: [] for i in ids}
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute(
-                """
-                SELECT strategy_structure_id, constraint_type, constraint_value_text, constraint_value_int
-                FROM strategy_structure_constraint
-                WHERE strategy_structure_id = ANY(%s)
-                """,
-                (ids,),
-            )
-            for r in cur.fetchall():
-                sid = r["strategy_structure_id"]
-                constraints_by_id.setdefault(sid, []).append(
-                    {
-                        "constraint_type": r.get("constraint_type"),
-                        "constraint_value_text": r.get("constraint_value_text"),
-                        "constraint_value_int": r.get("constraint_value_int"),
-                    }
-                )
-
         for item in out:
             item["legs"] = legs_by_id.get(item["strategy_structure_id"], [])
-            item["constraints"] = constraints_by_id.get(item["strategy_structure_id"], [])
         return out
     except Exception:
         return []

@@ -104,33 +104,6 @@ def _insert_legs(
         )
 
 
-def _insert_constraints(
-    cur: Any, strategy_structure_id: int, constraints: List[Dict[str, Any]]
-) -> None:
-    if not constraints or not isinstance(constraints, list):
-        return
-    for c in constraints:
-        if not isinstance(c, dict) or not c.get("constraint_type"):
-            continue
-        cur.execute(
-            """
-            INSERT INTO strategy_structure_constraint (
-                strategy_structure_id, constraint_type, constraint_value_text, constraint_value_int
-            ) VALUES (%s, %s, %s, %s)
-            """,
-            (
-                strategy_structure_id,
-                (c.get("constraint_type") or "").strip(),
-                c.get("constraint_value_text"),
-                (
-                    int(c["constraint_value_int"])
-                    if c.get("constraint_value_int") is not None
-                    else None
-                ),
-            ),
-        )
-
-
 def _insert_meta(
     cur: Any, strategy_structure_id: int, meta: List[Dict[str, Any]]
 ) -> None:
@@ -210,9 +183,6 @@ def create_structure(
         bool(payload["is_active"]) if payload.get("is_active") is not None else True
     )
     notes = (payload.get("notes") or "").strip() or None
-    constraints = payload.get("constraints")
-    if constraints is not None and not isinstance(constraints, list):
-        raise ValueError("constraints must be an array")
     meta = payload.get("meta")
     if meta is not None and not isinstance(meta, list):
         raise ValueError("meta must be an array")
@@ -246,7 +216,6 @@ def create_structure(
                 return None
             sid = int(row[0])
             _insert_legs(cur, sid, legs)
-            _insert_constraints(cur, sid, constraints or [])
             _insert_meta(cur, sid, meta or [])
         conn.commit()
         return sid
@@ -280,9 +249,6 @@ def update_structure(
         bool(payload["is_active"]) if payload.get("is_active") is not None else True
     )
     notes = (payload.get("notes") or "").strip() or None
-    constraints = payload.get("constraints")
-    if constraints is not None and not isinstance(constraints, list):
-        raise ValueError("constraints must be an array")
     meta = payload.get("meta")
     if meta is not None and not isinstance(meta, list):
         raise ValueError("meta must be an array")
@@ -326,15 +292,10 @@ def update_structure(
                 (strategy_structure_id,),
             )
             cur.execute(
-                "DELETE FROM strategy_structure_constraint WHERE strategy_structure_id = %s",
-                (strategy_structure_id,),
-            )
-            cur.execute(
                 "DELETE FROM strategy_structure_meta WHERE strategy_structure_id = %s",
                 (strategy_structure_id,),
             )
             _insert_legs(cur, strategy_structure_id, legs)
-            _insert_constraints(cur, strategy_structure_id, constraints or [])
             _insert_meta(cur, strategy_structure_id, meta or [])
         conn.commit()
         return True
