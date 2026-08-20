@@ -37,7 +37,7 @@ EXPECTED_TABLES_BY_CATEGORY: Dict[str, List[str]] = {
     "settings": ["settings"],
     "stock": [
         "ticker_types",
-        "ticker_related_tickers",
+        # ticker_related_tickers → market.ticker_related (FDW)
         "stock_readiness_daily",
         "cache_stock_snapshot",
     ],

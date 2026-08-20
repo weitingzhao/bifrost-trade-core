@@ -165,7 +165,7 @@ def _ensure_tables(conn, log=None, log_table=None) -> None:
         # job_massive_backfill, etc.) are owned by bifrost-platform-plugin-market-data
         # (market.* / data_ops.*). Core DDL no longer creates those public tables.
 
-        _log("ticker_types, ticker_related_tickers, job_ticker_reference_state")
+        _log("ticker_types, job_ticker_reference_state (ticker_related → Golden Source)")
         cur.execute("DROP TABLE IF EXISTS ticker_instrument_types CASCADE")
         _log_table("ticker_types", "Massive ticker instrument type codes (Trade reference)")
         cur.execute(
@@ -184,68 +184,10 @@ def _ensure_tables(conn, log=None, log_table=None) -> None:
         cur.execute(
             "CREATE INDEX IF NOT EXISTS ticker_types_code ON ticker_types (code)"
         )
-        _log_table("ticker_related_tickers", "Related tickers by from_symbol (no FK to public.tickers)")
-        cur.execute(
-            """
-            CREATE TABLE IF NOT EXISTS ticker_related_tickers (
-                ticker_related_tickers_id bigserial PRIMARY KEY,
-                from_symbol text NOT NULL,
-                to_symbol text NOT NULL,
-                rank integer NOT NULL DEFAULT 0,
-                fetched_at timestamptz NOT NULL DEFAULT now(),
-                UNIQUE (from_symbol, to_symbol)
-            )
-            """
-        )
-        # Existing DBs: migrate from_tickers_id FK → symbol-keyed (P9 drops public.tickers).
-        cur.execute(
-            """
-            DO $$
-            BEGIN
-              IF EXISTS (
-                SELECT 1 FROM information_schema.columns
-                WHERE table_schema = 'public'
-                  AND table_name = 'ticker_related_tickers'
-                  AND column_name = 'from_tickers_id'
-              ) AND NOT EXISTS (
-                SELECT 1 FROM information_schema.columns
-                WHERE table_schema = 'public'
-                  AND table_name = 'ticker_related_tickers'
-                  AND column_name = 'from_symbol'
-              ) THEN
-                ALTER TABLE ticker_related_tickers ADD COLUMN from_symbol text;
-
-                IF to_regclass('public.tickers') IS NOT NULL THEN
-                  UPDATE ticker_related_tickers r
-                  SET from_symbol = t.ticker
-                  FROM tickers t
-                  WHERE t.tickers_id = r.from_tickers_id;
-                END IF;
-
-                DELETE FROM ticker_related_tickers WHERE from_symbol IS NULL;
-
-                ALTER TABLE ticker_related_tickers
-                  ALTER COLUMN from_symbol SET NOT NULL;
-
-                -- DROP COLUMN removes FK / UNIQUE / indexes that depend on from_tickers_id
-                ALTER TABLE ticker_related_tickers DROP COLUMN from_tickers_id;
-
-                ALTER TABLE ticker_related_tickers
-                  ADD CONSTRAINT ticker_related_tickers_from_symbol_to_symbol_key
-                  UNIQUE (from_symbol, to_symbol);
-
-                CREATE INDEX IF NOT EXISTS ticker_related_from
-                  ON ticker_related_tickers (from_symbol);
-              END IF;
-            END $$;
-            """
-        )
-        cur.execute(
-            "CREATE INDEX IF NOT EXISTS ticker_related_from ON ticker_related_tickers (from_symbol)"
-        )
-        cur.execute(
-            "CREATE INDEX IF NOT EXISTS ticker_related_to_symbol ON ticker_related_tickers (to_symbol)"
-        )
+        # ticker_related_tickers retired → market.ticker_related (Golden Source / FDW)
+        _log("ticker_related_tickers dropped (Golden Source market.ticker_related)")
+        cur.execute("DROP TABLE IF EXISTS public.ticker_related_tickers CASCADE")
+        cur.execute("DROP TABLE IF EXISTS public.stock_related_tickers CASCADE")
         _log_table("job_ticker_reference_state", "Ticker reference sync cursors / status")
         cur.execute(
             """
@@ -257,7 +199,7 @@ def _ensure_tables(conn, log=None, log_table=None) -> None:
             )
             """
         )
-        # One-time: migrate legacy stocks / stock_related_tickers / job_stock_reference_state
+        # One-time: migrate legacy stocks / job_stock_reference_state
         # without recreating public.tickers / ticker_overview.
         cur.execute(
             """
@@ -265,14 +207,6 @@ def _ensure_tables(conn, log=None, log_table=None) -> None:
             BEGIN
               IF to_regclass('public.stocks') IS NULL THEN
                 RETURN;
-              END IF;
-
-              IF to_regclass('public.stock_related_tickers') IS NOT NULL THEN
-                INSERT INTO ticker_related_tickers (from_symbol, to_symbol, rank, fetched_at)
-                SELECT upper(trim(s.symbol)), r.to_symbol, r.rank, r.fetched_at
-                FROM stock_related_tickers r
-                INNER JOIN stocks s ON s.stocks_id = r.from_stocks_id
-                ON CONFLICT (from_symbol, to_symbol) DO NOTHING;
               END IF;
 
               IF to_regclass('public.job_stock_reference_state') IS NOT NULL THEN

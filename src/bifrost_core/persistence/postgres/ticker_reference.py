@@ -528,56 +528,6 @@ def replace_ticker_types(cur: Any, rows: List[Dict[str, Any]]) -> int:
     return len(batch)
 
 
-def replace_related_for_tickers_id(
-    cur: Any,
-    from_tickers_id: int,
-    related_items: List[Dict[str, Any]],
-    fetched_at: datetime,
-) -> int:
-    """Write peers into ``ticker_related_tickers`` keyed by ``from_symbol``.
-
-    Callers should invoke ``get_tickers_id_for_ticker`` first so the symbol is
-    stashed on the cursor. ``from_tickers_id`` is a compat arg (ignored for writes
-    when the stashed symbol is present; legacy numeric ids may still resolve via
-    ``public.tickers`` if that table remains).
-    """
-    sym = _last_symbol(cur)
-    if not sym and from_tickers_id and int(from_tickers_id) != 1:
-        try:
-            cur.execute(
-                "SELECT ticker FROM tickers WHERE tickers_id = %s",
-                (int(from_tickers_id),),
-            )
-            row = cur.fetchone()
-            if row and row[0]:
-                sym = str(row[0]).strip().upper()
-        except Exception:
-            sym = None
-    if not sym:
-        logger.warning("replace_related_for_tickers_id: no symbol; skip")
-        return 0
-    cur.execute("DELETE FROM ticker_related_tickers WHERE from_symbol = %s", (sym,))
-    n = 0
-    for idx, item in enumerate(related_items):
-        if not isinstance(item, dict):
-            continue
-        tsym = (item.get("ticker") or item.get("symbol") or "").strip().upper()
-        if not tsym:
-            continue
-        cur.execute(
-            """
-            INSERT INTO ticker_related_tickers (from_symbol, to_symbol, rank, fetched_at)
-            VALUES (%s, %s, %s, %s)
-            ON CONFLICT (from_symbol, to_symbol) DO UPDATE SET
-              rank = EXCLUDED.rank,
-              fetched_at = EXCLUDED.fetched_at
-            """,
-            (sym, tsym, idx, fetched_at),
-        )
-        n += 1
-    return n
-
-
 def get_tickers_id_for_ticker(cur: Any, ticker: str) -> Optional[int]:
     """Compat id for overview/related callers.
 
@@ -629,52 +579,6 @@ def fetch_ticker_detail_merged(cur: Any, ticker: str) -> Optional[Dict[str, Any]
     except Exception:
         logger.debug("fetch_ticker_detail_merged via Plugin failed for %s", sym)
         return None
-
-
-def fetch_related_with_names(cur: Any, ticker: str) -> Tuple[Optional[int], List[Dict[str, Any]]]:
-    """Return ``(1 | None, [{ticker, name?, rank}, ...])`` via ``from_symbol`` + Plugin API names."""
-    sym = (ticker or "").strip().upper()
-    if not sym:
-        return None, []
-    if get_tickers_id_for_ticker(cur, sym) is None:
-        return None, []
-    cur.execute(
-        """
-        SELECT r.to_symbol, r.rank, r.fetched_at
-        FROM ticker_related_tickers r
-        WHERE r.from_symbol = %s
-        ORDER BY r.rank ASC, r.to_symbol
-        """,
-        (sym,),
-    )
-    rows = cur.fetchall()
-    if not rows:
-        return 1, []
-
-    peer_symbols = [str(rec[0]) for rec in rows if rec[0]]
-    names_map: Dict[str, str] = {}
-    if peer_symbols:
-        from bifrost_core.persistence.postgres.ticker_read_client import fetch_ticker_batch_via_plugin
-        try:
-            batch = fetch_ticker_batch_via_plugin(peer_symbols)
-            for t in batch:
-                s = str(t.get("symbol") or "")
-                if s:
-                    names_map[s] = t.get("name") or ""
-        except Exception:
-            pass
-
-    out: List[Dict[str, Any]] = []
-    for rec in rows:
-        out.append(
-            {
-                "ticker": rec[0],
-                "rank": rec[1],
-                "fetched_at": rec[2],
-                "name": names_map.get(str(rec[0] or "").upper()),
-            }
-        )
-    return 1, out
 
 
 def list_ticker_types(cur: Any) -> List[Dict[str, Any]]:
