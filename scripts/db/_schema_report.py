@@ -38,8 +38,8 @@ EXPECTED_TABLES_BY_CATEGORY: Dict[str, List[str]] = {
     "stock": [
         # ticker_types → market.ticker_type (Plugin HTTP)
         # ticker_related_tickers → market.ticker_related (FDW)
+        # cache_stock_snapshot → retired: market.stock_snapshot (Plugin)
         "stock_readiness_daily",
-        "cache_stock_snapshot",
     ],
     "strategy": [
         "strategy_allocation",
