@@ -11,8 +11,6 @@ from datetime import date, datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import parse_qs, urlparse
 
-from psycopg2.extras import execute_values
-
 logger = logging.getLogger(__name__)
 
 SYNC_KIND_UNIVERSE = "universe_tickers"
@@ -502,32 +500,6 @@ def upsert_reference_state(cur: Any, sync_kind: str, last_cursor: Optional[str],
     )
 
 
-def replace_ticker_types(cur: Any, rows: List[Dict[str, Any]]) -> int:
-    """Replace all rows in ``ticker_types`` with API results."""
-    cur.execute("TRUNCATE ticker_types RESTART IDENTITY")
-    if not rows:
-        return 0
-    batch: List[Tuple[Any, ...]] = []
-    for r in rows:
-        if not isinstance(r, dict):
-            continue
-        code = (r.get("code") or r.get("type") or "").strip()
-        if not code:
-            continue
-        desc = (r.get("description") or "").strip() or None
-        ac = (r.get("asset_class") or "").strip() or ""
-        loc = (r.get("locale") or "").strip() or ""
-        batch.append((code, desc, ac, loc))
-    if not batch:
-        return 0
-    execute_values(
-        cur,
-        "INSERT INTO ticker_types (code, description, asset_class, locale) VALUES %s",
-        batch,
-    )
-    return len(batch)
-
-
 def get_tickers_id_for_ticker(cur: Any, ticker: str) -> Optional[int]:
     """Compat id for overview/related callers.
 
@@ -579,21 +551,6 @@ def fetch_ticker_detail_merged(cur: Any, ticker: str) -> Optional[Dict[str, Any]
     except Exception:
         logger.debug("fetch_ticker_detail_merged via Plugin failed for %s", sym)
         return None
-
-
-def list_ticker_types(cur: Any) -> List[Dict[str, Any]]:
-    cur.execute(
-        """
-        SELECT ticker_types_id, code, description, asset_class, locale, created_at
-        FROM ticker_types
-        ORDER BY asset_class, code, locale
-        """
-    )
-    desc = cur.description
-    rows = cur.fetchall()
-    if not desc:
-        return []
-    return [{desc[i].name: r[i] for i in range(len(r))} for r in rows]
 
 
 def symbols_needing_overview(cur: Any, stale_hours: int = 720) -> List[str]:
@@ -700,13 +657,6 @@ def count_tickers_rows(cur: Any) -> int:
     except Exception:
         logger.debug("count_tickers_rows via Plugin failed")
         return 0
-
-
-def count_ticker_types_rows(cur: Any) -> int:
-    """Total rows in ``ticker_types`` (instrument type dictionary)."""
-    cur.execute("SELECT COUNT(*)::bigint FROM ticker_types")
-    row = cur.fetchone()
-    return int(row[0] or 0) if row else 0
 
 
 def all_ticker_symbols(cur: Any) -> List[str]:

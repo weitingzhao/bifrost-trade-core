@@ -7,7 +7,6 @@ from unittest.mock import patch
 from bifrost_core.persistence.postgres.ticker_reference import (
     count_ticker_overview_coverage,
     count_ticker_related_coverage,
-    count_ticker_types_rows,
     count_tickers_rows,
     list_tickers_filled_related_page,
     list_tickers_missing_overview_page,
@@ -228,14 +227,3 @@ def test_symbols_missing_related_only_returns_tickers_without_related_rows(mock_
 def test_count_tickers_rows(mock_fn):
     mock_fn.return_value = 42000
     assert count_tickers_rows(None) == 42000
-
-
-def test_count_ticker_types_rows():
-    class _Cur:
-        def execute(self, *_a, **_k):
-            return None
-
-        def fetchone(self):
-            return (128,)
-
-    assert count_ticker_types_rows(_Cur()) == 128

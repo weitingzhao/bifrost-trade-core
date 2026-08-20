@@ -165,25 +165,12 @@ def _ensure_tables(conn, log=None, log_table=None) -> None:
         # job_massive_backfill, etc.) are owned by bifrost-platform-plugin-market-data
         # (market.* / data_ops.*). Core DDL no longer creates those public tables.
 
-        _log("ticker_types, job_ticker_reference_state (ticker_related → Golden Source)")
+        _log("job_ticker_reference_state (ticker_types / ticker_related → Golden Source)")
         cur.execute("DROP TABLE IF EXISTS ticker_instrument_types CASCADE")
-        _log_table("ticker_types", "Massive ticker instrument type codes (Trade reference)")
-        cur.execute(
-            """
-            CREATE TABLE IF NOT EXISTS ticker_types (
-                ticker_types_id bigserial PRIMARY KEY,
-                code text NOT NULL,
-                description text,
-                asset_class text NOT NULL DEFAULT '',
-                locale text NOT NULL DEFAULT '',
-                created_at timestamptz DEFAULT now(),
-                UNIQUE (code, asset_class, locale)
-            )
-            """
-        )
-        cur.execute(
-            "CREATE INDEX IF NOT EXISTS ticker_types_code ON ticker_types (code)"
-        )
+        # ticker_types retired → market.ticker_type (Golden Source / Plugin HTTP)
+        _log("ticker_types dropped (Golden Source market.ticker_type)")
+        cur.execute("DROP TABLE IF EXISTS public.ticker_types CASCADE")
+        cur.execute("DROP TABLE IF EXISTS public.ticker_instrument_types CASCADE")
         # ticker_related_tickers retired → market.ticker_related (Golden Source / FDW)
         _log("ticker_related_tickers dropped (Golden Source market.ticker_related)")
         cur.execute("DROP TABLE IF EXISTS public.ticker_related_tickers CASCADE")
