@@ -582,7 +582,7 @@ def setup_fdw_market_tables(
     local_user: str = "bifrost",
     log: Optional[Callable[[str], None]] = None,
 ) -> None:
-    """Import market.ticker from golden_source and create universe views via FDW.
+    """Import market.ticker / us_market_holiday and create universe views via FDW.
 
     Assumes ``golden_source_server`` + user mapping already exist (created by
     ``setup_fdw_foreign_tables``). Call this *after* the brokerage FDW setup.

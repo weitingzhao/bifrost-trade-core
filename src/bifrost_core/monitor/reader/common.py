@@ -185,18 +185,6 @@ class StatusReader:
         self._end_read_txn()
         return result
 
-    def add_market_holiday(
-        self, date_str: str, label: Optional[str] = None, exchange: str = "NYSE"
-    ) -> bool:
-        if not self._connect():
-            return False
-        return market_module.add_market_holiday_conn(self._conn, date_str, label=label, exchange=exchange)
-
-    def delete_market_holiday(self, date_str: str, exchange: str = "NYSE") -> bool:
-        if not self._connect():
-            return False
-        return market_module.delete_market_holiday_conn(self._conn, date_str, exchange=exchange)
-
     def get_bars(
         self,
         symbol: Optional[str] = None,

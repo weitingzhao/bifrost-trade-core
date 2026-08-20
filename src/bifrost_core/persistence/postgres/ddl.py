@@ -383,40 +383,7 @@ def _ensure_tables(conn, log=None, log_table=None) -> None:
             "ADD COLUMN IF NOT EXISTS acked_gap_count integer NOT NULL DEFAULT 0"
         )
         conn.commit()
-        _log("reference_us_holidays")
-        _log_table("reference_us_holidays", "US market holidays")
-        cur.execute(
-            """
-            CREATE TABLE IF NOT EXISTS reference_us_holidays (
-                exchange text NOT NULL DEFAULT 'NYSE',
-                holiday_date date NOT NULL,
-                label text,
-                name text,
-                status text,
-                open_time timestamptz,
-                close_time timestamptz,
-                source text NOT NULL DEFAULT 'manual',
-                updated_at timestamptz DEFAULT now(),
-                created_at timestamptz DEFAULT now(),
-                PRIMARY KEY (exchange, holiday_date)
-            )
-            """
-        )
-        cur.execute("ALTER TABLE reference_us_holidays ADD COLUMN IF NOT EXISTS name text")
-        cur.execute("ALTER TABLE reference_us_holidays ADD COLUMN IF NOT EXISTS status text")
-        cur.execute("ALTER TABLE reference_us_holidays ADD COLUMN IF NOT EXISTS open_time timestamptz")
-        cur.execute("ALTER TABLE reference_us_holidays ADD COLUMN IF NOT EXISTS close_time timestamptz")
-        cur.execute(
-            "ALTER TABLE reference_us_holidays ADD COLUMN IF NOT EXISTS source text NOT NULL DEFAULT 'manual'"
-        )
-        cur.execute(
-            "ALTER TABLE reference_us_holidays ADD COLUMN IF NOT EXISTS updated_at timestamptz DEFAULT now()"
-        )
-        cur.execute(
-            "CREATE INDEX IF NOT EXISTS idx_reference_us_holidays_status ON reference_us_holidays (exchange, status)"
-        )
-        _log("settings_ib_flex skipped (brokerage.settings_flex)")
-        # Strategy & gate_safety tables (DATABASE.md §2.24)
+        # reference_us_holidays retired → market.us_market_holiday (Golden Source / FDW)
         _log("gate_safety_*, strategy_*, settings active_*")
         _log_table("gate_safety_strategy", "Safety boundary set (strategy + state + intent + guard scalars)")
         cur.execute(

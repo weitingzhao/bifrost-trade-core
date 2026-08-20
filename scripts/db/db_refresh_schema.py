@@ -89,6 +89,7 @@ def main() -> int:
         from bifrost_core.persistence.postgres.brokerage_ddl import (
             ensure_brokerage_schema,
             setup_fdw_foreign_tables,
+            setup_fdw_market_tables,
         )
         from bifrost_core.persistence.postgres.connection import _get_golden_source_conn_params
 
@@ -117,6 +118,11 @@ def main() -> int:
                 fdw_params,
                 local_user=str(params["user"]),
                 log=lambda m: _step(f"fdw {m}", no_color),
+            )
+            setup_fdw_market_tables(
+                conn,
+                local_user=str(params["user"]),
+                log=lambda m: _step(f"fdw market {m}", no_color),
             )
             _progress("FDW foreign tables ready.", no_color)
         except Exception as e:

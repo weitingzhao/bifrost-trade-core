@@ -33,7 +33,7 @@ EXPECTED_TABLES_BY_CATEGORY: Dict[str, List[str]] = {
         "preference_position_category_tags",
         "preference_data_gap_ack",
     ],
-    "reference": ["reference_us_holidays"],
+    "reference": [],  # reference_us_holidays → market.us_market_holiday (FDW)
     "settings": ["settings"],
     "stock": [
         "ticker_types",

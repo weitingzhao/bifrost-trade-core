@@ -40,6 +40,7 @@ def main() -> int:
         apply_brokerage_roles_sql,
         ensure_brokerage_schema,
         setup_fdw_foreign_tables,
+        setup_fdw_market_tables,
     )
 
     if args.roles_sql:
@@ -99,6 +100,11 @@ def main() -> int:
             setup_fdw_foreign_tables(
                 env_conn,
                 fdw_params,
+                local_user=str(env_params["user"]),
+                log=print,
+            )
+            setup_fdw_market_tables(
+                env_conn,
                 local_user=str(env_params["user"]),
                 log=print,
             )

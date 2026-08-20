@@ -47,9 +47,9 @@ def get_is_us_trading_day_conn(conn: Any, date_str: str) -> bool:
     try:
         with conn.cursor() as cur:
             cur.execute(
-                """SELECT 1 FROM reference_us_holidays
+                """SELECT 1 FROM market.us_market_holiday
                    WHERE exchange = 'NYSE' AND holiday_date = %s
-                     AND (status IS NULL OR status = 'closed')
+                     AND status = 'closed'
                    LIMIT 1""",
                 (d,),
             )
@@ -63,15 +63,19 @@ def get_is_us_trading_day_conn(conn: Any, date_str: str) -> bool:
 def get_market_holidays_conn(
     conn: Any, exchange: Optional[str] = None, year: Optional[int] = None
 ) -> List[Dict[str, Any]]:
-    """Return list of holidays from reference_us_holidays. Optional exchange and year filters.
-    If exchange is None or empty, returns all exchanges."""
+    """Return holidays from market.us_market_holiday (FDW). Optional exchange and year filters.
+
+    If exchange is None or empty, returns all exchanges. ``source`` is always ``polygon``
+    for API compatibility with the retired public.reference_us_holidays shape.
+    """
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             base = """SELECT exchange, holiday_date::text AS holiday_date,
-                              COALESCE(name, label) AS label,
+                              name AS label,
                               name, status,
-                              open_time, close_time, source
-                       FROM reference_us_holidays"""
+                              open_time, close_time,
+                              'polygon'::text AS source
+                       FROM market.us_market_holiday"""
             where_parts = []
             params: list = []
             if exchange:
@@ -89,47 +93,6 @@ def get_market_holidays_conn(
     except Exception as e:
         logger.debug("get_market_holidays_conn failed: %s", e)
         return []
-
-
-def add_market_holiday_conn(
-    conn: Any, date_str: str, label: Optional[str] = None, exchange: str = "NYSE"
-) -> bool:
-    """Insert or update one holiday. Returns True on success."""
-    try:
-        d = date.fromisoformat(date_str)
-    except (ValueError, TypeError):
-        return False
-    try:
-        with conn.cursor() as cur:
-            cur.execute(
-                """INSERT INTO reference_us_holidays (exchange, holiday_date, label)
-                   VALUES (%s, %s, %s) ON CONFLICT (exchange, holiday_date) DO UPDATE SET label = EXCLUDED.label""",
-                (exchange, d, (label or "").strip() or None),
-            )
-        conn.commit()
-        return True
-    except Exception as e:
-        logger.debug("add_market_holiday_conn failed: %s", e)
-        return False
-
-
-def delete_market_holiday_conn(conn: Any, date_str: str, exchange: str = "NYSE") -> bool:
-    """Delete one holiday. Returns True on success."""
-    try:
-        d = date.fromisoformat(date_str)
-    except (ValueError, TypeError):
-        return False
-    try:
-        with conn.cursor() as cur:
-            cur.execute(
-                "DELETE FROM reference_us_holidays WHERE exchange = %s AND holiday_date = %s",
-                (exchange, d),
-            )
-        conn.commit()
-        return True
-    except Exception as e:
-        logger.debug("delete_market_holiday_conn failed: %s", e)
-        return False
 
 
 def get_bars(
@@ -905,7 +868,7 @@ def get_is_us_trading_day(status_config: dict, date_str: str) -> bool:
 
 
 def get_market_holidays(status_config: dict, exchange: Optional[str] = None, year: Optional[int] = None) -> List[Dict[str, Any]]:
-    """Return list of holidays from reference_us_holidays. exchange=None returns all exchanges."""
+    """Return list of holidays from market.us_market_holiday. exchange=None returns all exchanges."""
     if not status_config or (status_config.get("sink") != "postgres" and not status_config.get("postgres")):
         return []
     try:
@@ -918,40 +881,6 @@ def get_market_holidays(status_config: dict, exchange: Optional[str] = None, yea
     except Exception as e:
         logger.debug("get_market_holidays failed: %s", e)
         return []
-
-
-def add_market_holiday(
-    status_config: dict, date_str: str, label: Optional[str] = None, exchange: str = "NYSE"
-) -> bool:
-    """Insert one row into reference_us_holidays. date_str YYYY-MM-DD. Returns True on success."""
-    if not status_config or (status_config.get("sink") != "postgres" and not status_config.get("postgres")):
-        return False
-    try:
-        params = _get_conn_params(status_config)
-        conn = psycopg2.connect(**params)
-        try:
-            return add_market_holiday_conn(conn, date_str, label=label, exchange=exchange)
-        finally:
-            conn.close()
-    except Exception as e:
-        logger.debug("add_market_holiday failed: %s", e)
-        return False
-
-
-def delete_market_holiday(status_config: dict, date_str: str, exchange: str = "NYSE") -> bool:
-    """Delete one row from reference_us_holidays. Returns True on success."""
-    if not status_config or (status_config.get("sink") != "postgres" and not status_config.get("postgres")):
-        return False
-    try:
-        params = _get_conn_params(status_config)
-        conn = psycopg2.connect(**params)
-        try:
-            return delete_market_holiday_conn(conn, date_str, exchange=exchange)
-        finally:
-            conn.close()
-    except Exception as e:
-        logger.debug("delete_market_holiday failed: %s", e)
-        return False
 
 
 __all__ = [
@@ -971,6 +900,4 @@ __all__ = [
     "get_job_bars_backfill_last_updated",
     "get_is_us_trading_day",
     "get_market_holidays",
-    "add_market_holiday",
-    "delete_market_holiday",
 ]
