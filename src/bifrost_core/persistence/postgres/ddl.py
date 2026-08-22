@@ -679,6 +679,10 @@ def _ensure_tables(conn, log=None, log_table=None) -> None:
             "CREATE INDEX IF NOT EXISTS job_bars_backfill_status_created ON job_bars_backfill (status, created_at)"
         )
 
+        # DEPRECATED (dbt migration): job_sepa_phase4 is replaced by analytics.sepa_screener_wide
+        # in bifrost_golden_source. Phase4 screening now uses analytics tables directly.
+        # Will be dropped after SEPA_USE_ANALYTICS is confirmed stable.
+        # See: bifrost-analytics/models/marts/
         _log_table("job_sepa_phase4", "SEPA Phase4 async screening job queue")
         cur.execute(
             """
@@ -703,6 +707,10 @@ def _ensure_tables(conn, log=None, log_table=None) -> None:
             "CREATE INDEX IF NOT EXISTS idx_job_sepa_phase4_status_created ON job_sepa_phase4 (status, created_at)"
         )
 
+        # DEPRECATED (dbt migration): stock_readiness_daily is replaced by
+        # analytics.sepa_fundamental_eval + analytics.sepa_technical_eval + analytics.sepa_screener_wide
+        # in bifrost_golden_source. Will be dropped after SEPA_USE_ANALYTICS is confirmed stable.
+        # See: bifrost-analytics/models/marts/
         # Rename legacy table if it still exists under the old sepa-prefixed name
         cur.execute(
             "ALTER TABLE IF EXISTS public.sepa_universe_readiness_daily RENAME TO stock_readiness_daily"
@@ -831,6 +839,11 @@ def _ensure_tables(conn, log=None, log_table=None) -> None:
             END $fdw_compat$;
             """
         )
+        # DEPRECATED (dbt migration): v_sepa_symbol_fund_cache_readiness is a view on
+        # research_sepa_fundamentals_cache which is replaced by analytics.stg_income_stmt
+        # (dbt reads directly from market.stock_financials in bifrost_golden_source).
+        # Will be dropped after SEPA_USE_ANALYTICS is confirmed stable.
+        # See: bifrost-analytics/models/staging/
         _log_table(
             "v_sepa_symbol_fund_cache_readiness",
             "View: valid-row snapshot of research_sepa_fundamentals_cache (created when cache table exists)",
