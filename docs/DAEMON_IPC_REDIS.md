@@ -13,6 +13,6 @@ Account Sync still **reads** IB account stream from `redis-ib`; it **publishes**
 
 Retired `public` tables: `daemon_heartbeat`, `daemon_auto_status_current`, `daemon_auto_status_history`, `daemon_auto_operations`, `daemon_control`, `daemon_run_status`, `account_sync_heartbeat`, `account_sync_control`, `account_sync_run_status`.
 
-Platform data-clone verify and freshness probes use remaining durable `public` tables (`strategy_instance`, `job_bars_backfill`, …), not these IPC keys.
+Platform data-clone verify and freshness probes use remaining durable `public` tables (`strategy_instance`, `strategy_opportunity`, `watchlist`), not these IPC keys.
 
 Implementation: `bifrost_core.persistence.redis_daemon_state`.
