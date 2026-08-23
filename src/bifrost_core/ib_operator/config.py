@@ -75,20 +75,11 @@ def effective_ib_operator_settings(config: Dict[str, Any]) -> Dict[str, Any]:
         "health_key": hk,
         "result_ttl_sec": int(raw.get("result_ttl_sec") or 300),
         "request_timeout_sec": float(raw.get("request_timeout_sec") or 120),
-        # Celery bars backfill (fetch_bars_range RPC) can run for a long time; separate from default 120s API calls.
-        "bars_backfill_request_timeout_sec": float(raw.get("bars_backfill_request_timeout_sec") or 7200),
         # Idle operator process only refreshes Redis on this interval (unlike ingestor, which updates on ticks).
         "health_refresh_sec": float(raw.get("health_refresh_sec") or 30),
         # Large range backfills return many bar rows in one RPC; default 4 MiB (override in YAML if needed).
         "max_result_bytes": int(raw.get("max_result_bytes") or (4 * 1024 * 1024)),
         "block_ms": int(raw.get("block_ms") or 5000),
-        # TIBM3: default True — Celery bars use Platform IB Gateway fetch_bars_range RPC.
-        # Explicit false is deprecated (direct TWS removed from worker); still honored as False.
-        "use_for_celery_bars": (
-            bool(raw["use_for_celery_bars"])
-            if "use_for_celery_bars" in raw
-            else True
-        ),
     }
 
 

@@ -636,7 +636,7 @@ def _ensure_tables(conn, log=None, log_table=None) -> None:
         cur.execute(
             "CREATE INDEX IF NOT EXISTS strategy_history_structure_id ON strategy_history (strategy_structure_id)"
         )
-        _log("watchlist, job_bars_backfill")
+        _log("watchlist")
         _log_table("watchlist", "Watchlist items (STK/OPT)")
         cur.execute(
             """
@@ -654,29 +654,6 @@ def _ensure_tables(conn, log=None, log_table=None) -> None:
                 optionable boolean DEFAULT false
             )
         """
-        )
-        _log_table("job_bars_backfill", "Backfill job queue (Celery worker)")
-        cur.execute(
-            """
-            CREATE TABLE IF NOT EXISTS job_bars_backfill (
-                job_bars_backfill_id bigserial PRIMARY KEY,
-                symbol text NOT NULL,
-                period text NOT NULL DEFAULT '1 D',
-                years double precision,
-                days integer,
-                override_days double precision,
-                status text NOT NULL DEFAULT 'pending',
-                result jsonb,
-                created_at timestamptz DEFAULT now(),
-                updated_at timestamptz DEFAULT now(),
-                skip_ib boolean DEFAULT false,
-                api_interval_sec integer DEFAULT 10,
-                span_hours double precision
-            )
-            """
-        )
-        cur.execute(
-            "CREATE INDEX IF NOT EXISTS job_bars_backfill_status_created ON job_bars_backfill (status, created_at)"
         )
 
         # DEPRECATED (dbt migration): job_sepa_phase4 is replaced by analytics.sepa_screener_wide

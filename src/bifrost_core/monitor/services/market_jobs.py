@@ -1,20 +1,27 @@
-"""Bars backfill job helpers and coverage utilities (monitor domain, no FastAPI)."""
+"""Stock OHLC enqueue helpers via Market Data Plugin (ops_jobs)."""
 
 from __future__ import annotations
 
 import logging
+import time
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
-
-from bifrost_core.monitor.reader import (
-    insert_job_bars_backfill,
-    update_job_bars_backfill_result,
-)
 
 logger = logging.getLogger(__name__)
 
 TOLERANCE_END_SEC_TRADING_DAY = 1 * 86400
 TOLERANCE_END_SEC_NON_TRADING = 2 * 86400
 WATCHLIST_EOD_PERIODS = ["1 D", "1 hour", "5 mins", "1 min"]
+
+_VALID_PERIODS = frozenset(WATCHLIST_EOD_PERIODS)
+
+# API period label → Plugin ingest kind + minute bar params
+_PERIOD_PLUGIN: dict[str, tuple[str, Optional[int], Optional[str]]] = {
+    "1 D": ("stock_daily", None, None),
+    "1 min": ("stock_minute", 1, "minute"),
+    "5 mins": ("stock_minute", 5, "minute"),
+    "1 hour": ("stock_minute", 1, "hour"),
+}
 
 
 def coverage_status(
@@ -34,29 +41,6 @@ def coverage_status(
     return "ok"
 
 
-def job_row_to_api(j: Dict[str, Any]) -> Dict[str, Any]:
-    """Map DB row to API shape (job_id, created_ts, updated_ts, ...)."""
-    created_ts = j.get("created_at")
-    if hasattr(created_ts, "timestamp"):
-        created_ts = created_ts.timestamp()
-    updated_ts = j.get("updated_at")
-    if hasattr(updated_ts, "timestamp"):
-        updated_ts = updated_ts.timestamp()
-    return {
-        "job_id": str(j.get("job_bars_backfill_id", "")),
-        "type": "backfill",
-        "symbol": j.get("symbol"),
-        "period": j.get("period"),
-        "years": j.get("years"),
-        "days": j.get("days"),
-        "override_days": j.get("override_days"),
-        "status": j.get("status"),
-        "result": j.get("result"),
-        "created_ts": created_ts,
-        "updated_ts": updated_ts,
-    }
-
-
 def get_watchlist_stock_symbols(reader: Any) -> List[str]:
     """Return unique stock symbols from Watchlist in insertion order."""
     watchlist = reader.get_watchlist()
@@ -74,8 +58,41 @@ def get_watchlist_stock_symbols(reader: Any) -> List[str]:
     return list(dict.fromkeys(sym_list))
 
 
-def enqueue_job_bars_backfill(
-    control_via_db: Any,
+def _read_history_backfill_config() -> dict[str, Any]:
+    try:
+        from bifrost_core.config.startup import read_config
+
+        config, _ = read_config()
+        return (config.get("history_backfill") or {}).get("stock") or {}
+    except Exception:
+        return {}
+
+
+def _resolve_span_days(period_key: str, years: Optional[float], days: Optional[int], span_hours: Optional[float]) -> float:
+    if span_hours is not None and span_hours > 0:
+        return span_hours / 24.0
+    if days is not None and days > 0:
+        return float(days)
+    if years is not None and years > 0:
+        return 365.0 * years
+    hb = _read_history_backfill_config()
+    if period_key == "1D":
+        return 365.0 * float(hb.get("daily_years", 10.0))
+    if period_key == "1min":
+        return 7.0 * float(hb.get("min_weeks", 1.0))
+    if period_key == "5min":
+        return 30.0 * float(hb.get("5min_months", 1.0))
+    return 30.0 * float(hb.get("1hour_months", 3.0))
+
+
+def _period_key(period: str) -> str:
+    per = (period or "1 D").strip()
+    period_map = {"1 D": "1D", "1 min": "1min", "5 mins": "5min", "1 hour": "1h"}
+    return period_map.get(per) or "1D"
+
+
+def _date_range_for_backfill(
+    reader: Any,
     symbol: str,
     period: str,
     *,
@@ -83,112 +100,177 @@ def enqueue_job_bars_backfill(
     days: Optional[int] = None,
     override_days: Optional[float] = None,
     span_hours: Optional[float] = None,
-    is_test: bool = False,
-    api_interval_sec: int = 10,
+) -> Tuple[date, date, str]:
+    """Return (from_date, to_date, mode)."""
+    sym = (symbol or "").strip().upper()
+    per = (period or "1 D").strip()
+    period_key = _period_key(per)
+    today = date.today()
+    latest_ts = reader.get_bars_latest(symbol=sym, period=per)
+    if latest_ts is not None:
+        override_sec = (override_days or 0.0) * 86400.0
+        start_ts = float(latest_ts) - override_sec
+        end_ts = time.time()
+        if start_ts >= end_ts:
+            return today, today, "noop"
+        from_d = datetime.fromtimestamp(start_ts, tz=timezone.utc).date()
+        return from_d, today, "incremental_override"
+    span_days = _resolve_span_days(period_key, years, days, span_hours)
+    from_d = today - timedelta(days=int(span_days))
+    return from_d, today, "initial_backfill"
+
+
+def _plugin_payload(symbol: str, period: str, from_d: date, to_d: date) -> Tuple[str, Dict[str, Any]]:
+    per = (period or "1 D").strip()
+    if per not in _VALID_PERIODS:
+        raise ValueError(f"invalid period: {per}")
+    kind, mult, timespan = _PERIOD_PLUGIN[per]
+    from_s = from_d.isoformat()
+    to_s = to_d.isoformat()
+    if kind == "stock_daily":
+        return kind, {"symbol": symbol, "from": from_s, "to": to_s}
+    return kind, {
+        "symbol": symbol,
+        "from": from_s,
+        "to": to_s,
+        "multiplier": mult,
+        "timespan": timespan,
+    }
+
+
+def enqueue_plugin_bars_backfill(
+    reader: Any,
+    symbol: str,
+    period: str,
+    *,
+    years: Optional[float] = None,
+    days: Optional[int] = None,
+    override_days: Optional[float] = None,
+    span_hours: Optional[float] = None,
 ) -> Tuple[bool, Optional[str], Optional[str]]:
-    """Insert one job_bars_backfill row and enqueue the matching Celery task."""
-    jid = insert_job_bars_backfill(
-        control_via_db,
-        symbol,
-        period,
-        years,
-        days,
-        override_days,
-        span_hours=span_hours,
-        skip_ib=is_test,
-        api_interval_sec=api_interval_sec,
-    )
-    if jid is None:
-        return False, None, "Enqueue failed."
-    logger.info(
-        "bars/backfill enqueue job_id=%s symbol=%s period=%s years=%s days=%s override_days=%s span_hours=%s",
-        jid,
-        symbol,
-        period,
-        years,
-        days,
-        override_days,
-        span_hours,
-    )
-    try:
-        from src.bars.tasks import backfill_bars
+    """Enqueue one Plugin ingest job for symbol+period. Returns (ok, job_id, error)."""
+    from bifrost_core.monitor.market_write_client import post_ingest_enqueue
 
-        backfill_bars.apply_async(
-            args=[symbol, period],
-            kwargs={
-                "years": years,
-                "days": days,
-                "override_days": override_days,
-                "span_hours": span_hours,
-            },
-            task_id=str(jid),
+    sym = (symbol or "").strip().upper()
+    per = (period or "1 D").strip()
+    if not sym:
+        return False, None, "Missing symbol."
+    if per not in _VALID_PERIODS:
+        return False, None, f"invalid period: {per}"
+
+    try:
+        from_d, to_d, mode = _date_range_for_backfill(
+            reader, sym, per, years=years, days=days, override_days=override_days, span_hours=span_hours
         )
     except Exception as e:
-        logger.exception("Celery enqueue failed: %s", e)
-        update_job_bars_backfill_result(control_via_db, jid, "failed", {"ok": False, "error": str(e)})
-        return False, None, f"Celery enqueue failed: {e}"
-    return True, str(jid), None
+        return False, None, str(e)
 
+    if mode == "noop":
+        return True, None, "Already have data and no new bars in range; nothing to backfill."
 
-def reenqueue_bars_backfill_from_row(control_via_db: Any, row: Dict[str, Any]) -> Tuple[bool, Optional[str]]:
-    """Submit Celery ``backfill_bars`` for an existing row (same ``task_id`` as ``job_bars_backfill_id``)."""
     try:
-        jid = int(row["job_bars_backfill_id"])
-    except (TypeError, ValueError, KeyError):
-        return False, "invalid_job_id"
-    symbol = (row.get("symbol") or "").strip()
-    period = (row.get("period") or "1 D").strip()
-    if not symbol:
-        return False, "missing_symbol"
-
-    def _opt_float(key: str) -> Optional[float]:
-        v = row.get(key)
-        if v is None:
-            return None
-        try:
-            return float(v)
-        except (TypeError, ValueError):
-            return None
-
-    def _opt_int(key: str) -> Optional[int]:
-        v = row.get(key)
-        if v is None:
-            return None
-        try:
-            return int(v)
-        except (TypeError, ValueError):
-            return None
-
-    years = _opt_float("years")
-    days = _opt_int("days")
-    override_days = _opt_float("override_days")
-    span_hours = _opt_float("span_hours")
-    logger.info(
-        "bars/backfill re-enqueue job_id=%s symbol=%s period=%s years=%s days=%s override_days=%s span_hours=%s",
-        jid,
-        symbol,
-        period,
-        years,
-        days,
-        override_days,
-        span_hours,
-    )
-    try:
-        from src.bars.tasks import backfill_bars
-
-        backfill_bars.apply_async(
-            args=[symbol, period],
-            kwargs={
-                "years": years,
-                "days": days,
-                "override_days": override_days,
-                "span_hours": span_hours,
-            },
-            task_id=str(jid),
-        )
+        kind, payload = _plugin_payload(sym, per, from_d, to_d)
+        resp = post_ingest_enqueue(kind, payload)
     except Exception as e:
-        # Don't revert the job to failed — leave it as pending so the user can
-        # retry again later or a Worker can pick it up once started.
-        logger.exception("Celery re-enqueue failed job_id=%s (job stays pending): %s", jid, e)
-        return False, str(e)
-    return True, None
+        logger.warning("enqueue_plugin_bars_backfill failed: %s", e)
+        return False, None, str(e)
+
+    if not resp.get("ok"):
+        err = resp.get("error") or resp.get("detail") or "plugin enqueue failed"
+        return False, None, str(err)
+
+    job_id = resp.get("job_id")
+    logger.info(
+        "bars/backfill plugin enqueue job_id=%s symbol=%s period=%s kind=%s from=%s to=%s",
+        job_id,
+        sym,
+        per,
+        kind,
+        from_d,
+        to_d,
+    )
+    return True, str(job_id) if job_id is not None else None, None
+
+
+def enqueue_watchlist_eod_plugin(
+    reader: Any,
+    *,
+    override_days: float = 1.0,
+    periods: Optional[List[str]] = None,
+) -> Dict[str, Any]:
+    """Enqueue Plugin jobs for watchlist symbols × periods (Polygon path)."""
+    symbols = get_watchlist_stock_symbols(reader)
+    per_list = list(periods or WATCHLIST_EOD_PERIODS)
+    if not symbols:
+        return {
+            "ok": True,
+            "queued_count": 0,
+            "failed_count": 0,
+            "symbols_count": 0,
+            "symbols": [],
+            "periods": per_list,
+            "override_days": override_days,
+            "queued_jobs": [],
+            "failures": [],
+            "message": "No stock symbols in Watchlist; nothing to enqueue.",
+        }
+
+    queued_jobs: List[Dict[str, Any]] = []
+    failures: List[Dict[str, Any]] = []
+    for sym in symbols:
+        for per in per_list:
+            ok, job_id, error = enqueue_plugin_bars_backfill(
+                reader, sym, per, override_days=override_days
+            )
+            if ok and job_id:
+                queued_jobs.append({"job_id": job_id, "symbol": sym, "period": per})
+            elif ok and not job_id:
+                continue  # noop
+            else:
+                failures.append({"symbol": sym, "period": per, "error": error or "Enqueue failed."})
+
+    queued_count = len(queued_jobs)
+    failed_count = len(failures)
+    ok = queued_count > 0 or (failed_count == 0 and len(symbols) > 0)
+    message = f"Queued {queued_count} Plugin ingest job(s) for {len(symbols)} watchlist symbol(s)."
+    if failed_count:
+        message += f" Failed: {failed_count}."
+    return {
+        "ok": ok,
+        "message": message,
+        "queued_count": queued_count,
+        "failed_count": failed_count,
+        "symbols_count": len(symbols),
+        "symbols": symbols,
+        "periods": per_list,
+        "override_days": override_days,
+        "queued_jobs": queued_jobs,
+        "failures": failures,
+    }
+
+
+def build_plugin_backfill_preview(
+    reader: Any,
+    symbol: str,
+    period: str,
+    override_days: Optional[float] = None,
+) -> Dict[str, Any]:
+    """Preview Plugin enqueue plan (no IB requests)."""
+    sym = (symbol or "").strip().upper()
+    per = (period or "1 D").strip()
+    try:
+        from_d, to_d, mode = _date_range_for_backfill(reader, sym, per, override_days=override_days)
+        latest_ts = reader.get_bars_latest(symbol=sym, period=per)
+        kind, payload = _plugin_payload(sym, per, from_d, to_d)
+        return {
+            "symbol": sym,
+            "period": per,
+            "mode": mode,
+            "latest_ts": float(latest_ts) if latest_ts is not None else None,
+            "plugin_enqueue": {"kind": kind, "payload": payload},
+            "fetch_start_date": from_d.isoformat(),
+            "fetch_end_date": to_d.isoformat(),
+        }
+    except Exception as e:
+        logger.warning("build_plugin_backfill_preview failed: %s", e)
+        return {"symbol": sym, "period": per, "ok": False, "error": str(e)}
