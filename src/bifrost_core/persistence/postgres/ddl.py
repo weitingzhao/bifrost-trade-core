@@ -26,7 +26,14 @@ _BROKERAGE_MIGRATED_VIEWS = frozenset(
     }
 )
 # P7: Polygon option ticks live in Market Data Plugin, not per-env public.
-_P7_RETIRED_PUBLIC_TABLES = frozenset({"option_trades"})
+_P7_RETIRED_PUBLIC_TABLES = frozenset(
+    {
+        "option_trades",
+        "job_bars_backfill",
+        "job_sepa_phase4",
+        "job_ticker_reference_state",
+    }
+)
 # 1:1 child tables merged into gate_safety_strategy (scalar columns; earnings_dates stays 1:N).
 _GATE_SAFETY_RETIRED_CHILD_TABLES = frozenset(
     {"gate_safety_state", "gate_safety_intent", "gate_safety_guard"}
@@ -165,7 +172,7 @@ def _ensure_tables(conn, log=None, log_table=None) -> None:
         # job_massive_backfill, etc.) are owned by bifrost-platform-plugin-market-data
         # (market.* / data_ops.*). Core DDL no longer creates those public tables.
 
-        _log("job_ticker_reference_state (ticker_types / ticker_related → Golden Source)")
+        _log("ticker_types / ticker_related / legacy job_* → Golden Source / Plugin")
         cur.execute("DROP TABLE IF EXISTS ticker_instrument_types CASCADE")
         # ticker_types retired → market.ticker_type (Golden Source / Plugin HTTP)
         _log("ticker_types dropped (Golden Source market.ticker_type)")
@@ -175,41 +182,20 @@ def _ensure_tables(conn, log=None, log_table=None) -> None:
         _log("ticker_related_tickers dropped (Golden Source market.ticker_related)")
         cur.execute("DROP TABLE IF EXISTS public.ticker_related_tickers CASCADE")
         cur.execute("DROP TABLE IF EXISTS public.stock_related_tickers CASCADE")
-        # Retired Trade Celery / legacy SEPA job queues — Plugin ingest + analytics.* own these paths.
+        # Retired Trade Celery / legacy job queues — Plugin ingest + analytics.* own these paths.
         _log("job_bars_backfill dropped (Market Data Plugin minute-bars enqueue)")
         cur.execute("DROP TABLE IF EXISTS public.job_bars_backfill CASCADE")
         _log("job_sepa_phase4 dropped (analytics.sepa_screener_wide)")
         cur.execute("DROP TABLE IF EXISTS public.job_sepa_phase4 CASCADE")
-        _log_table("job_ticker_reference_state", "Ticker reference sync cursors / status")
-        cur.execute(
-            """
-            CREATE TABLE IF NOT EXISTS job_ticker_reference_state (
-                sync_kind text PRIMARY KEY,
-                last_cursor text,
-                status text,
-                updated_at timestamptz DEFAULT now()
-            )
-            """
-        )
-        # One-time: migrate legacy stocks / job_stock_reference_state
-        # without recreating public.tickers / ticker_overview.
+        _log("job_ticker_reference_state dropped (Market Data Plugin ticker_sync)")
+        cur.execute("DROP TABLE IF EXISTS public.job_ticker_reference_state CASCADE")
+        # One-time: drop legacy stocks / job_stock_reference_state (no Trade ticker tables).
         cur.execute(
             """
             DO $$
             BEGIN
               IF to_regclass('public.stocks') IS NULL THEN
                 RETURN;
-              END IF;
-
-              IF to_regclass('public.job_stock_reference_state') IS NOT NULL THEN
-                INSERT INTO job_ticker_reference_state (sync_kind, last_cursor, status, updated_at)
-                SELECT
-                  CASE sync_kind WHEN 'universe_stocks' THEN 'universe_tickers' ELSE sync_kind END,
-                  last_cursor,
-                  status,
-                  updated_at
-                FROM job_stock_reference_state
-                ON CONFLICT (sync_kind) DO NOTHING;
               END IF;
 
               DROP TABLE IF EXISTS stock_related_tickers CASCADE;

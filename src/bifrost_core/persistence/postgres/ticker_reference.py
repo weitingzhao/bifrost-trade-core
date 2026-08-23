@@ -466,40 +466,6 @@ def overview_stub_cols_api_not_found() -> Dict[str, Any]:
     }
 
 
-def get_reference_state(cur: Any, sync_kind: str) -> Optional[Dict[str, Any]]:
-    cur.execute(
-        """
-        SELECT sync_kind, last_cursor, status, updated_at
-        FROM job_ticker_reference_state
-        WHERE sync_kind = %s
-        """,
-        (sync_kind,),
-    )
-    row = cur.fetchone()
-    if not row:
-        return None
-    return {
-        "sync_kind": row[0],
-        "last_cursor": row[1],
-        "status": row[2],
-        "updated_at": row[3],
-    }
-
-
-def upsert_reference_state(cur: Any, sync_kind: str, last_cursor: Optional[str], status: Optional[str] = None) -> None:
-    cur.execute(
-        """
-        INSERT INTO job_ticker_reference_state (sync_kind, last_cursor, status, updated_at)
-        VALUES (%s, %s, %s, now())
-        ON CONFLICT (sync_kind) DO UPDATE SET
-          last_cursor = EXCLUDED.last_cursor,
-          status = COALESCE(EXCLUDED.status, job_ticker_reference_state.status),
-          updated_at = now()
-        """,
-        (sync_kind, last_cursor, status),
-    )
-
-
 def get_tickers_id_for_ticker(cur: Any, ticker: str) -> Optional[int]:
     """Compat id for overview/related callers.
 
