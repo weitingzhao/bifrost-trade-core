@@ -1,8 +1,8 @@
 """Qualified table/view names for brokerage Golden Source schema.
 
-Physical tables live in ``bifrost_golden_source.brokerage.*``.
-Per-env DBs expose the same names via postgres_fdw foreign tables so readers
-can JOIN brokerage data with public strategy/preference tables on one connection.
+Physical tables live in ``bifrost_golden_source.raw_broker.*`` (imported into per-env
+``brokerage.*`` via postgres_fdw). Per-env DBs expose ``brokerage.*`` foreign tables
+so readers can JOIN brokerage data with public strategy/preference tables on one connection.
 """
 
 from __future__ import annotations

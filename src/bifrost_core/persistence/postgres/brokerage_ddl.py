@@ -1,9 +1,9 @@
-"""DDL for bifrost_golden_source.brokerage.* + per-env postgres_fdw setup.
+"""DDL for Golden Source brokerage/market + per-env postgres_fdw setup.
 
-Brokerage Golden Source holds IB/brokerage account data (accounts, positions,
-executions, commissions, cash transactions, open orders, live quotes, Flex settings).
-Per-env databases (bifrost_dev / bifrost_prod) import these as foreign tables so
-readers can JOIN with public strategy/preference tables on a single connection.
+Physical Golden Source tables live in ``raw_broker.*`` and ``raw_market.*``.
+Per-env databases (bifrost_dev / bifrost_stg / bifrost_prod) import them into
+local ``brokerage`` / ``market`` schemas via postgres_fdw so readers can JOIN
+with public strategy/preference tables on a single connection.
 """
 
 from __future__ import annotations
@@ -23,6 +23,11 @@ from bifrost_core.persistence.postgres.market_tables import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Local FDW target schemas in per-env DBs (unchanged for app SQL).
+# Remote physical schemas on bifrost_golden_source after pipeline rename.
+GOLDEN_SOURCE_BROKERAGE_SCHEMA = "raw_broker"
+GOLDEN_SOURCE_MARKET_SCHEMA = "raw_market"
 
 _EXEC_CANONICAL_COLS = (
     "account_id, exec_id, exec_time, symbol, sec_type, side, quantity, price, source, "
@@ -483,11 +488,13 @@ def setup_fdw_foreign_tables(
     *,
     local_user: str = "bifrost",
     server_name: str = "golden_source_server",
+    skip_server_admin: bool = False,
     log: Optional[Callable[[str], None]] = None,
 ) -> None:
     """Import brokerage.* from golden_source into the current per-env database via FDW.
 
-    Requires superuser (or equivalent) for CREATE EXTENSION / CREATE SERVER.
+    Requires superuser (or equivalent) for CREATE EXTENSION / CREATE SERVER unless
+    ``skip_server_admin`` is True (re-import only; server + user mapping must exist).
     ``golden_source_params`` uses psycopg2 connect keys: host, port, dbname, user, password.
     """
     _log = log or (lambda m: logger.info("%s", m))
@@ -498,73 +505,77 @@ def setup_fdw_foreign_tables(
     remote_password = str(golden_source_params.get("password") or "")
 
     with env_conn.cursor() as cur:
-        cur.execute("CREATE EXTENSION IF NOT EXISTS postgres_fdw")
-        _log("extension postgres_fdw")
+        if not skip_server_admin:
+            cur.execute("CREATE EXTENSION IF NOT EXISTS postgres_fdw")
+            _log("extension postgres_fdw")
 
-        cur.execute(
-            f"""
-            DO $$
-            BEGIN
-              IF NOT EXISTS (
-                SELECT 1 FROM pg_foreign_server WHERE srvname = '{server_name}'
-              ) THEN
-                CREATE SERVER {server_name}
-                  FOREIGN DATA WRAPPER postgres_fdw
-                  OPTIONS (host '{host}', port '{port}', dbname '{dbname}');
-              ELSE
-                ALTER SERVER {server_name}
-                  OPTIONS (
-                    SET host '{host}',
-                    SET port '{port}',
-                    SET dbname '{dbname}'
-                  );
-              END IF;
-            END $$;
-            """
-        )
-        _log(f"server {server_name}")
+            cur.execute(
+                f"""
+                DO $$
+                BEGIN
+                  IF NOT EXISTS (
+                    SELECT 1 FROM pg_foreign_server WHERE srvname = '{server_name}'
+                  ) THEN
+                    CREATE SERVER {server_name}
+                      FOREIGN DATA WRAPPER postgres_fdw
+                      OPTIONS (host '{host}', port '{port}', dbname '{dbname}');
+                  ELSE
+                    ALTER SERVER {server_name}
+                      OPTIONS (
+                        SET host '{host}',
+                        SET port '{port}',
+                        SET dbname '{dbname}'
+                      );
+                  END IF;
+                END $$;
+                """
+            )
+            _log(f"server {server_name}")
 
-        pw_sql = remote_password.replace("'", "''")
-        cur.execute(
-            f"""
-            DO $$
-            BEGIN
-              IF NOT EXISTS (
-                SELECT 1 FROM pg_user_mappings um
-                JOIN pg_foreign_server s ON s.oid = um.srvid
-                JOIN pg_roles r ON r.oid = um.umuser
-                WHERE s.srvname = '{server_name}' AND r.rolname = '{local_user}'
-              ) THEN
-                CREATE USER MAPPING FOR {local_user}
-                  SERVER {server_name}
-                  OPTIONS (user '{remote_user}', password '{pw_sql}');
-              ELSE
-                ALTER USER MAPPING FOR {local_user}
-                  SERVER {server_name}
-                  OPTIONS (SET user '{remote_user}', SET password '{pw_sql}');
-              END IF;
-            END $$;
-            """
-        )
-        _log(f"user mapping for {local_user}")
+            pw_sql = remote_password.replace("'", "''")
+            cur.execute(
+                f"""
+                DO $$
+                BEGIN
+                  IF NOT EXISTS (
+                    SELECT 1 FROM pg_user_mappings um
+                    JOIN pg_foreign_server s ON s.oid = um.srvid
+                    JOIN pg_roles r ON r.oid = um.umuser
+                    WHERE s.srvname = '{server_name}' AND r.rolname = '{local_user}'
+                  ) THEN
+                    CREATE USER MAPPING FOR {local_user}
+                      SERVER {server_name}
+                      OPTIONS (user '{remote_user}', password '{pw_sql}');
+                  ELSE
+                    ALTER USER MAPPING FOR {local_user}
+                      SERVER {server_name}
+                      OPTIONS (SET user '{remote_user}', SET password '{pw_sql}');
+                  END IF;
+                END $$;
+                """
+            )
+            _log(f"user mapping for {local_user}")
 
         cur.execute(f"CREATE SCHEMA IF NOT EXISTS {SCHEMA}")
 
-        for name in list(BROKERAGE_VIEWS) + list(BROKERAGE_PHYSICAL_TABLES):
-            cur.execute(f"DROP FOREIGN TABLE IF EXISTS {SCHEMA}.{name} CASCADE")
+        for name in BROKERAGE_VIEWS:
             cur.execute(f"DROP VIEW IF EXISTS {SCHEMA}.{name} CASCADE")
+        for name in BROKERAGE_PHYSICAL_TABLES:
+            cur.execute(f"DROP FOREIGN TABLE IF EXISTS {SCHEMA}.{name} CASCADE")
             cur.execute(f"DROP TABLE IF EXISTS {SCHEMA}.{name} CASCADE")
 
         table_list = ", ".join(BROKERAGE_PHYSICAL_TABLES)
         cur.execute(
             f"""
-            IMPORT FOREIGN SCHEMA {SCHEMA}
+            IMPORT FOREIGN SCHEMA {GOLDEN_SOURCE_BROKERAGE_SCHEMA}
               LIMIT TO ({table_list})
               FROM SERVER {server_name}
               INTO {SCHEMA}
             """
         )
-        _log(f"imported foreign tables: {table_list}")
+        _log(
+            f"imported foreign tables from {GOLDEN_SOURCE_BROKERAGE_SCHEMA}: {table_list}"
+        )
 
         _create_brokerage_views(cur)
         _log("local views over foreign tables")
@@ -582,7 +593,7 @@ def setup_fdw_market_tables(
     local_user: str = "bifrost",
     log: Optional[Callable[[str], None]] = None,
 ) -> None:
-    """Import market.ticker / us_market_holiday / ticker_related and create universe views via FDW.
+    """Import raw_market tables into local market schema and create universe views via FDW.
 
     Assumes ``golden_source_server`` + user mapping already exist (created by
     ``setup_fdw_foreign_tables``). Call this *after* the brokerage FDW setup.
@@ -592,21 +603,24 @@ def setup_fdw_market_tables(
     with env_conn.cursor() as cur:
         cur.execute(f"CREATE SCHEMA IF NOT EXISTS {MARKET_SCHEMA}")
 
-        for name in list(MARKET_LOCAL_VIEWS) + list(MARKET_FOREIGN_TABLES):
-            cur.execute(f"DROP FOREIGN TABLE IF EXISTS {MARKET_SCHEMA}.{name} CASCADE")
+        for name in MARKET_LOCAL_VIEWS:
             cur.execute(f"DROP VIEW IF EXISTS {MARKET_SCHEMA}.{name} CASCADE")
+        for name in MARKET_FOREIGN_TABLES:
+            cur.execute(f"DROP FOREIGN TABLE IF EXISTS {MARKET_SCHEMA}.{name} CASCADE")
             cur.execute(f"DROP TABLE IF EXISTS {MARKET_SCHEMA}.{name} CASCADE")
 
         table_list = ", ".join(MARKET_FOREIGN_TABLES)
         cur.execute(
             f"""
-            IMPORT FOREIGN SCHEMA {MARKET_SCHEMA}
+            IMPORT FOREIGN SCHEMA {GOLDEN_SOURCE_MARKET_SCHEMA}
               LIMIT TO ({table_list})
               FROM SERVER {server_name}
               INTO {MARKET_SCHEMA}
             """
         )
-        _log(f"imported market foreign tables: {table_list}")
+        _log(
+            f"imported market foreign tables from {GOLDEN_SOURCE_MARKET_SCHEMA}: {table_list}"
+        )
 
         # Local view matching Golden Source market.v_us_equity_universe definition
         cur.execute(
