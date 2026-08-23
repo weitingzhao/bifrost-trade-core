@@ -33,6 +33,7 @@ _P7_RETIRED_PUBLIC_TABLES = frozenset(
         "job_sepa_phase4",
         "job_ticker_reference_state",
         "stock_readiness_daily",
+        "research_sepa_fundamentals_cache",
     }
 )
 # 1:1 child tables merged into gate_safety_strategy (scalar columns; earnings_dates stays 1:N).
@@ -192,6 +193,9 @@ def _ensure_tables(conn, log=None, log_table=None) -> None:
         cur.execute("DROP TABLE IF EXISTS public.job_ticker_reference_state CASCADE")
         _log("stock_readiness_daily dropped (analytics.sepa_* marts)")
         cur.execute("DROP TABLE IF EXISTS public.stock_readiness_daily CASCADE")
+        _log("research_sepa_fundamentals_cache dropped (analytics marts)")
+        cur.execute("DROP VIEW IF EXISTS public.v_sepa_symbol_fund_cache_readiness CASCADE")
+        cur.execute("DROP TABLE IF EXISTS public.research_sepa_fundamentals_cache CASCADE")
         # One-time: drop legacy stocks / job_stock_reference_state (no Trade ticker tables).
         cur.execute(
             """
@@ -677,36 +681,8 @@ def _ensure_tables(conn, log=None, log_table=None) -> None:
             END $fdw_compat$;
             """
         )
-        # DEPRECATED (dbt migration): v_sepa_symbol_fund_cache_readiness is a view on
-        # research_sepa_fundamentals_cache which is replaced by analytics.stg_income_stmt
-        # (dbt reads directly from market.stock_financials in bifrost_golden_source).
-        # Will be dropped after SEPA_USE_ANALYTICS is confirmed stable.
-        # See: bifrost-analytics/models/staging/
-        _log_table(
-            "v_sepa_symbol_fund_cache_readiness",
-            "View: valid-row snapshot of research_sepa_fundamentals_cache (created when cache table exists)",
-        )
-        cur.execute(
-            """
-            DO $sepa_fund_v$
-            BEGIN
-              IF to_regclass('public.research_sepa_fundamentals_cache') IS NOT NULL THEN
-                EXECUTE $sql$
-                CREATE OR REPLACE VIEW public.v_sepa_symbol_fund_cache_readiness AS
-                SELECT
-                    upper(trim(c.symbol)) AS symbol,
-                    c.rule_version,
-                    (c.expire_at > now()) AS fund_cache_valid,
-                    c.expire_at,
-                    c.fetched_at
-                FROM public.research_sepa_fundamentals_cache c
-                WHERE c.rule_version = 'sepa_fundamentals_v1'
-                $sql$;
-              END IF;
-            END
-            $sepa_fund_v$
-            """
-        )
+        # research_sepa_fundamentals_cache + v_sepa_symbol_fund_cache_readiness retired
+        # (analytics marts); DROP on refresh above — no CREATE here.
 
         # P7: option_trades / max-pain / ATM IV retired — Plugin market_analytics.*.
         _log("option_trades skipped (Market Data Plugin)")
