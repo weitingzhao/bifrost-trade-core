@@ -35,12 +35,7 @@ EXPECTED_TABLES_BY_CATEGORY: Dict[str, List[str]] = {
     ],
     "reference": [],  # reference_us_holidays → market.us_market_holiday (FDW)
     "settings": ["settings"],
-    "stock": [
-        # ticker_types → market.ticker_type (Plugin HTTP)
-        # ticker_related_tickers → market.ticker_related (FDW)
-        # cache_stock_snapshot → retired: market.stock_snapshot (Plugin)
-        "stock_readiness_daily",
-    ],
+    "stock": [],
     "strategy": [
         "strategy_allocation",
         "strategy_allocation_opportunity",

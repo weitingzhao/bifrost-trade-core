@@ -32,6 +32,7 @@ _P7_RETIRED_PUBLIC_TABLES = frozenset(
         "job_bars_backfill",
         "job_sepa_phase4",
         "job_ticker_reference_state",
+        "stock_readiness_daily",
     }
 )
 # 1:1 child tables merged into gate_safety_strategy (scalar columns; earnings_dates stays 1:N).
@@ -189,6 +190,8 @@ def _ensure_tables(conn, log=None, log_table=None) -> None:
         cur.execute("DROP TABLE IF EXISTS public.job_sepa_phase4 CASCADE")
         _log("job_ticker_reference_state dropped (Market Data Plugin ticker_sync)")
         cur.execute("DROP TABLE IF EXISTS public.job_ticker_reference_state CASCADE")
+        _log("stock_readiness_daily dropped (analytics.sepa_* marts)")
+        cur.execute("DROP TABLE IF EXISTS public.stock_readiness_daily CASCADE")
         # One-time: drop legacy stocks / job_stock_reference_state (no Trade ticker tables).
         cur.execute(
             """
@@ -645,111 +648,6 @@ def _ensure_tables(conn, log=None, log_table=None) -> None:
                 optionable boolean DEFAULT false
             )
         """
-        )
-
-        # DEPRECATED (dbt migration): stock_readiness_daily is replaced by
-        # analytics.sepa_fundamental_eval + analytics.sepa_technical_eval + analytics.sepa_screener_wide
-        # in bifrost_golden_source. Will be dropped after SEPA_USE_ANALYTICS is confirmed stable.
-        # See: bifrost-analytics/models/marts/
-        # Rename legacy table if it still exists under the old sepa-prefixed name
-        cur.execute(
-            "ALTER TABLE IF EXISTS public.sepa_universe_readiness_daily RENAME TO stock_readiness_daily"
-        )
-        _log_table(
-            "stock_readiness_daily",
-            "Stock Data Readiness: daily per-symbol snapshot covering price bars, financials, short data, and SEPA fundamental results",
-        )
-        cur.execute(
-            """
-            CREATE TABLE IF NOT EXISTS public.stock_readiness_daily (
-                as_of_date date NOT NULL,
-                symbol text NOT NULL,
-                tickers_id bigint NULL,
-                universe_rule_version text NOT NULL DEFAULT 'v1',
-                price_source text NOT NULL DEFAULT 'massive',
-                included_in_universe boolean NOT NULL DEFAULT false,
-                bar_count_lookback integer NOT NULL DEFAULT 0,
-                first_bar_date date NULL,
-                last_bar_date date NULL,
-                null_close_rows integer NOT NULL DEFAULT 0,
-                null_volume_rows integer NOT NULL DEFAULT 0,
-                price_ready boolean NOT NULL DEFAULT false,
-                fund_cache_present boolean NOT NULL DEFAULT false,
-                fund_cache_expire_at timestamptz NULL,
-                notes text NULL,
-                computed_at timestamptz NOT NULL DEFAULT now(),
-                -- Stage 2: financial statement coverage
-                income_stmt_q_count    integer NOT NULL DEFAULT 0,
-                income_stmt_a_count    integer NOT NULL DEFAULT 0,
-                income_stmt_ready      boolean NOT NULL DEFAULT false,
-                balance_sheet_present  boolean NOT NULL DEFAULT false,
-                cash_flow_present      boolean NOT NULL DEFAULT false,
-                ratios_present         boolean NOT NULL DEFAULT false,
-                -- Stage 3: short data coverage
-                short_interest_present boolean NOT NULL DEFAULT false,
-                short_volume_present   boolean NOT NULL DEFAULT false,
-                -- Stage 4: SEPA fundamental results (written directly by run_fundamentals_local_backfill)
-                fundamental_pass          boolean NOT NULL DEFAULT false,
-                fundamental_pass_count    integer NOT NULL DEFAULT 0,
-                fundamental_insufficient  boolean NOT NULL DEFAULT false,
-                fundamental_eval         jsonb NULL,
-                -- Stage 5: SEPA technical results (written directly by run_technical_local_backfill)
-                technical_pass          boolean NOT NULL DEFAULT false,
-                technical_pass_count    integer NOT NULL DEFAULT 0,
-                technical_insufficient  boolean NOT NULL DEFAULT false,
-                technical_eval          jsonb NULL,
-                PRIMARY KEY (as_of_date, symbol, universe_rule_version, price_source)
-            )
-            """
-        )
-        # Drop obsolete FK to public.tickers if present (market-data owns tickers now).
-        cur.execute(
-            """
-            DO $srd_fk$
-            BEGIN
-              IF EXISTS (
-                SELECT 1 FROM pg_constraint
-                WHERE conname = 'stock_readiness_daily_tickers_id_fkey'
-              ) THEN
-                ALTER TABLE public.stock_readiness_daily
-                  DROP CONSTRAINT stock_readiness_daily_tickers_id_fkey;
-              END IF;
-            END
-            $srd_fk$;
-            """
-        )
-        # ADD COLUMN patches for tables already renamed from the old schema
-        for _col_sql in [
-            "ALTER TABLE public.stock_readiness_daily ADD COLUMN IF NOT EXISTS income_stmt_q_count    integer NOT NULL DEFAULT 0",
-            "ALTER TABLE public.stock_readiness_daily ADD COLUMN IF NOT EXISTS income_stmt_a_count    integer NOT NULL DEFAULT 0",
-            "ALTER TABLE public.stock_readiness_daily ADD COLUMN IF NOT EXISTS income_stmt_ready      boolean NOT NULL DEFAULT false",
-            "ALTER TABLE public.stock_readiness_daily ADD COLUMN IF NOT EXISTS balance_sheet_present  boolean NOT NULL DEFAULT false",
-            "ALTER TABLE public.stock_readiness_daily ADD COLUMN IF NOT EXISTS cash_flow_present      boolean NOT NULL DEFAULT false",
-            "ALTER TABLE public.stock_readiness_daily ADD COLUMN IF NOT EXISTS ratios_present         boolean NOT NULL DEFAULT false",
-            "ALTER TABLE public.stock_readiness_daily ADD COLUMN IF NOT EXISTS short_interest_present boolean NOT NULL DEFAULT false",
-            "ALTER TABLE public.stock_readiness_daily ADD COLUMN IF NOT EXISTS short_volume_present   boolean NOT NULL DEFAULT false",
-            "ALTER TABLE public.stock_readiness_daily ADD COLUMN IF NOT EXISTS fundamental_pass          boolean NOT NULL DEFAULT false",
-            "ALTER TABLE public.stock_readiness_daily ADD COLUMN IF NOT EXISTS fundamental_pass_count    integer NOT NULL DEFAULT 0",
-            "ALTER TABLE public.stock_readiness_daily ADD COLUMN IF NOT EXISTS fundamental_insufficient  boolean NOT NULL DEFAULT false",
-            "ALTER TABLE public.stock_readiness_daily ADD COLUMN IF NOT EXISTS fundamental_eval         jsonb NULL",
-            # Stage 5: SEPA technical evaluation (11 conditions; written by run_technical_local_backfill)
-            "ALTER TABLE public.stock_readiness_daily ADD COLUMN IF NOT EXISTS technical_pass            boolean NOT NULL DEFAULT false",
-            "ALTER TABLE public.stock_readiness_daily ADD COLUMN IF NOT EXISTS technical_pass_count      integer NOT NULL DEFAULT 0",
-            "ALTER TABLE public.stock_readiness_daily ADD COLUMN IF NOT EXISTS technical_insufficient    boolean NOT NULL DEFAULT false",
-            "ALTER TABLE public.stock_readiness_daily ADD COLUMN IF NOT EXISTS technical_eval            jsonb NULL",
-        ]:
-            cur.execute(_col_sql)
-        cur.execute(
-            """
-            CREATE INDEX IF NOT EXISTS idx_srd_asof_ready
-            ON public.stock_readiness_daily (as_of_date, price_ready)
-            """
-        )
-        cur.execute(
-            """
-            CREATE INDEX IF NOT EXISTS idx_srd_asof_symbol
-            ON public.stock_readiness_daily (symbol)
-            """
         )
 
         _log("cache_stock_snapshot retired → market.stock_snapshot (Golden Source / Plugin)")
