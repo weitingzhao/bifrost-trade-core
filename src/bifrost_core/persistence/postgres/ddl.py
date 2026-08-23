@@ -175,6 +175,11 @@ def _ensure_tables(conn, log=None, log_table=None) -> None:
         _log("ticker_related_tickers dropped (Golden Source market.ticker_related)")
         cur.execute("DROP TABLE IF EXISTS public.ticker_related_tickers CASCADE")
         cur.execute("DROP TABLE IF EXISTS public.stock_related_tickers CASCADE")
+        # Retired Trade Celery / legacy SEPA job queues — Plugin ingest + analytics.* own these paths.
+        _log("job_bars_backfill dropped (Market Data Plugin minute-bars enqueue)")
+        cur.execute("DROP TABLE IF EXISTS public.job_bars_backfill CASCADE")
+        _log("job_sepa_phase4 dropped (analytics.sepa_screener_wide)")
+        cur.execute("DROP TABLE IF EXISTS public.job_sepa_phase4 CASCADE")
         _log_table("job_ticker_reference_state", "Ticker reference sync cursors / status")
         cur.execute(
             """
@@ -654,34 +659,6 @@ def _ensure_tables(conn, log=None, log_table=None) -> None:
                 optionable boolean DEFAULT false
             )
         """
-        )
-
-        # DEPRECATED (dbt migration): job_sepa_phase4 is replaced by analytics.sepa_screener_wide
-        # in bifrost_golden_source. Phase4 screening now uses analytics tables directly.
-        # Will be dropped after SEPA_USE_ANALYTICS is confirmed stable.
-        # See: bifrost-analytics/models/marts/
-        _log_table("job_sepa_phase4", "SEPA Phase4 async screening job queue")
-        cur.execute(
-            """
-            CREATE TABLE IF NOT EXISTS job_sepa_phase4 (
-                job_sepa_phase4_id bigserial PRIMARY KEY,
-                job_id text NOT NULL UNIQUE,
-                status text NOT NULL DEFAULT 'queued',
-                progress jsonb NOT NULL DEFAULT '{}'::jsonb,
-                request jsonb NOT NULL DEFAULT '{}'::jsonb,
-                summary jsonb NOT NULL DEFAULT '{}'::jsonb,
-                result jsonb,
-                errors jsonb NOT NULL DEFAULT '[]'::jsonb,
-                created_at timestamptz DEFAULT now(),
-                updated_at timestamptz DEFAULT now(),
-                started_at timestamptz,
-                finished_at timestamptz,
-                version text NOT NULL DEFAULT 'sepa_phase4_v1'
-            )
-            """
-        )
-        cur.execute(
-            "CREATE INDEX IF NOT EXISTS idx_job_sepa_phase4_status_created ON job_sepa_phase4 (status, created_at)"
         )
 
         # DEPRECATED (dbt migration): stock_readiness_daily is replaced by

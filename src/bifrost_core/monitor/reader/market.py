@@ -1,6 +1,5 @@
 """Market: OHLC bars, backfill jobs, trading day and holidays. Conn-based and status_config-based APIs."""
 
-import json
 import logging
 import math
 from datetime import date, datetime, timezone
