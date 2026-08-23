@@ -6,22 +6,29 @@ Authoritative runtime DDL:
 |--------|--------|----------|
 | Per-env Trade (`strategy_*`, `gate_safety_*`, `preference_*`, `watchlist`, jobs, bridge tables) | [`ddl.py`](../src/bifrost_core/persistence/postgres/ddl.py) `_ensure_tables()` | `bifrost_{dev,stg,prod}` `public.*` |
 | Daemon / Account Sync process IPC | [`redis_daemon_state.py`](../src/bifrost_core/persistence/redis_daemon_state.py) — see [DAEMON_IPC_REDIS.md](DAEMON_IPC_REDIS.md) | per-env Redis (`config.redis`) |
-| Brokerage Golden Source (IB account / positions / executions) | [`brokerage_ddl.py`](../src/bifrost_core/persistence/postgres/brokerage_ddl.py) | `bifrost_golden_source` `brokerage.*` |
-| Market Data (Polygon) | Market Data Plugin (`market.*` / `data_ops.*`) | `bifrost_golden_source` |
+| Brokerage Golden Source (IB account / positions / executions) | [`brokerage_ddl.py`](../src/bifrost_core/persistence/postgres/brokerage_ddl.py) | `bifrost_golden_source` `raw_broker.*` |
+| Market Data (Polygon) | Market Data Plugin | `bifrost_golden_source` `raw_market.*` / `features_daily.*` / `ops_jobs.*` |
+| Flex Query job queue | Flex Query Plugin | `bifrost_golden_source` `ops_jobs.*` (+ compat `flex_ops.*` views) |
+| Research dbt Elementary | bifrost-research dbt | `bifrost_golden_source` `ops_dbt.*` |
 
 ## Per-env vs Golden Source
 
 ```
 bifrost_golden_source
-├── market.* / market_analytics.* / data_ops.*   # Polygon Plugin
-├── brokerage.*                                  # IB / brokerage adapter
-└── flex_ops.*                                   # Flex Query Plugin job queue (Wave 2)
+├── raw_market.* / features_daily.*              # Polygon Plugin
+├── raw_broker.*                                 # IB / Flex brokerage adapter
+├── ops_jobs.*                                   # Plugin job queues (market + flex)
+├── ops_dbt.*                                    # dbt / Elementary observability
+├── dw_stock.* / features_option.* / signals.* … # Research outputs
+└── flex_ops.* (views → ops_jobs)                # Legacy compat; not on Trade DBs
 
 bifrost_{dev,stg,prod}
-├── public.*          # strategy_*, gate_safety_*, preferences, watchlist, jobs, bridge tables
-├── brokerage.*       # postgres_fdw foreign tables + local views (read JOIN path)
-└── market.*          # postgres_fdw foreign table (market.ticker) + local views
+├── public.*          # strategy_*, gate_safety_*, preferences, watchlist, jobs, Flex tokens (settings)
+├── brokerage.*       # postgres_fdw foreign tables → raw_broker + local views
+└── market.*          # postgres_fdw foreign tables → raw_market + local views
 ```
+
+Do not create `flex_ops` on Trade env databases. Flex queue + freshness live in Golden Source `ops_jobs` only.
 
 Qualified names: [`brokerage_tables.py`](../src/bifrost_core/persistence/postgres/brokerage_tables.py), [`market_tables.py`](../src/bifrost_core/persistence/postgres/market_tables.py).
 
