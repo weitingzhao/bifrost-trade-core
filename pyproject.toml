@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "bifrost-core"
-version = "0.17.0"
+version = "0.17.1"
 description = "Shared library (config/persistence/portfolio/monitor/ib_operator) — Bifrost Trade system"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -12,6 +12,7 @@ dependencies = [
     "psycopg2-binary>=2.9.0",
     "py_vollib>=1.0.1",
     "PyYAML>=6.0",
+    "pydantic>=2.0",
     "redis>=4.5.0",
     "prometheus-fastapi-instrumentator>=7.0.0",
 ]
