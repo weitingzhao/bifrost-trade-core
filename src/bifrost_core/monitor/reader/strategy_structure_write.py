@@ -75,34 +75,34 @@ def _conn_from_config(status_config: Optional[dict]) -> Any:
         return None
 
 
-def _insert_legs(
-    cur: Any, strategy_structure_id: int, legs: List[Dict[str, Any]]
-) -> None:
+def _write_legs_json(cur: Any, strategy_structure_id: int, legs: List[Dict[str, Any]]) -> None:
+    legs_out: List[Dict[str, Any]] = []
     for i, leg in enumerate(legs):
         if not isinstance(leg, dict):
             continue
-        cur.execute(
-            """
-            INSERT INTO strategy_structure_leg (
-                strategy_structure_id, sort_order, role, direction, option_right,
-                quantity, strike, expiration
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-            """,
-            (
-                strategy_structure_id,
-                i,
-                leg.get("role"),
-                leg.get("direction"),
-                leg.get("option_right"),
-                int(leg["quantity"]) if leg.get("quantity") is not None else 1,
-                float(leg["strike"]) if leg.get("strike") is not None else None,
-                (
+        legs_out.append(
+            {
+                "role": leg.get("role"),
+                "direction": leg.get("direction"),
+                "option_right": leg.get("option_right"),
+                "quantity": int(leg["quantity"]) if leg.get("quantity") is not None else 1,
+                "strike": float(leg["strike"]) if leg.get("strike") is not None else None,
+                "expiration": (
                     str(leg["expiration"]).strip()
                     if leg.get("expiration") is not None
                     else None
                 ),
-            ),
+                "sort_order": i,
+            }
         )
+    cur.execute(
+        """
+        UPDATE strategy_structure
+        SET legs_json = %s::jsonb, updated_at = now()
+        WHERE strategy_structure_id = %s
+        """,
+        (json.dumps(legs_out), strategy_structure_id),
+    )
 
 
 def _insert_meta(
@@ -216,7 +216,7 @@ def create_structure(
             if not row:
                 return None
             sid = int(row[0])
-            _insert_legs(cur, sid, legs)
+            _write_legs_json(cur, sid, legs)
             _insert_meta(cur, sid, meta or [])
         conn.commit()
         return sid
@@ -288,11 +288,7 @@ def update_structure(
             if cur.rowcount == 0:
                 conn.rollback()
                 return False
-            cur.execute(
-                "DELETE FROM strategy_structure_leg WHERE strategy_structure_id = %s",
-                (strategy_structure_id,),
-            )
-            _insert_legs(cur, strategy_structure_id, legs)
+            _write_legs_json(cur, strategy_structure_id, legs)
             _insert_meta(cur, strategy_structure_id, meta or [])
         conn.commit()
         return True

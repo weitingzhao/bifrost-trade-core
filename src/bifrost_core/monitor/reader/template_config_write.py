@@ -7,8 +7,10 @@ from typing import Any, Dict, List, Optional
 
 import psycopg2
 
+from bifrost_core.monitor.reader import strategy_dim_catalog
 from bifrost_core.monitor.reader import structure_type_config_constants as _const
 from bifrost_core.monitor.reader import template_config
+from bifrost_core.monitor.schemas.gate_params import TemplateLeg
 from bifrost_core.persistence.postgres.connection import _get_conn_params
 
 logger = logging.getLogger(__name__)
@@ -56,118 +58,20 @@ def _validate_dim_codes(conn: Any, payload: Dict[str, Any]) -> None:
         if code is None or str(code).strip() == "":
             continue
         c = str(code).strip()
-        with conn.cursor() as cur:
-            cur.execute(
-                "SELECT 1 FROM strategy_dim WHERE dim_type = %s AND code = %s",
-                (dim, c),
-            )
-            if not cur.fetchone():
-                raise ValueError(f"Invalid {dim} code: {c}")
+        if not strategy_dim_catalog.is_valid_dim_code(dim, c):
+            raise ValueError(f"Invalid {dim} code: {c}")
 
 
 def create_dim(status_config: Optional[dict], dim_type: str, payload: Dict[str, Any]) -> None:
-    dt = (dim_type or "").strip()
-    if dt not in _const.DIM_TYPE_ALLOWED:
-        raise ValueError("Invalid dim_type")
-    code = (payload.get("code") or "").strip()
-    if not code or not re.match(r"^[a-z][a-z0-9_]*$", code):
-        raise ValueError("code is required (lowercase snake_case)")
-    label = (payload.get("display_label") or "").strip() or code
-    so = int(payload["sort_order"]) if payload.get("sort_order") is not None else 0
-    conn = _conn_from_config(status_config)
-    if conn is None:
-        raise ValueError("Database not configured")
-    try:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                INSERT INTO strategy_dim (dim_type, code, display_label, sort_order)
-                VALUES (%s, %s, %s, %s)
-                """,
-                (dt, code, label, so),
-            )
-        conn.commit()
-    except psycopg2.IntegrityError as e:
-        conn.rollback()
-        raise ValueError("Dimension code already exists for this type") from e
-    finally:
-        conn.close()
+    raise ValueError("Strategy dimensions are catalog-defined (Wave 9); create not supported")
 
 
 def update_dim(status_config: Optional[dict], strategy_dim_id: int, payload: Dict[str, Any]) -> bool:
-    conn = _conn_from_config(status_config)
-    if conn is None:
-        raise ValueError("Database not configured")
-    try:
-        with conn.cursor() as cur:
-            cur.execute("SELECT dim_type, code FROM strategy_dim WHERE strategy_dim_id = %s", (strategy_dim_id,))
-            row = cur.fetchone()
-            if not row:
-                return False
-            old_dt, old_code = row[0], row[1]
-            sets = []
-            vals: List[Any] = []
-            if payload.get("display_label") is not None:
-                sets.append("display_label = %s")
-                vals.append((payload.get("display_label") or "").strip() or old_code)
-            if payload.get("sort_order") is not None:
-                sets.append("sort_order = %s")
-                vals.append(int(payload["sort_order"]))
-            new_code = payload.get("code")
-            if new_code is not None:
-                nc = str(new_code).strip()
-                if nc and nc != old_code:
-                    if not re.match(r"^[a-z][a-z0-9_]*$", nc):
-                        raise ValueError("Invalid code")
-                    col = _DIM_TO_COL.get(old_dt)
-                    if col:
-                        cur.execute(
-                            f"SELECT COUNT(*) FROM strategy_template WHERE {col} = %s",
-                            (old_code,),
-                        )
-                        if int(cur.fetchone()[0]) > 0:
-                            raise ValueError("Cannot rename code: templates still reference it")
-                    sets.append("code = %s")
-                    vals.append(nc)
-            if not sets:
-                return True
-            vals.append(strategy_dim_id)
-            cur.execute(
-                f"UPDATE strategy_dim SET {', '.join(sets)} WHERE strategy_dim_id = %s",
-                vals,
-            )
-        conn.commit()
-        return True
-    except ValueError:
-        conn.rollback()
-        raise
-    except Exception as e:
-        conn.rollback()
-        raise ValueError(str(e)) from e
-    finally:
-        conn.close()
+    raise ValueError("Strategy dimensions are catalog-defined (Wave 9); update not supported")
 
 
 def delete_dim(status_config: Optional[dict], strategy_dim_id: int) -> None:
-    conn = _conn_from_config(status_config)
-    if conn is None:
-        raise ValueError("Database not configured")
-    try:
-        with conn.cursor() as cur:
-            cur.execute("SELECT dim_type, code FROM strategy_dim WHERE strategy_dim_id = %s", (strategy_dim_id,))
-            row = cur.fetchone()
-            if not row:
-                raise ValueError("Dimension not found")
-            dt, code = row[0], row[1]
-            col = _DIM_TO_COL.get(dt)
-            if col:
-                cur.execute(f"SELECT 1 FROM strategy_template WHERE {col} = %s LIMIT 1", (code,))
-                if cur.fetchone():
-                    raise ValueError("Cannot delete: a template references this value")
-            cur.execute("DELETE FROM strategy_dim WHERE strategy_dim_id = %s", (strategy_dim_id,))
-        conn.commit()
-    finally:
-        conn.close()
+    raise ValueError("Strategy dimensions are catalog-defined (Wave 9); delete not supported")
 
 
 def create_template(status_config: Optional[dict], payload: Dict[str, Any]) -> int:
@@ -313,9 +217,23 @@ def replace_template_legs(
 ) -> None:
     if not isinstance(legs, list):
         raise ValueError("legs must be an array")
-    for leg in legs:
-        if isinstance(leg, dict):
-            _validate_leg(leg)
+    legs_out: List[Dict[str, Any]] = []
+    for i, leg in enumerate(legs):
+        if not isinstance(leg, dict):
+            continue
+        _validate_leg(leg)
+        qty = int(leg.get("quantity_default") or leg.get("quantity") or 1)
+        legs_out.append(
+            {
+                "role": leg.get("role"),
+                "direction": leg.get("direction"),
+                "option_right": leg.get("option_right"),
+                "quantity": qty,
+                "quantity_default": qty,
+                "sort_order": i,
+            }
+        )
+    validated = [TemplateLeg.model_validate(leg).model_dump() for leg in legs_out]
     conn = _conn_from_config(status_config)
     if conn is None:
         raise ValueError("Database not configured")
@@ -327,26 +245,14 @@ def replace_template_legs(
             )
             if not cur.fetchone():
                 raise ValueError("Template not found")
-            cur.execute("DELETE FROM strategy_template_leg WHERE strategy_template_id = %s", (strategy_template_id,))
-            for i, leg in enumerate(legs):
-                if not isinstance(leg, dict):
-                    continue
-                qty = int(leg.get("quantity_default") or leg.get("quantity") or 1)
-                cur.execute(
-                    """
-                    INSERT INTO strategy_template_leg
-                        (strategy_template_id, sort_order, role, direction, option_right, quantity_default)
-                    VALUES (%s,%s,%s,%s,%s,%s)
-                    """,
-                    (
-                        strategy_template_id,
-                        i,
-                        leg.get("role"),
-                        leg.get("direction"),
-                        leg.get("option_right"),
-                        qty,
-                    ),
-                )
+            cur.execute(
+                """
+                UPDATE strategy_template
+                SET legs_json = %s::jsonb, updated_at = now()
+                WHERE strategy_template_id = %s
+                """,
+                (json.dumps(validated), strategy_template_id),
+            )
         conn.commit()
     finally:
         conn.close()

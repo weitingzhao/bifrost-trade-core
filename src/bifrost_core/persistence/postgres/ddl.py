@@ -2,8 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import date
-from typing import Any
+from bifrost_core.persistence.postgres.wave9_migrations import migrate_wave9_strategy_collapse
 
 # IB / brokerage tables live in bifrost_golden_source.raw_broker.* (see brokerage_ddl.py).
 # Per-env DBs expose them via postgres_fdw. Do not recreate in public.
@@ -48,7 +47,7 @@ _P8_RETIRED_PUBLIC_TABLES = frozenset(
         "preference_sepa_gap_ack",
     }
 )
-# 1:1 child tables merged into gate_safety_strategy (scalar columns; earnings_dates stays 1:N).
+# Wave 9: child tables collapsed into jsonb; earnings_dates folded into params_json.
 _GATE_SAFETY_RETIRED_CHILD_TABLES = frozenset(
     {"gate_safety_state", "gate_safety_intent", "gate_safety_guard"}
 )
@@ -423,7 +422,7 @@ def _ensure_tables(conn, log=None, log_table=None) -> None:
         conn.commit()
         # reference_us_holidays retired → market.us_market_holiday (Golden Source / FDW)
         _log("gate_safety_*, strategy_*, settings active_*")
-        _log_table("gate_safety_strategy", "Safety boundary set (strategy + state + intent + guard scalars)")
+        _log_table("gate_safety_strategy", "Safety boundary set (metadata + params_json)")
         cur.execute(
             """
             CREATE TABLE IF NOT EXISTS gate_safety_strategy (
@@ -437,30 +436,7 @@ def _ensure_tables(conn, log=None, log_table=None) -> None:
                 dim_volatility text,
                 dim_time text,
                 is_active boolean NOT NULL DEFAULT true,
-                min_dte integer NOT NULL,
-                max_dte integer NOT NULL,
-                atm_band_pct double precision NOT NULL,
-                blackout_days_before integer NOT NULL,
-                blackout_days_after integer NOT NULL,
-                trading_hours_only boolean NOT NULL DEFAULT true,
-                epsilon_band integer NOT NULL DEFAULT 10,
-                threshold_hedge_shares integer NOT NULL DEFAULT 25,
-                max_delta_limit integer NOT NULL DEFAULT 500,
-                vol_window_min integer NOT NULL DEFAULT 5,
-                stale_ts_threshold_ms integer NOT NULL DEFAULT 5000,
-                wide_spread_pct double precision NOT NULL DEFAULT 0.1,
-                extreme_spread_pct double precision NOT NULL DEFAULT 0.5,
-                data_lag_threshold_ms integer NOT NULL DEFAULT 1000,
-                min_hedge_shares integer NOT NULL DEFAULT 10,
-                cooldown_seconds integer NOT NULL DEFAULT 60,
-                max_hedge_shares_per_order integer NOT NULL DEFAULT 500,
-                min_price_move_pct double precision NOT NULL DEFAULT 0.2,
-                max_daily_hedge_count integer NOT NULL DEFAULT 50,
-                max_position_shares integer NOT NULL DEFAULT 2000,
-                max_daily_loss_usd double precision NOT NULL DEFAULT 5000.0,
-                max_net_delta_shares integer NOT NULL DEFAULT 100,
-                max_spread_pct double precision NOT NULL DEFAULT 0.05,
-                paper_trade boolean NOT NULL DEFAULT true,
+                params_json jsonb NOT NULL DEFAULT '{}'::jsonb,
                 created_at timestamptz NOT NULL DEFAULT now(),
                 updated_at timestamptz NOT NULL DEFAULT now()
             )
@@ -469,37 +445,7 @@ def _ensure_tables(conn, log=None, log_table=None) -> None:
         _upgrade_gate_safety_strategy(cur)
         _log("gate_safety_state / intent / guard skipped (merged into gate_safety_strategy)")
         _log_table(
-            "gate_safety_strategy_earnings_dates",
-            "Strategy layer earnings blacklist dates",
-        )
-        cur.execute(
-            """
-            CREATE TABLE IF NOT EXISTS gate_safety_strategy_earnings_dates (
-                gate_safety_strategy_id bigint NOT NULL REFERENCES gate_safety_strategy(gate_safety_strategy_id) ON DELETE CASCADE,
-                holiday_date date NOT NULL,
-                PRIMARY KEY (gate_safety_strategy_id, holiday_date)
-            )
-            """
-        )
-        _log_table("strategy_dim", "Option strategy dimension enum (dim_type + code)")
-        cur.execute(
-            """
-            CREATE TABLE IF NOT EXISTS strategy_dim (
-                strategy_dim_id bigserial PRIMARY KEY,
-                dim_type text NOT NULL,
-                code text NOT NULL,
-                display_label text NOT NULL,
-                sort_order integer NOT NULL DEFAULT 0,
-                created_at timestamptz NOT NULL DEFAULT now(),
-                UNIQUE (dim_type, code)
-            )
-            """
-        )
-        cur.execute(
-            "CREATE INDEX IF NOT EXISTS strategy_dim_dim_type ON strategy_dim (dim_type)"
-        )
-        _log_table(
-            "strategy_template", "Flat option structure template (six dims + legs)"
+            "strategy_template", "Flat option structure template (six dims + legs_json)"
         )
         cur.execute(
             """
@@ -519,6 +465,9 @@ def _ensure_tables(conn, log=None, log_table=None) -> None:
                 nature text,
                 sort_order integer NOT NULL DEFAULT 0,
                 is_active boolean NOT NULL DEFAULT true,
+                params_json jsonb NOT NULL DEFAULT '[]'::jsonb,
+                characteristics_json jsonb NOT NULL DEFAULT '[]'::jsonb,
+                legs_json jsonb NOT NULL DEFAULT '[]'::jsonb,
                 created_at timestamptz NOT NULL DEFAULT now(),
                 updated_at timestamptz NOT NULL DEFAULT now()
             )
@@ -527,26 +476,7 @@ def _ensure_tables(conn, log=None, log_table=None) -> None:
         cur.execute(
             "CREATE INDEX IF NOT EXISTS strategy_template_sort ON strategy_template (sort_order)"
         )
-        _log_table("strategy_template_leg", "Template default legs (one row per leg)")
-        cur.execute(
-            """
-            CREATE TABLE IF NOT EXISTS strategy_template_leg (
-                strategy_template_leg_id bigserial PRIMARY KEY,
-                strategy_template_id bigint NOT NULL REFERENCES strategy_template(strategy_template_id) ON DELETE CASCADE,
-                sort_order integer NOT NULL DEFAULT 0,
-                role text,
-                direction text,
-                option_right text,
-                quantity_default integer NOT NULL DEFAULT 1,
-                created_at timestamptz NOT NULL DEFAULT now(),
-                UNIQUE (strategy_template_id, sort_order)
-            )
-            """
-        )
-        cur.execute(
-            "CREATE INDEX IF NOT EXISTS strategy_template_leg_template_id ON strategy_template_leg (strategy_template_id)"
-        )
-        _log_table("strategy_structure", "Structure strategy")
+        _log_table("strategy_structure", "Structure strategy (legs_json + meta_json)")
         cur.execute(
             """
             CREATE TABLE IF NOT EXISTS strategy_structure (
@@ -555,6 +485,8 @@ def _ensure_tables(conn, log=None, log_table=None) -> None:
                 strategy_template_id bigint REFERENCES strategy_template(strategy_template_id),
                 version integer NOT NULL DEFAULT 1,
                 is_active boolean NOT NULL DEFAULT true,
+                meta_json jsonb NOT NULL DEFAULT '{}'::jsonb,
+                legs_json jsonb NOT NULL DEFAULT '[]'::jsonb,
                 created_at timestamptz NOT NULL DEFAULT now(),
                 updated_at timestamptz NOT NULL DEFAULT now(),
                 notes text
@@ -563,29 +495,9 @@ def _ensure_tables(conn, log=None, log_table=None) -> None:
         )
         _log("strategy_template_param / characteristic / structure_meta → parent jsonb")
         _migrate_strategy_kv_to_jsonb(cur)
-        _log_table("strategy_structure_leg", "Structure strategy leg (one row per leg)")
-        cur.execute(
-            """
-            CREATE TABLE IF NOT EXISTS strategy_structure_leg (
-                strategy_structure_leg_id bigserial PRIMARY KEY,
-                strategy_structure_id bigint NOT NULL REFERENCES strategy_structure(strategy_structure_id) ON DELETE CASCADE,
-                sort_order integer NOT NULL DEFAULT 0,
-                role text,
-                direction text,
-                option_right text,
-                quantity integer NOT NULL DEFAULT 1,
-                strike double precision,
-                expiration text,
-                created_at timestamptz NOT NULL DEFAULT now()
-            )
-            """
-        )
-        cur.execute(
-            "CREATE INDEX IF NOT EXISTS strategy_structure_leg_structure_id ON strategy_structure_leg (strategy_structure_id)"
-        )
         cur.execute("DROP TABLE IF EXISTS strategy_structure_constraint CASCADE")
         _log("strategy_structure_constraint dropped (over-designed, never used)")
-        _log_table("strategy_opportunity", "Opportunity strategy")
+        _log_table("strategy_opportunity", "Opportunity strategy (symbols_json + entry_conditions_json)")
         cur.execute(
             """
             CREATE TABLE IF NOT EXISTS strategy_opportunity (
@@ -595,44 +507,12 @@ def _ensure_tables(conn, log=None, log_table=None) -> None:
                 default_gate_safety_strategy_id bigint REFERENCES gate_safety_strategy(gate_safety_strategy_id),
                 scope_type text,
                 is_active boolean NOT NULL DEFAULT true,
+                symbols_json jsonb NOT NULL DEFAULT '[]'::jsonb,
+                entry_conditions_json jsonb NOT NULL DEFAULT '[]'::jsonb,
                 created_at timestamptz NOT NULL DEFAULT now(),
                 updated_at timestamptz NOT NULL DEFAULT now()
             )
             """
-        )
-        _log_table("strategy_opportunity_symbol", "Opportunity strategy symbols")
-        cur.execute(
-            """
-            CREATE TABLE IF NOT EXISTS strategy_opportunity_symbol (
-                strategy_opportunity_symbol_id bigserial PRIMARY KEY,
-                strategy_opportunity_id bigint NOT NULL REFERENCES strategy_opportunity(strategy_opportunity_id) ON DELETE CASCADE,
-                symbol text NOT NULL,
-                sort_order integer NOT NULL DEFAULT 0,
-                UNIQUE (strategy_opportunity_id, symbol)
-            )
-            """
-        )
-        cur.execute(
-            "CREATE INDEX IF NOT EXISTS strategy_opportunity_symbol_opportunity_id ON strategy_opportunity_symbol (strategy_opportunity_id)"
-        )
-        _log_table(
-            "strategy_opportunity_entry_condition",
-            "Opportunity strategy entry conditions",
-        )
-        cur.execute(
-            """
-            CREATE TABLE IF NOT EXISTS strategy_opportunity_entry_condition (
-                strategy_opportunity_entry_condition_id bigserial PRIMARY KEY,
-                strategy_opportunity_id bigint NOT NULL REFERENCES strategy_opportunity(strategy_opportunity_id) ON DELETE CASCADE,
-                condition_type text NOT NULL,
-                value_text text,
-                value_numeric double precision,
-                sort_order integer NOT NULL DEFAULT 0
-            )
-            """
-        )
-        cur.execute(
-            "CREATE INDEX IF NOT EXISTS strategy_opportunity_entry_condition_opportunity_id ON strategy_opportunity_entry_condition (strategy_opportunity_id)"
         )
         _log_table(
             "strategy_instance", "Strategy instance (one open per opportunity/account)"
@@ -687,6 +567,7 @@ def _ensure_tables(conn, log=None, log_table=None) -> None:
             "CREATE INDEX IF NOT EXISTS strategy_allocation_opportunity_opportunity_id "
             "ON strategy_allocation_opportunity (strategy_opportunity_id)"
         )
+        migrate_wave9_strategy_collapse(cur)
         _ensure_settings_active_refs_fk(cur)
         _log("strategy_history retired (Wave 3)")
         _retire_strategy_history(cur)

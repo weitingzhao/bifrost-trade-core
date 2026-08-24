@@ -1,12 +1,39 @@
 """Strategy structure readers. Used by StatusReader and API."""
 
+import json
 from typing import Any, Dict, List, Optional
 
 from psycopg2.extras import RealDictCursor
 
 
+def _parse_json(raw: Any, default: Any) -> Any:
+    if raw is None:
+        return default
+    if isinstance(raw, str):
+        return json.loads(raw)
+    return raw
+
+
+def _structure_legs_from_row(row: Dict[str, Any]) -> List[Dict[str, Any]]:
+    legs = _parse_json(row.get("legs_json"), [])
+    if isinstance(legs, list) and legs:
+        return [
+            {
+                "role": leg.get("role"),
+                "direction": leg.get("direction"),
+                "option_right": leg.get("option_right"),
+                "quantity": leg.get("quantity"),
+                "strike": leg.get("strike"),
+                "expiration": leg.get("expiration"),
+            }
+            for leg in legs
+            if isinstance(leg, dict)
+        ]
+    return []
+
+
 def get_structure_by_id(conn: Any, strategy_structure_id: int) -> Optional[Dict[str, Any]]:
-    """Return one strategy_structure as dict with legs and metadata assembled from child tables."""
+    """Return one strategy_structure as dict with legs and metadata from jsonb columns."""
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(
@@ -18,7 +45,8 @@ def get_structure_by_id(conn: Any, strategy_structure_id: int) -> Optional[Dict[
                        t.dim_direction, t.dim_structure, t.dim_coverage,
                        t.dim_risk, t.dim_volatility, t.dim_time,
                        t.template_code AS template_code, t.display_name AS template_display_name,
-                       s.version, s.is_active, s.created_at, s.updated_at, s.notes
+                       s.version, s.is_active, s.created_at, s.updated_at, s.notes,
+                       s.legs_json, s.meta_json
                 FROM strategy_structure s
                 LEFT JOIN strategy_template t ON t.strategy_template_id = s.strategy_template_id
                 WHERE s.strategy_structure_id = %s
@@ -29,51 +57,13 @@ def get_structure_by_id(conn: Any, strategy_structure_id: int) -> Optional[Dict[
         if row is None:
             return None
         out = dict(row)
-
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute(
-                """
-                SELECT role, direction, option_right, quantity, strike, expiration
-                FROM strategy_structure_leg
-                WHERE strategy_structure_id = %s ORDER BY sort_order
-                """,
-                (strategy_structure_id,),
-            )
-            legs_rows = cur.fetchall()
-        legs = [
-            {
-                "role": r.get("role"),
-                "direction": r.get("direction"),
-                "option_right": r.get("option_right"),
-                "quantity": r.get("quantity"),
-                "strike": r.get("strike"),
-                "expiration": r.get("expiration"),
-            }
-            for r in legs_rows
-        ]
-        out["legs"] = legs
-
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute(
-                """
-                SELECT meta_json
-                FROM strategy_structure
-                WHERE strategy_structure_id = %s
-                """,
-                (strategy_structure_id,),
-            )
-            meta_row = cur.fetchone() or {}
-        raw_meta = meta_row.get("meta_json") or {}
-        if isinstance(raw_meta, str):
-            import json
-
-            raw_meta = json.loads(raw_meta)
+        out["legs"] = _structure_legs_from_row(out)
+        raw_meta = _parse_json(out.pop("meta_json", None), {})
+        out.pop("legs_json", None)
         if isinstance(raw_meta, dict):
-            metadata = {str(k): v for k, v in raw_meta.items() if k}
+            out["metadata"] = {str(k): v for k, v in raw_meta.items() if k}
         else:
-            metadata = {}
-        out["metadata"] = metadata
-
+            out["metadata"] = {}
         return out
     except Exception:
         return None
@@ -94,7 +84,8 @@ def list_structures(conn: Any, active_only: bool = True) -> List[Dict[str, Any]]
                            t.dim_direction, t.dim_structure, t.dim_coverage,
                            t.dim_risk, t.dim_volatility, t.dim_time,
                            t.template_code AS template_code, t.display_name AS template_display_name,
-                           s.version, s.is_active, s.created_at, s.updated_at, s.notes
+                           s.version, s.is_active, s.created_at, s.updated_at, s.notes,
+                           s.legs_json
                     FROM strategy_structure s
                     LEFT JOIN strategy_template t ON t.strategy_template_id = s.strategy_template_id
                     WHERE s.is_active = true
@@ -112,7 +103,8 @@ def list_structures(conn: Any, active_only: bool = True) -> List[Dict[str, Any]]
                            t.dim_direction, t.dim_structure, t.dim_coverage,
                            t.dim_risk, t.dim_volatility, t.dim_time,
                            t.template_code AS template_code, t.display_name AS template_display_name,
-                           s.version, s.is_active, s.created_at, s.updated_at, s.notes
+                           s.version, s.is_active, s.created_at, s.updated_at, s.notes,
+                           s.legs_json
                     FROM strategy_structure s
                     LEFT JOIN strategy_template t ON t.strategy_template_id = s.strategy_template_id
                     ORDER BY s.name
@@ -120,35 +112,9 @@ def list_structures(conn: Any, active_only: bool = True) -> List[Dict[str, Any]]
                 )
             rows = cur.fetchall()
         out = [dict(r) for r in rows]
-        ids = [r["strategy_structure_id"] for r in out]
-        if not ids:
-            return out
-
-        legs_by_id: Dict[int, List[Dict[str, Any]]] = {i: [] for i in ids}
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute(
-                """
-                SELECT strategy_structure_id, role, direction, option_right, quantity, strike, expiration
-                FROM strategy_structure_leg
-                WHERE strategy_structure_id = ANY(%s) ORDER BY strategy_structure_id, sort_order
-                """,
-                (ids,),
-            )
-            for r in cur.fetchall():
-                sid = r["strategy_structure_id"]
-                legs_by_id.setdefault(sid, []).append(
-                    {
-                        "role": r.get("role"),
-                        "direction": r.get("direction"),
-                        "option_right": r.get("option_right"),
-                        "quantity": r.get("quantity"),
-                        "strike": r.get("strike"),
-                        "expiration": r.get("expiration"),
-                    }
-                )
-
         for item in out:
-            item["legs"] = legs_by_id.get(item["strategy_structure_id"], [])
+            item["legs"] = _structure_legs_from_row(item)
+            item.pop("legs_json", None)
         return out
     except Exception:
         return []
@@ -166,9 +132,8 @@ def list_opportunities(conn: Any, active_only: bool = True) -> List[Dict[str, An
                            o.is_active, o.created_at, o.updated_at,
                            s.name AS structure_name,
                            g.name AS gate_safety_name,
-                           (SELECT array_agg(symbol ORDER BY sort_order)
-                            FROM strategy_opportunity_symbol
-                            WHERE strategy_opportunity_id = o.strategy_opportunity_id) AS symbols
+                           (SELECT array_agg(sym ORDER BY ord)
+                            FROM jsonb_array_elements_text(o.symbols_json) WITH ORDINALITY AS t(sym, ord)) AS symbols
                     FROM strategy_opportunity o
                     LEFT JOIN strategy_structure s ON s.strategy_structure_id = o.strategy_structure_id
                     LEFT JOIN gate_safety_strategy g ON g.gate_safety_strategy_id = o.default_gate_safety_strategy_id
@@ -184,9 +149,8 @@ def list_opportunities(conn: Any, active_only: bool = True) -> List[Dict[str, An
                            o.is_active, o.created_at, o.updated_at,
                            s.name AS structure_name,
                            g.name AS gate_safety_name,
-                           (SELECT array_agg(symbol ORDER BY sort_order)
-                            FROM strategy_opportunity_symbol
-                            WHERE strategy_opportunity_id = o.strategy_opportunity_id) AS symbols
+                           (SELECT array_agg(sym ORDER BY ord)
+                            FROM jsonb_array_elements_text(o.symbols_json) WITH ORDINALITY AS t(sym, ord)) AS symbols
                     FROM strategy_opportunity o
                     LEFT JOIN strategy_structure s ON s.strategy_structure_id = o.strategy_structure_id
                     LEFT JOIN gate_safety_strategy g ON g.gate_safety_strategy_id = o.default_gate_safety_strategy_id
@@ -200,7 +164,7 @@ def list_opportunities(conn: Any, active_only: bool = True) -> List[Dict[str, An
 
 
 def get_opportunity_by_id(conn: Any, strategy_opportunity_id: int) -> Optional[Dict[str, Any]]:
-    """Return one strategy_opportunity with structure_name, gate_safety_name, symbols and entry_conditions from child tables."""
+    """Return one strategy_opportunity with symbols and entry_conditions from jsonb columns."""
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(
@@ -208,6 +172,7 @@ def get_opportunity_by_id(conn: Any, strategy_opportunity_id: int) -> Optional[D
                 SELECT o.strategy_opportunity_id, o.name, o.strategy_structure_id,
                        o.default_gate_safety_strategy_id, o.scope_type,
                        o.is_active, o.created_at, o.updated_at,
+                       o.symbols_json, o.entry_conditions_json,
                        s.name AS structure_name,
                        g.name AS gate_safety_name
                 FROM strategy_opportunity o
@@ -221,36 +186,23 @@ def get_opportunity_by_id(conn: Any, strategy_opportunity_id: int) -> Optional[D
         if row is None:
             return None
         out = dict(row)
+        symbols = _parse_json(out.pop("symbols_json", None), [])
+        if not isinstance(symbols, list):
+            symbols = []
+        out["symbols"] = [str(s) for s in symbols if s]
 
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute(
-                "SELECT symbol FROM strategy_opportunity_symbol WHERE strategy_opportunity_id = %s ORDER BY sort_order",
-                (strategy_opportunity_id,),
-            )
-            symbol_rows = cur.fetchall()
-        symbols = [r["symbol"] for r in symbol_rows] if symbol_rows else []
-
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute(
-                """
-                SELECT condition_type, value_text, value_numeric
-                FROM strategy_opportunity_entry_condition
-                WHERE strategy_opportunity_id = %s ORDER BY sort_order
-                """,
-                (strategy_opportunity_id,),
-            )
-            cond_rows = cur.fetchall()
-        entry_conditions = [
+        conds = _parse_json(out.pop("entry_conditions_json", None), [])
+        if not isinstance(conds, list):
+            conds = []
+        out["entry_conditions"] = [
             {
-                "condition_type": r.get("condition_type"),
-                "value_text": r.get("value_text"),
-                "value_numeric": float(r["value_numeric"]) if r.get("value_numeric") is not None else None,
+                "condition_type": c.get("condition_type"),
+                "value_text": c.get("value_text"),
+                "value_numeric": float(c["value_numeric"]) if c.get("value_numeric") is not None else None,
             }
-            for r in cond_rows
+            for c in conds
+            if isinstance(c, dict)
         ]
-
-        out["symbols"] = symbols
-        out["entry_conditions"] = entry_conditions
         return out
     except Exception:
         return None

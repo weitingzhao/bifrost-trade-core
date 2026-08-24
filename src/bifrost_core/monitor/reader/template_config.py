@@ -1,35 +1,33 @@
-"""Read strategy_dim and strategy_template (+ legs, params, characteristics)."""
+"""Read strategy dimensions (catalog) and strategy_template (+ legs_json, params, characteristics)."""
 
+import json
 from typing import Any, Dict, List, Optional
 
 from psycopg2.extras import RealDictCursor
 
+from bifrost_core.monitor.reader import strategy_dim_catalog
+
 
 def list_dims_grouped(conn: Any) -> Dict[str, List[Dict[str, Any]]]:
-    out: Dict[str, List[Dict[str, Any]]] = {}
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute(
-                """
-                SELECT dim_type, code, display_label, sort_order, strategy_dim_id
-                FROM strategy_dim
-                ORDER BY dim_type, sort_order, code
-                """
-            )
-            for r in cur.fetchall():
-                dt = r["dim_type"]
-                out.setdefault(dt, []).append(
-                    {
-                        "strategy_dim_id": r["strategy_dim_id"],
-                        "dim_type": dt,
-                        "code": r["code"],
-                        "display_label": r["display_label"],
-                        "sort_order": r["sort_order"],
-                    }
+            cur.execute("SELECT to_regclass('public.strategy_dim')")
+            if cur.fetchone()[0] is not None:
+                out: Dict[str, List[Dict[str, Any]]] = {}
+                cur.execute(
+                    """
+                    SELECT dim_type, code, display_label, sort_order, strategy_dim_id
+                    FROM strategy_dim
+                    ORDER BY dim_type, sort_order, code
+                    """
                 )
-        return out
+                for r in cur.fetchall():
+                    dt = r["dim_type"]
+                    out.setdefault(dt, []).append(dict(r))
+                return out
     except Exception:
-        return out
+        pass
+    return strategy_dim_catalog.list_dims_grouped()
 
 
 def list_dims_by_type(conn: Any, dim_type: str) -> List[Dict[str, Any]]:
@@ -38,17 +36,50 @@ def list_dims_by_type(conn: Any, dim_type: str) -> List[Dict[str, Any]]:
         return []
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute(
-                """
-                SELECT strategy_dim_id, dim_type, code, display_label, sort_order
-                FROM strategy_dim WHERE dim_type = %s
-                ORDER BY sort_order, code
-                """,
-                (key,),
-            )
-            return [dict(r) for r in cur.fetchall()]
+            cur.execute("SELECT to_regclass('public.strategy_dim')")
+            if cur.fetchone()[0] is not None:
+                cur.execute(
+                    """
+                    SELECT strategy_dim_id, dim_type, code, display_label, sort_order
+                    FROM strategy_dim WHERE dim_type = %s
+                    ORDER BY sort_order, code
+                    """,
+                    (key,),
+                )
+                return [dict(r) for r in cur.fetchall()]
     except Exception:
+        pass
+    return strategy_dim_catalog.list_dims_by_type(key)
+
+
+def _parse_json_field(raw: Any, default: Any) -> Any:
+    if raw is None:
+        return default
+    if isinstance(raw, str):
+        raw = json.loads(raw)
+    return raw
+
+
+def _legs_from_json(raw: Any) -> List[Dict[str, Any]]:
+    legs = _parse_json_field(raw, [])
+    if not isinstance(legs, list):
         return []
+    out: List[Dict[str, Any]] = []
+    for leg in legs:
+        if not isinstance(leg, dict):
+            continue
+        qty = leg.get("quantity_default") or leg.get("quantity") or 1
+        out.append(
+            {
+                "role": leg.get("role"),
+                "direction": leg.get("direction"),
+                "option_right": leg.get("option_right"),
+                "quantity": int(qty) if qty is not None else 1,
+                "strike": leg.get("strike"),
+                "expiration": leg.get("expiration") or "",
+            }
+        )
+    return out
 
 
 def get_template_row(conn: Any, strategy_template_id: int) -> Optional[Dict[str, Any]]:
@@ -96,6 +127,14 @@ def get_template_legs(conn: Any, strategy_template_id: int) -> List[Dict[str, An
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(
+                "SELECT legs_json FROM strategy_template WHERE strategy_template_id = %s",
+                (strategy_template_id,),
+            )
+            row = cur.fetchone()
+        if row and row.get("legs_json") is not None:
+            return _legs_from_json(row["legs_json"])
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
                 """
                 SELECT role, direction, option_right, quantity_default, sort_order
                 FROM strategy_template_leg
@@ -104,17 +143,17 @@ def get_template_legs(conn: Any, strategy_template_id: int) -> List[Dict[str, An
                 (strategy_template_id,),
             )
             rows = cur.fetchall()
-        return [
-            {
-                "role": r.get("role"),
-                "direction": r.get("direction"),
-                "option_right": r.get("option_right"),
-                "quantity": int(r["quantity_default"]) if r.get("quantity_default") is not None else 1,
-                "strike": None,
-                "expiration": "",
-            }
-            for r in rows
-        ]
+        return _legs_from_json(
+            [
+                {
+                    "role": r.get("role"),
+                    "direction": r.get("direction"),
+                    "option_right": r.get("option_right"),
+                    "quantity_default": r.get("quantity_default"),
+                }
+                for r in rows
+            ]
+        )
     except Exception:
         return []
 
@@ -154,19 +193,11 @@ def get_template_detail(conn: Any, strategy_template_id: int) -> Optional[Dict[s
                 (strategy_template_id,),
             )
             jrow = cur.fetchone() or {}
-        params = jrow.get("params_json") or []
-        if isinstance(params, str):
-            import json
-
-            params = json.loads(params)
+        params = _parse_json_field(jrow.get("params_json"), [])
         if not isinstance(params, list):
             params = []
         row["meta_params"] = [dict(p) for p in params if isinstance(p, dict)]
-        chars = jrow.get("characteristics_json") or []
-        if isinstance(chars, str):
-            import json
-
-            chars = json.loads(chars)
+        chars = _parse_json_field(jrow.get("characteristics_json"), [])
         if not isinstance(chars, list):
             chars = []
         row["characteristics"] = [str(c) for c in chars if c is not None and str(c).strip()]

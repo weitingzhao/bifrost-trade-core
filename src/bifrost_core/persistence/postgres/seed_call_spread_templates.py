@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
+from bifrost_core.monitor.reader import strategy_dim_catalog
 from bifrost_core.monitor.reader import template_config
 from bifrost_core.monitor.reader import template_config_write
 
@@ -74,13 +75,8 @@ _CALL_SPREAD_TEMPLATE_SPECS: List[Dict[str, Any]] = [
 
 def _pick_dim_code(conn: Any, dim_type: str, candidates: Sequence[str]) -> Optional[str]:
     for code in candidates:
-        with conn.cursor() as cur:
-            cur.execute(
-                "SELECT 1 FROM strategy_dim WHERE dim_type = %s AND code = %s",
-                (dim_type, code),
-            )
-            if cur.fetchone():
-                return code
+        if strategy_dim_catalog.is_valid_dim_code(dim_type, code):
+            return code
     return None
 
 

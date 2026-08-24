@@ -64,10 +64,19 @@ def test_ddl_does_not_create_retired_gate_safety_children(pg_conn):
             SELECT 1 FROM information_schema.columns
             WHERE table_schema = current_schema()
               AND table_name = 'gate_safety_strategy'
-              AND column_name = 'epsilon_band'
+              AND column_name = 'params_json'
             """
         )
         assert cur.fetchone() is not None
+        cur.execute(
+            """
+            SELECT 1 FROM information_schema.columns
+            WHERE table_schema = current_schema()
+              AND table_name = 'gate_safety_strategy'
+              AND column_name = 'epsilon_band'
+            """
+        )
+        assert cur.fetchone() is None
 
 
 @pytest.fixture

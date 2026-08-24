@@ -1,27 +1,23 @@
 """Gate safety: load gates from DB by gate_safety_strategy_id. Shape compatible with config['gates'] for get_hedge_config."""
 
+import json
 from typing import Any, Dict, List, Optional
 
 from psycopg2.extras import RealDictCursor
 
+from bifrost_core.monitor.schemas.gate_params import GateParams
+
 _GATE_SAFETY_SELECT = """
     SELECT gate_safety_strategy_id, name, version,
            dim_direction, dim_structure, dim_coverage, dim_risk, dim_volatility, dim_time,
-           is_active,
-           min_dte, max_dte, atm_band_pct, blackout_days_before, blackout_days_after,
-           trading_hours_only,
-           epsilon_band, threshold_hedge_shares, max_delta_limit, vol_window_min,
-           stale_ts_threshold_ms, wide_spread_pct, extreme_spread_pct, data_lag_threshold_ms,
-           min_hedge_shares, cooldown_seconds, max_hedge_shares_per_order, min_price_move_pct,
-           max_daily_hedge_count, max_position_shares, max_daily_loss_usd, max_net_delta_shares,
-           max_spread_pct, paper_trade
+           is_active, params_json
     FROM gate_safety_strategy
     WHERE gate_safety_strategy_id = %s
 """
 
 
-def _row_to_gates(row: Dict[str, Any], earnings_dates: List[str]) -> Dict[str, Any]:
-    """Assemble config['gates'] dict from a flattened gate_safety_strategy row."""
+def build_gate_params_from_flat_row(row: Dict[str, Any], earnings_dates: List[str]) -> Dict[str, Any]:
+    """Assemble nested config['gates'] dict from legacy flattened columns (Wave 9 migration)."""
     strategy = {
         "structure": {
             "min_dte": int(row["min_dte"]),
@@ -31,7 +27,7 @@ def _row_to_gates(row: Dict[str, Any], earnings_dates: List[str]) -> Dict[str, A
         "earnings": {
             "blackout_days_before": int(row["blackout_days_before"]),
             "blackout_days_after": int(row["blackout_days_after"]),
-            "dates": earnings_dates,
+            "dates": list(earnings_dates),
         },
         "trading_hours_only": bool(row["trading_hours_only"]),
     }
@@ -79,14 +75,61 @@ def _row_to_gates(row: Dict[str, Any], earnings_dates: List[str]) -> Dict[str, A
     }
 
 
+def _parse_params_json(raw: Any) -> Dict[str, Any]:
+    if raw is None:
+        return GateParams().model_dump()
+    if isinstance(raw, str):
+        raw = json.loads(raw)
+    if isinstance(raw, dict):
+        return GateParams.model_validate(raw).model_dump()
+    return GateParams().model_dump()
+
+
+def _row_to_gates(row: Dict[str, Any], earnings_dates: Optional[List[str]] = None) -> Dict[str, Any]:
+    """Return config['gates'] dict from params_json or legacy flat columns."""
+    if row.get("params_json") is not None:
+        gates = _parse_params_json(row["params_json"])
+        if earnings_dates is not None:
+            strategy = gates.setdefault("strategy", {})
+            earnings = strategy.setdefault("earnings", {})
+            earnings["dates"] = earnings_dates
+        return gates
+    return build_gate_params_from_flat_row(row, earnings_dates or [])
+
+
 def _load_earnings_dates(conn: Any, gate_safety_strategy_id: int) -> List[str]:
-    with conn.cursor(cursor_factory=RealDictCursor) as cur:
-        cur.execute(
-            "SELECT holiday_date FROM gate_safety_strategy_earnings_dates WHERE gate_safety_strategy_id = %s ORDER BY holiday_date",
-            (gate_safety_strategy_id,),
-        )
-        dates_rows = cur.fetchall()
-    return [str(r["holiday_date"]) for r in dates_rows] if dates_rows else []
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT holiday_date FROM gate_safety_strategy_earnings_dates
+                WHERE gate_safety_strategy_id = %s ORDER BY holiday_date
+                """,
+                (gate_safety_strategy_id,),
+            )
+            dates_rows = cur.fetchall()
+        return [str(r["holiday_date"]) for r in dates_rows] if dates_rows else []
+    except Exception:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                "SELECT params_json FROM gate_safety_strategy WHERE gate_safety_strategy_id = %s",
+                (gate_safety_strategy_id,),
+            )
+            row = cur.fetchone()
+        if not row:
+            return []
+        gates = _parse_params_json(row.get("params_json"))
+        dates = gates.get("strategy", {}).get("earnings", {}).get("dates") or []
+        return [str(d) for d in dates if d]
+
+
+def _extract_earnings_dates(row_dict: Dict[str, Any]) -> List[str]:
+    """Earnings dates from params_json when collapsed; legacy rows use child table via conn."""
+    if row_dict.get("params_json") is not None:
+        gates = _parse_params_json(row_dict["params_json"])
+        dates = gates.get("strategy", {}).get("earnings", {}).get("dates") or []
+        return [str(d) for d in dates if d]
+    return []
 
 
 def get_gates_by_id(conn: Any, gate_safety_strategy_id: int) -> Optional[Dict[str, Any]]:
@@ -100,8 +143,11 @@ def get_gates_by_id(conn: Any, gate_safety_strategy_id: int) -> Optional[Dict[st
             row = cur.fetchone()
         if row is None:
             return None
-        earnings_dates = _load_earnings_dates(conn, gate_safety_strategy_id)
-        return _row_to_gates(dict(row), earnings_dates)
+        row_dict = dict(row)
+        earnings_dates = _extract_earnings_dates(row_dict)
+        if not earnings_dates and row_dict.get("params_json") is None:
+            earnings_dates = _load_earnings_dates(conn, gate_safety_strategy_id)
+        return _row_to_gates(row_dict, earnings_dates)
     except Exception:
         return None
 
@@ -177,8 +223,11 @@ def get_gate_safety_full_by_id(conn: Any, gate_safety_strategy_id: int) -> Optio
             row = cur.fetchone()
         if row is None:
             return None
-        earnings_dates = _load_earnings_dates(conn, gate_safety_strategy_id)
-        gates = _row_to_gates(dict(row), earnings_dates)
+        row_dict = dict(row)
+        earnings_dates = _extract_earnings_dates(row_dict)
+        if not earnings_dates and row_dict.get("params_json") is None:
+            earnings_dates = _load_earnings_dates(conn, gate_safety_strategy_id)
+        gates = _row_to_gates(row_dict, earnings_dates)
         return {
             "gate_safety_strategy_id": int(row["gate_safety_strategy_id"]),
             "name": str(row["name"]) if row.get("name") is not None else "",

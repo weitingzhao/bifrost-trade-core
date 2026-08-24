@@ -35,9 +35,10 @@ make db-init        # 初始化/刷新 PostgreSQL schema
 
 ## 版本发布规范
 
-- 修改 `src/bifrost_core/` 中的共享库后，必须 bump `pyproject.toml` 中的 version（当前 **0.15.2**）
+- 修改 `src/bifrost_core/` 中的共享库后，必须 bump `pyproject.toml` 中的 version（当前 **0.17.0**）
 - 其他 repo 通过 git tag 安装：`pip install git+https://github.com/ORG/bifrost-trade-core.git@v0.x.x`
 - 破坏性变更需要同步更新所有依赖 repo 的 pyproject.toml
+- **0.17.0**: Wave 9 — strategy child tables + gate flat cols → jsonb; `strategy_dim` → enum types + catalog; `migrate_wave9_strategy_collapse()`
 - **0.16.0**: Wave 8 — `settings.active_*_id` FK ON DELETE SET NULL; Flex token columns DEPRECATED
 - **0.15.2**: Wave 6.3 — `validate_settings_active_refs()` for settings `active_*_id` write guard; Golden Source canonical docs
 - **0.15.1**: Wave 6.1 config hygiene — remove dead `ops.celery.*` / `use_for_celery_bars` from `config.yaml.example` (Trade Celery retired Wave 5)

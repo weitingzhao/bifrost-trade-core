@@ -24,7 +24,6 @@ EXPECTED_TABLES_BY_CATEGORY: Dict[str, List[str]] = {
     ],
     "gate_safety": [
         "gate_safety_strategy",
-        "gate_safety_strategy_earnings_dates",
     ],
     "job": [],  # Trade Celery job_* tables retired → Plugin ops_jobs / analytics.*
     "preference": [
@@ -39,15 +38,10 @@ EXPECTED_TABLES_BY_CATEGORY: Dict[str, List[str]] = {
     "strategy": [
         "strategy_allocation",
         "strategy_allocation_opportunity",
-        "strategy_dim",
         "strategy_instance",
         "strategy_opportunity",
-        "strategy_opportunity_entry_condition",
-        "strategy_opportunity_symbol",
         "strategy_structure",
-        "strategy_structure_leg",
         "strategy_template",
-        "strategy_template_leg",
     ],
     "watchlist": ["watchlist"],
 }

@@ -63,18 +63,34 @@ Writers open `connect_golden_source()`. Readers stay on the per-env connection a
 
 Process IPC (heartbeat / run_status / control) is **not** in PostgreSQL. `_ensure_tables()` does not create the retired `daemon_*` / `account_sync_*` IPC tables.
 
-## Gate safety (2 tables)
+## Gate safety (1 table)
 
-Safety-boundary config is stored as scalars (no jsonb). Logical grouping (`strategy` / `state` / `intent` / `guard`) exists only in the Python `config['gates']` dict returned by `get_gates_by_id()`.
+Safety-boundary config uses metadata scalars + **`params_json`**. Logical grouping (`strategy` / `state` / `intent` / `guard`) is stored in jsonb and validated by `GateParams` pydantic; `get_gates_by_id()` still returns the legacy `config['gates']` dict shape for daemon/API.
 
 | Table | Relationship | Purpose |
 |-------|--------------|---------|
-| `gate_safety_strategy` | 1 row = 1 boundary set | Metadata + strategy/state/intent/guard scalars (~32 columns) |
-| `gate_safety_strategy_earnings_dates` | 1:N | Earnings blacklist dates (`holiday_date`) |
+| `gate_safety_strategy` | 1 row = 1 boundary set | Metadata + six dims + `params_json` (strategy/state/intent/guard + earnings dates) |
 
-Retired (merged into `gate_safety_strategy` in core `0.8.1`): `gate_safety_state`, `gate_safety_intent`, `gate_safety_guard`. `_ensure_tables()` copies remaining child rows then `DROP TABLE`s them.
+Retired (Wave 9, core **0.17.0**): flat parameter columns on `gate_safety_strategy`, `gate_safety_strategy_earnings_dates`.
+
+Retired (merged into `gate_safety_strategy` in core `0.8.1`): `gate_safety_state`, `gate_safety_intent`, `gate_safety_guard`.
 
 `settings.active_gate_safety_strategy_id` points at the active set. Opportunity / allocation tables keep FK `*_gate_safety_strategy_id`.
+
+## Strategy tables (7 tables)
+
+| Table | jsonb / notes |
+|-------|----------------|
+| `strategy_template` | `legs_json`, `params_json`, `characteristics_json` |
+| `strategy_structure` | `legs_json`, `meta_json` |
+| `strategy_opportunity` | `symbols_json`, `entry_conditions_json` |
+| `strategy_allocation` | scalar limits; N:M via `strategy_allocation_opportunity` |
+| `strategy_instance` | unchanged |
+
+Retired (Wave 9): `strategy_dim` (→ six `dim_*_t` enum types + read-only catalog), `strategy_template_leg`, `strategy_structure_leg`, `strategy_opportunity_symbol`, `strategy_opportunity_entry_condition`.
+
+**Wave 9 — strategy collapse** (core **0.17.0**): one-shot migration `migrate_wave9_strategy_collapse()` in [`wave9_migrations.py`](../src/bifrost_core/persistence/postgres/wave9_migrations.py).
+
 
 ## Brokerage tables
 
