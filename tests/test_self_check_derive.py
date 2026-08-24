@@ -1,4 +1,4 @@
-"""Unit tests for src.monitor.self_check (daemon merge + health roll-up)."""
+"""Unit tests for bifrost_core.monitor.self_check (daemon merge + health roll-up)."""
 
 from __future__ import annotations
 
@@ -41,7 +41,7 @@ def test_daemon_trading_state_in_daemon_self_check() -> None:
     assert any("trading_state" in r for r in out["daemon_block_reasons"])
 
 
-def test_health_roll_up_celery_no_workers() -> None:
+def test_health_roll_up_all_green() -> None:
     hc = derive_health_roll_up(
         daemon_lamp="green",
         daemon_block_reasons=[],
@@ -50,12 +50,10 @@ def test_health_roll_up_celery_no_workers() -> None:
         massive=None,
         ib_ingestor=None,
         quotes_redis_reader_ok=True,
-        celery_broker_connected=True,
-        celery_workers=[],
         ib_account_agent=None,
     )
-    assert hc["self_check"] == "degraded"
-    assert "celery_no_workers" in hc["block_reasons"]
+    assert hc["self_check"] == "ok"
+    assert hc["block_reasons"] == []
 
 
 def test_health_roll_up_quotes_redis_down() -> None:
@@ -67,8 +65,6 @@ def test_health_roll_up_quotes_redis_down() -> None:
         massive=None,
         ib_ingestor=None,
         quotes_redis_reader_ok=False,
-        celery_broker_connected=True,
-        celery_workers=["w1"],
         ib_account_agent=None,
     )
     assert hc["self_check"] == "degraded"

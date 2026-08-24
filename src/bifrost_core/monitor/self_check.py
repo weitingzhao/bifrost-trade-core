@@ -179,17 +179,6 @@ def _socket_segment(
     return rank, reasons
 
 
-def _celery_segment(
-    celery_broker_connected: bool,
-    celery_workers: List[str],
-) -> tuple[int, List[str]]:
-    if not celery_broker_connected:
-        return 2, ["celery_broker_down"]
-    if not celery_workers:
-        return 2, ["celery_no_workers"]
-    return 1, []
-
-
 def derive_health_roll_up(
     *,
     daemon_lamp: str,
@@ -199,20 +188,18 @@ def derive_health_roll_up(
     massive: Optional[Dict[str, Any]],
     ib_ingestor: Optional[Dict[str, Any]],
     quotes_redis_reader_ok: bool,
-    celery_broker_connected: bool,
-    celery_workers: List[str],
     ib_account_agent: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    """System health: worst of daemon, socket/quotes, Celery, and Monitor lamps (with merged block_reasons)."""
+    """System health: worst of daemon, socket/quotes, and Monitor lamps (with merged block_reasons).
+
+    Wave 5: Celery segment removed (Trade Celery retired).
+    """
     dr = _lamp_rank(daemon_lamp)
     mr = _lamp_rank(monitor_lamp)
     sr, socket_reasons = _socket_segment(
         massive, ib_ingestor, ib_account_agent, quotes_redis_reader_ok
     )
-    cr, celery_reasons = _celery_segment(
-        celery_broker_connected, celery_workers
-    )
-    worst = max(dr, mr, sr, cr)
+    worst = max(dr, mr, sr)
     base = _rank_to_health(worst)
 
     br: List[str] = []
@@ -220,8 +207,6 @@ def derive_health_roll_up(
         br.extend(daemon_block_reasons or [])
     if sr >= 2:
         br.extend(socket_reasons)
-    if cr >= 2:
-        br.extend(celery_reasons)
     if mr >= 2:
         br.extend(monitor_block_reasons or [])
 
