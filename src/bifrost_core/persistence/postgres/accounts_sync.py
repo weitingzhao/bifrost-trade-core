@@ -11,7 +11,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from psycopg2.extras import Json
 
-from bifrost_core.persistence.postgres.brokerage_tables import ACCOUNT, POSITIONS
+from bifrost_core.persistence.postgres.brokerage_tables import GOLDEN_ACCOUNT, GOLDEN_POSITIONS
 
 logger = logging.getLogger(__name__)
 
@@ -109,7 +109,7 @@ def sync_accounts_snapshot_to_tables(
             # account: upsert by account_id (no delete)
             cur.execute(
                 f"""
-                INSERT INTO {ACCOUNT} (account_id, updated_at, net_liquidation, total_cash, buying_power, summary_extra)
+                INSERT INTO {GOLDEN_ACCOUNT} (account_id, updated_at, net_liquidation, total_cash, buying_power, summary_extra)
                 VALUES (%s, now(), %s, %s, %s, %s)
                 ON CONFLICT (account_id) DO UPDATE SET
                     updated_at = now(),
@@ -170,7 +170,7 @@ def sync_accounts_snapshot_to_tables(
                         contract_key = f"{sym}|{sec}|||"
                     cur.execute(
                         f"""
-                        INSERT INTO {POSITIONS} (account_id, symbol, sec_type, exchange, currency, position, avg_cost, expiry, strike, option_right, contract_key, updated_at)
+                        INSERT INTO {GOLDEN_POSITIONS} (account_id, symbol, sec_type, exchange, currency, position, avg_cost, expiry, strike, option_right, contract_key, updated_at)
                         VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, now())
                         ON CONFLICT (account_id, contract_key) DO UPDATE SET
                             exchange = EXCLUDED.exchange,
@@ -201,12 +201,12 @@ def sync_accounts_snapshot_to_tables(
             if seen_keys:
                 cur.execute(
                     f"""
-                    DELETE FROM {POSITIONS}
+                    DELETE FROM {GOLDEN_POSITIONS}
                     WHERE account_id = %s AND (contract_key IS NULL OR contract_key != ALL(%s::text[]))
                     """,
                     (account_id, seen_keys),
                 )
             else:
                 cur.execute(
-                    f"DELETE FROM {POSITIONS} WHERE account_id = %s", (account_id,)
+                    f"DELETE FROM {GOLDEN_POSITIONS} WHERE account_id = %s", (account_id,)
                 )

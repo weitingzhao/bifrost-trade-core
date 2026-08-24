@@ -28,10 +28,11 @@ from bifrost_core.persistence.postgres.accounts_sync import (
     sync_accounts_snapshot_to_tables,
 )
 from bifrost_core.persistence.postgres.brokerage_tables import (
-    COMMISSIONS,
     CONTRACT_QUOTE_LIVE,
-    EXECUTIONS_RAW_TWS,
-    OPEN_ORDERS,
+    GOLDEN_COMMISSIONS,
+    GOLDEN_CONTRACT_QUOTE_LIVE,
+    GOLDEN_EXECUTIONS_RAW_TWS,
+    GOLDEN_OPEN_ORDERS,
     POSITIONS,
 )
 from bifrost_core.persistence import redis_daemon_state as rds
@@ -295,7 +296,7 @@ class PostgreSQLSink(StatusSink):
                         continue
                     cur.execute(
                         f"""
-                        INSERT INTO {CONTRACT_QUOTE_LIVE} (
+                        INSERT INTO {GOLDEN_CONTRACT_QUOTE_LIVE} (
                             contract_key, symbol, sec_type, expiry, strike, option_right,
                             last, bid, ask, mid, updated_at
                         )
@@ -541,7 +542,7 @@ class PostgreSQLSink(StatusSink):
                         if exec_id:
                             cur.execute(
                                 f"""
-                                INSERT INTO {EXECUTIONS_RAW_TWS} ({cols})
+                                INSERT INTO {GOLDEN_EXECUTIONS_RAW_TWS} ({cols})
                                 VALUES ({placeholders})
                                 ON CONFLICT (exec_id) WHERE exec_id IS NOT NULL AND exec_id != '' DO NOTHING
                                 """,
@@ -550,7 +551,7 @@ class PostgreSQLSink(StatusSink):
                         else:
                             cur.execute(
                                 f"""
-                                INSERT INTO {EXECUTIONS_RAW_TWS} ({cols})
+                                INSERT INTO {GOLDEN_EXECUTIONS_RAW_TWS} ({cols})
                                 VALUES ({placeholders})
                                 """,
                                 vals,
@@ -590,28 +591,28 @@ class PostgreSQLSink(StatusSink):
                     if exec_id and has_comm:
                         cur.execute(
                             f"""
-                            INSERT INTO {COMMISSIONS} (exec_id, commission, currency, realized_pnl, yield_, yield_redemption_date)
+                            INSERT INTO {GOLDEN_COMMISSIONS} (exec_id, commission, currency, realized_pnl, yield_, yield_redemption_date)
                             VALUES (%s, %s, %s, %s, %s, %s)
                             ON CONFLICT (exec_id) DO UPDATE SET
                                 commission = CASE
                                     WHEN EXCLUDED.commission IS NOT NULL AND EXCLUDED.commission != 0 THEN EXCLUDED.commission
-                                    ELSE {COMMISSIONS}.commission
+                                    ELSE {GOLDEN_COMMISSIONS}.commission
                                 END,
                                 currency = CASE
                                     WHEN EXCLUDED.currency IS NOT NULL AND TRIM(COALESCE(EXCLUDED.currency, '')) != '' THEN EXCLUDED.currency
-                                    ELSE {COMMISSIONS}.currency
+                                    ELSE {GOLDEN_COMMISSIONS}.currency
                                 END,
                                 realized_pnl = CASE
                                     WHEN EXCLUDED.realized_pnl IS NOT NULL AND EXCLUDED.realized_pnl != 0 THEN EXCLUDED.realized_pnl
-                                    ELSE {COMMISSIONS}.realized_pnl
+                                    ELSE {GOLDEN_COMMISSIONS}.realized_pnl
                                 END,
                                 yield_ = CASE
                                     WHEN EXCLUDED.yield_ IS NOT NULL AND EXCLUDED.yield_ != 0 THEN EXCLUDED.yield_
-                                    ELSE {COMMISSIONS}.yield_
+                                    ELSE {GOLDEN_COMMISSIONS}.yield_
                                 END,
                                 yield_redemption_date = CASE
                                     WHEN EXCLUDED.yield_redemption_date IS NOT NULL AND EXCLUDED.yield_redemption_date != 0 THEN EXCLUDED.yield_redemption_date
-                                    ELSE {COMMISSIONS}.yield_redemption_date
+                                    ELSE {GOLDEN_COMMISSIONS}.yield_redemption_date
                                 END
                             """,
                             (exec_id, commission_val, currency_val, realized_pnl_val, yield_val, yield_redemption_date_val),
@@ -649,28 +650,28 @@ class PostgreSQLSink(StatusSink):
             with self._golden_conn.cursor() as cur:
                 cur.execute(
                     f"""
-                    INSERT INTO {COMMISSIONS} (exec_id, commission, currency, realized_pnl, yield_, yield_redemption_date)
+                    INSERT INTO {GOLDEN_COMMISSIONS} (exec_id, commission, currency, realized_pnl, yield_, yield_redemption_date)
                     VALUES (%s, %s, %s, %s, %s, %s)
                     ON CONFLICT (exec_id) DO UPDATE SET
                         commission = CASE
                             WHEN EXCLUDED.commission IS NOT NULL AND EXCLUDED.commission != 0 THEN EXCLUDED.commission
-                            ELSE {COMMISSIONS}.commission
+                            ELSE {GOLDEN_COMMISSIONS}.commission
                         END,
                         currency = CASE
                             WHEN EXCLUDED.currency IS NOT NULL AND TRIM(COALESCE(EXCLUDED.currency, '')) != '' THEN EXCLUDED.currency
-                            ELSE {COMMISSIONS}.currency
+                            ELSE {GOLDEN_COMMISSIONS}.currency
                         END,
                         realized_pnl = CASE
                             WHEN EXCLUDED.realized_pnl IS NOT NULL AND EXCLUDED.realized_pnl != 0 THEN EXCLUDED.realized_pnl
-                            ELSE {COMMISSIONS}.realized_pnl
+                            ELSE {GOLDEN_COMMISSIONS}.realized_pnl
                         END,
                         yield_ = CASE
                             WHEN EXCLUDED.yield_ IS NOT NULL AND EXCLUDED.yield_ != 0 THEN EXCLUDED.yield_
-                            ELSE {COMMISSIONS}.yield_
+                            ELSE {GOLDEN_COMMISSIONS}.yield_
                         END,
                         yield_redemption_date = CASE
                             WHEN EXCLUDED.yield_redemption_date IS NOT NULL AND EXCLUDED.yield_redemption_date != 0 THEN EXCLUDED.yield_redemption_date
-                            ELSE {COMMISSIONS}.yield_redemption_date
+                            ELSE {GOLDEN_COMMISSIONS}.yield_redemption_date
                         END
                     """,
                     (exec_id, commission_val, currency_val, realized_pnl_val, yield_val, yield_redemption_date_val),
@@ -686,12 +687,12 @@ class PostgreSQLSink(StatusSink):
             return
         try:
             with self._golden_conn.cursor() as cur:
-                cur.execute(f"TRUNCATE TABLE {OPEN_ORDERS}")
+                cur.execute(f"TRUNCATE TABLE {GOLDEN_OPEN_ORDERS}")
                 if orders:
                     for o in orders:
                         cur.execute(
                             f"""
-                            INSERT INTO {OPEN_ORDERS}
+                            INSERT INTO {GOLDEN_OPEN_ORDERS}
                             (order_id, perm_id, account_id, symbol, sec_type, action, total_quantity,
                              filled, remaining, limit_price, status, contract_key, updated_ts)
                             VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, now())

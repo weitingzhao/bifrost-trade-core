@@ -110,15 +110,16 @@ def ensure_brokerage_schema(
     *,
     log: Optional[Callable[[str], None]] = None,
 ) -> None:
-    """Create brokerage schema + tables + views on bifrost_golden_source."""
+    """Create raw_broker schema + tables + views on bifrost_golden_source."""
+    physical = GOLDEN_SOURCE_BROKERAGE_SCHEMA
     _log = log or (lambda m: logger.info("%s", m))
     with conn.cursor() as cur:
-        cur.execute(f"CREATE SCHEMA IF NOT EXISTS {SCHEMA}")
-        _log(f"schema {SCHEMA}")
+        cur.execute(f"CREATE SCHEMA IF NOT EXISTS {physical}")
+        _log(f"schema {physical}")
 
         cur.execute(
             f"""
-            CREATE TABLE IF NOT EXISTS {SCHEMA}.account (
+            CREATE TABLE IF NOT EXISTS {physical}.account (
                 account_id text PRIMARY KEY,
                 updated_at timestamptz DEFAULT now(),
                 net_liquidation double precision,
@@ -128,11 +129,11 @@ def ensure_brokerage_schema(
             )
             """
         )
-        _log(f"{SCHEMA}.account")
+        _log(f"{physical}.account")
 
         cur.execute(
             f"""
-            CREATE TABLE IF NOT EXISTS {SCHEMA}.positions (
+            CREATE TABLE IF NOT EXISTS {physical}.positions (
                 account_id text NOT NULL,
                 contract_key text NOT NULL,
                 symbol text,
@@ -152,14 +153,14 @@ def ensure_brokerage_schema(
         cur.execute(
             f"""
             CREATE UNIQUE INDEX IF NOT EXISTS brokerage_positions_account_contract_key
-            ON {SCHEMA}.positions (account_id, contract_key)
+            ON {physical}.positions (account_id, contract_key)
             """
         )
-        _log(f"{SCHEMA}.positions")
+        _log(f"{physical}.positions")
 
         cur.execute(
             f"""
-            CREATE TABLE IF NOT EXISTS {SCHEMA}.contract_quote_live (
+            CREATE TABLE IF NOT EXISTS {physical}.contract_quote_live (
                 contract_key text PRIMARY KEY,
                 symbol text,
                 sec_type text,
@@ -174,11 +175,11 @@ def ensure_brokerage_schema(
             )
             """
         )
-        _log(f"{SCHEMA}.contract_quote_live")
+        _log(f"{physical}.contract_quote_live")
 
         cur.execute(
             f"""
-            CREATE TABLE IF NOT EXISTS {SCHEMA}.commissions (
+            CREATE TABLE IF NOT EXISTS {physical}.commissions (
                 exec_id text PRIMARY KEY,
                 commission double precision,
                 currency text,
@@ -189,11 +190,11 @@ def ensure_brokerage_schema(
             )
             """
         )
-        _log(f"{SCHEMA}.commissions")
+        _log(f"{physical}.commissions")
 
         cur.execute(
             f"""
-            CREATE TABLE IF NOT EXISTS {SCHEMA}.transactions (
+            CREATE TABLE IF NOT EXISTS {physical}.transactions (
                 account_transactions_id bigserial PRIMARY KEY,
                 account_id text NOT NULL,
                 ts timestamptz NOT NULL,
@@ -222,13 +223,13 @@ def ensure_brokerage_schema(
         )
         cur.execute(
             f"CREATE INDEX IF NOT EXISTS brokerage_transactions_account_ts "
-            f"ON {SCHEMA}.transactions (account_id, ts DESC)"
+            f"ON {physical}.transactions (account_id, ts DESC)"
         )
-        _log(f"{SCHEMA}.transactions")
+        _log(f"{physical}.transactions")
 
         cur.execute(
             f"""
-            CREATE TABLE IF NOT EXISTS {SCHEMA}.open_orders (
+            CREATE TABLE IF NOT EXISTS {physical}.open_orders (
                 id bigserial PRIMARY KEY,
                 order_id integer NOT NULL,
                 perm_id integer,
@@ -246,11 +247,11 @@ def ensure_brokerage_schema(
             )
             """
         )
-        _log(f"{SCHEMA}.open_orders")
+        _log(f"{physical}.open_orders")
 
         cur.execute(
             f"""
-            CREATE TABLE IF NOT EXISTS {SCHEMA}.settings_flex (
+            CREATE TABLE IF NOT EXISTS {physical}.settings_flex (
                 id serial PRIMARY KEY,
                 sort_order integer NOT NULL DEFAULT 0,
                 query_label text,
@@ -260,11 +261,11 @@ def ensure_brokerage_schema(
             )
             """
         )
-        _log(f"{SCHEMA}.settings_flex")
+        _log(f"{physical}.settings_flex")
 
         cur.execute(
             f"""
-            CREATE TABLE IF NOT EXISTS {SCHEMA}.executions_raw_tws (
+            CREATE TABLE IF NOT EXISTS {physical}.executions_raw_tws (
                 executions_raw_tws_id bigserial PRIMARY KEY,
                 {_EXEC_RAW_COLUMNS_DDL}
             )
@@ -272,23 +273,23 @@ def ensure_brokerage_schema(
         )
         cur.execute(
             f"CREATE UNIQUE INDEX IF NOT EXISTS brokerage_executions_raw_tws_exec_id_key "
-            f"ON {SCHEMA}.executions_raw_tws (exec_id) "
+            f"ON {physical}.executions_raw_tws (exec_id) "
             f"WHERE exec_id IS NOT NULL AND exec_id != ''"
         )
         cur.execute(
             f"CREATE INDEX IF NOT EXISTS brokerage_executions_raw_tws_account_time "
-            f"ON {SCHEMA}.executions_raw_tws (account_id, exec_time DESC)"
+            f"ON {physical}.executions_raw_tws (account_id, exec_time DESC)"
         )
         cur.execute(
             f"CREATE INDEX IF NOT EXISTS brokerage_executions_raw_tws_contract_key "
-            f"ON {SCHEMA}.executions_raw_tws (account_id, contract_key) "
+            f"ON {physical}.executions_raw_tws (account_id, contract_key) "
             f"WHERE contract_key IS NOT NULL"
         )
-        _log(f"{SCHEMA}.executions_raw_tws")
+        _log(f"{physical}.executions_raw_tws")
 
         cur.execute(
             f"""
-            CREATE TABLE IF NOT EXISTS {SCHEMA}.executions_raw_flex (
+            CREATE TABLE IF NOT EXISTS {physical}.executions_raw_flex (
                 executions_raw_flex_id bigserial PRIMARY KEY,
                 {_EXEC_RAW_COLUMNS_DDL.replace("source text,", "source text DEFAULT 'flex_trades',", 1)}
             )
@@ -296,28 +297,28 @@ def ensure_brokerage_schema(
         )
         cur.execute(
             f"CREATE UNIQUE INDEX IF NOT EXISTS brokerage_executions_raw_flex_exec_id_key "
-            f"ON {SCHEMA}.executions_raw_flex (exec_id) "
+            f"ON {physical}.executions_raw_flex (exec_id) "
             f"WHERE exec_id IS NOT NULL AND exec_id != ''"
         )
         cur.execute(
             f"CREATE UNIQUE INDEX IF NOT EXISTS brokerage_executions_raw_flex_account_trade_id_key "
-            f"ON {SCHEMA}.executions_raw_flex (account_id, trade_id) "
+            f"ON {physical}.executions_raw_flex (account_id, trade_id) "
             f"WHERE trade_id IS NOT NULL AND trade_id != ''"
         )
         cur.execute(
             f"CREATE INDEX IF NOT EXISTS brokerage_executions_raw_flex_account_time "
-            f"ON {SCHEMA}.executions_raw_flex (account_id, exec_time DESC)"
+            f"ON {physical}.executions_raw_flex (account_id, exec_time DESC)"
         )
         cur.execute(
             f"CREATE INDEX IF NOT EXISTS brokerage_executions_raw_flex_contract_key "
-            f"ON {SCHEMA}.executions_raw_flex (account_id, contract_key) "
+            f"ON {physical}.executions_raw_flex (account_id, contract_key) "
             f"WHERE contract_key IS NOT NULL"
         )
-        _log(f"{SCHEMA}.executions_raw_flex")
+        _log(f"{physical}.executions_raw_flex")
 
         cur.execute(
             f"""
-            CREATE TABLE IF NOT EXISTS {SCHEMA}.executions_raw_journal (
+            CREATE TABLE IF NOT EXISTS {physical}.executions_raw_journal (
                 executions_raw_journal_id bigserial PRIMARY KEY,
                 {_EXEC_RAW_COLUMNS_DDL}
             )
@@ -325,42 +326,42 @@ def ensure_brokerage_schema(
         )
         cur.execute(
             f"CREATE UNIQUE INDEX IF NOT EXISTS brokerage_executions_raw_journal_exec_id_key "
-            f"ON {SCHEMA}.executions_raw_journal (exec_id) "
+            f"ON {physical}.executions_raw_journal (exec_id) "
             f"WHERE exec_id IS NOT NULL AND exec_id != ''"
         )
         cur.execute(
             f"CREATE INDEX IF NOT EXISTS brokerage_executions_raw_journal_account_time "
-            f"ON {SCHEMA}.executions_raw_journal (account_id, exec_time DESC)"
+            f"ON {physical}.executions_raw_journal (account_id, exec_time DESC)"
         )
-        _log(f"{SCHEMA}.executions_raw_journal")
+        _log(f"{physical}.executions_raw_journal")
 
-        _create_brokerage_views(cur)
-        _log(f"{SCHEMA}.executions / executions_final / executions_fly views")
+        _create_brokerage_views(cur, physical)
+        _log(f"{physical}.executions / executions_final / executions_fly views")
 
-        _grant_brokerage_privileges(cur)
+        _grant_brokerage_privileges(cur, physical)
         _log("granted privileges (best-effort)")
 
     conn.commit()
 
 
-def _create_brokerage_views(cur: Any) -> None:
+def _create_brokerage_views(cur: Any, schema: str) -> None:
     cols = _EXEC_CANONICAL_COLS
-    cur.execute(f"DROP VIEW IF EXISTS {SCHEMA}.executions_fly CASCADE")
-    cur.execute(f"DROP VIEW IF EXISTS {SCHEMA}.executions_final CASCADE")
-    cur.execute(f"DROP VIEW IF EXISTS {SCHEMA}.executions CASCADE")
+    cur.execute(f"DROP VIEW IF EXISTS {schema}.executions_fly CASCADE")
+    cur.execute(f"DROP VIEW IF EXISTS {schema}.executions_final CASCADE")
+    cur.execute(f"DROP VIEW IF EXISTS {schema}.executions CASCADE")
 
     cur.execute(
         f"""
-        CREATE OR REPLACE VIEW {SCHEMA}.executions AS
+        CREATE OR REPLACE VIEW {schema}.executions AS
         SELECT executions_raw_flex_id AS account_executions_id,
                {cols}
-        FROM {SCHEMA}.executions_raw_flex
+        FROM {schema}.executions_raw_flex
         UNION ALL
         SELECT -(executions_raw_tws_id) AS account_executions_id,
                {cols}
-        FROM {SCHEMA}.executions_raw_tws t
+        FROM {schema}.executions_raw_tws t
         WHERE NOT EXISTS (
-            SELECT 1 FROM {SCHEMA}.executions_raw_flex f
+            SELECT 1 FROM {schema}.executions_raw_flex f
             WHERE f.exec_id = t.exec_id
               AND f.exec_id IS NOT NULL AND f.exec_id != ''
               AND t.exec_id IS NOT NULL AND t.exec_id != ''
@@ -368,20 +369,20 @@ def _create_brokerage_views(cur: Any) -> None:
         UNION ALL
         SELECT -(1000000000 + executions_raw_journal_id) AS account_executions_id,
                {cols}
-        FROM {SCHEMA}.executions_raw_journal
+        FROM {schema}.executions_raw_journal
         """
     )
 
     cur.execute(
         f"""
-        CREATE OR REPLACE VIEW {SCHEMA}.executions_final AS
+        CREATE OR REPLACE VIEW {schema}.executions_final AS
         SELECT executions_raw_flex_id AS account_executions_id,
                {cols}
-        FROM {SCHEMA}.executions_raw_flex
+        FROM {schema}.executions_raw_flex
         UNION ALL
         SELECT -(1000000000 + executions_raw_journal_id) AS account_executions_id,
                {cols}
-        FROM {SCHEMA}.executions_raw_journal
+        FROM {schema}.executions_raw_journal
         """
     )
 
@@ -397,14 +398,14 @@ def _create_brokerage_views(cur: Any) -> None:
     )
     cur.execute(
         f"""
-        CREATE OR REPLACE VIEW {SCHEMA}.executions_fly AS
+        CREATE OR REPLACE VIEW {schema}.executions_fly AS
         SELECT -(t.executions_raw_tws_id) AS account_executions_id,
                {exec_cols_t}
-        FROM {SCHEMA}.executions_raw_tws t
+        FROM {schema}.executions_raw_tws t
         WHERE upper(trim(COALESCE(t.sec_type, ''))) <> 'BAG'
           AND NOT EXISTS (
             SELECT 1
-            FROM {SCHEMA}.executions_final f
+            FROM {schema}.executions_final f
             WHERE f.account_id IS NOT DISTINCT FROM t.account_id
               AND (
                 (
@@ -432,33 +433,33 @@ def _create_brokerage_views(cur: Any) -> None:
     )
 
 
-def _grant_brokerage_privileges(cur: Any) -> None:
+def _grant_brokerage_privileges(cur: Any, schema: str) -> None:
     """Grant to known roles when present (roles may need superuser to create)."""
     for role in ("brokerage_writer", "brokerage_reader", "bifrost", "data_writer"):
         cur.execute("SELECT 1 FROM pg_roles WHERE rolname = %s", (role,))
         if not cur.fetchone():
             continue
-        cur.execute(f"GRANT USAGE ON SCHEMA {SCHEMA} TO {role}")
+        cur.execute(f"GRANT USAGE ON SCHEMA {schema} TO {role}")
         if role in ("brokerage_writer", "bifrost", "data_writer"):
             cur.execute(
                 f"GRANT SELECT, INSERT, UPDATE, DELETE, TRUNCATE ON ALL TABLES "
-                f"IN SCHEMA {SCHEMA} TO {role}"
+                f"IN SCHEMA {schema} TO {role}"
             )
             cur.execute(
-                f"GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA {SCHEMA} TO {role}"
+                f"GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA {schema} TO {role}"
             )
             cur.execute(
-                f"ALTER DEFAULT PRIVILEGES IN SCHEMA {SCHEMA} "
+                f"ALTER DEFAULT PRIVILEGES IN SCHEMA {schema} "
                 f"GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO {role}"
             )
             cur.execute(
-                f"ALTER DEFAULT PRIVILEGES IN SCHEMA {SCHEMA} "
+                f"ALTER DEFAULT PRIVILEGES IN SCHEMA {schema} "
                 f"GRANT USAGE, SELECT ON SEQUENCES TO {role}"
             )
         else:
-            cur.execute(f"GRANT SELECT ON ALL TABLES IN SCHEMA {SCHEMA} TO {role}")
+            cur.execute(f"GRANT SELECT ON ALL TABLES IN SCHEMA {schema} TO {role}")
             cur.execute(
-                f"ALTER DEFAULT PRIVILEGES IN SCHEMA {SCHEMA} "
+                f"ALTER DEFAULT PRIVILEGES IN SCHEMA {schema} "
                 f"GRANT SELECT ON TABLES TO {role}"
             )
 
@@ -577,7 +578,7 @@ def setup_fdw_foreign_tables(
             f"imported foreign tables from {GOLDEN_SOURCE_BROKERAGE_SCHEMA}: {table_list}"
         )
 
-        _create_brokerage_views(cur)
+        _create_brokerage_views(cur, SCHEMA)
         _log("local views over foreign tables")
 
         cur.execute(f"GRANT USAGE ON SCHEMA {SCHEMA} TO {local_user}")

@@ -1,6 +1,6 @@
 """PostgreSQL DDL: current schema (CREATE TABLE IF NOT EXISTS + indexes only)."""
 
-# IB / brokerage tables live in bifrost_golden_source.brokerage.* (see brokerage_ddl.py).
+# IB / brokerage tables live in bifrost_golden_source.raw_broker.* (see brokerage_ddl.py).
 # Per-env DBs expose them via postgres_fdw. Do not recreate in public.
 # Bridge tables (account_execution_instance_allocation, account_execution_option_stock_link)
 # stay in per-env public — they FK strategy_instance.

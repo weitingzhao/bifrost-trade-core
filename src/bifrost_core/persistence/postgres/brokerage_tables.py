@@ -8,8 +8,9 @@ so readers can JOIN brokerage data with public strategy/preference tables on one
 from __future__ import annotations
 
 SCHEMA = "brokerage"
+GOLDEN_SCHEMA = "raw_broker"
 
-# Physical tables
+# Per-env FDW local schema (brokerage.* foreign tables + views)
 ACCOUNT = f"{SCHEMA}.account"
 POSITIONS = f"{SCHEMA}.positions"
 EXECUTIONS_RAW_TWS = f"{SCHEMA}.executions_raw_tws"
@@ -20,6 +21,18 @@ TRANSACTIONS = f"{SCHEMA}.transactions"
 OPEN_ORDERS = f"{SCHEMA}.open_orders"
 CONTRACT_QUOTE_LIVE = f"{SCHEMA}.contract_quote_live"
 SETTINGS_FLEX = f"{SCHEMA}.settings_flex"
+
+# Golden Source physical writes (bifrost_golden_source.raw_broker.*)
+GOLDEN_ACCOUNT = f"{GOLDEN_SCHEMA}.account"
+GOLDEN_POSITIONS = f"{GOLDEN_SCHEMA}.positions"
+GOLDEN_EXECUTIONS_RAW_TWS = f"{GOLDEN_SCHEMA}.executions_raw_tws"
+GOLDEN_EXECUTIONS_RAW_FLEX = f"{GOLDEN_SCHEMA}.executions_raw_flex"
+GOLDEN_EXECUTIONS_RAW_JOURNAL = f"{GOLDEN_SCHEMA}.executions_raw_journal"
+GOLDEN_COMMISSIONS = f"{GOLDEN_SCHEMA}.commissions"
+GOLDEN_TRANSACTIONS = f"{GOLDEN_SCHEMA}.transactions"
+GOLDEN_OPEN_ORDERS = f"{GOLDEN_SCHEMA}.open_orders"
+GOLDEN_CONTRACT_QUOTE_LIVE = f"{GOLDEN_SCHEMA}.contract_quote_live"
+GOLDEN_SETTINGS_FLEX = f"{GOLDEN_SCHEMA}.settings_flex"
 
 # Views (Flex-authoritative merge + performance / on-the-fly subsets)
 EXECUTIONS = f"{SCHEMA}.executions"
