@@ -1,5 +1,21 @@
 # DATABASE.md — bifrost-core schema map
 
+## Golden Source canonical schemas (Wave 6.3)
+
+Use these names in docs, catalogs, and new code. Legacy aliases appear only in migration scripts and historical program YAML.
+
+| Canonical | Legacy alias (historical only) | Owner |
+|-----------|-------------------------------|--------|
+| `raw_market.*` | `market.*` (Golden Source physical rename) | Market Data Plugin |
+| `features_daily.*` | `market_analytics.*` | Research volatility + Plugin DDL bootstrap |
+| `dw_stock.*` | `analytics.*` | bifrost-research dbt |
+| `ops_jobs.*` | `data_ops.*` (view shim on GS for platform-api probe) | Market Data + Flex Query Plugins |
+| `raw_broker.*` | per-env FDW local name `brokerage.*` | IB / Flex + core FDW |
+| `features_option.*` / `features_signals.*` / `features_forecasts.*` / `features_backtests.*` | `research.*`, `signals.*`, etc. | Research engines |
+| `ops_dbt.*` | `analytics_elementary.*` | dbt Elementary |
+
+Retention policy matrix: [GOLDEN_SOURCE_RETENTION.md](../../bifrost-trade-infra/docs/GOLDEN_SOURCE_RETENTION.md) (infra repo).
+
 Authoritative runtime DDL:
 
 | Domain | Module | Database |
@@ -8,7 +24,7 @@ Authoritative runtime DDL:
 | Daemon / Account Sync process IPC | [`redis_daemon_state.py`](../src/bifrost_core/persistence/redis_daemon_state.py) — see [DAEMON_IPC_REDIS.md](DAEMON_IPC_REDIS.md) | per-env Redis (`config.redis`) |
 | Brokerage Golden Source (IB account / positions / executions) | [`brokerage_ddl.py`](../src/bifrost_core/persistence/postgres/brokerage_ddl.py) | `bifrost_golden_source` `raw_broker.*` |
 | Market Data (Polygon) | Market Data Plugin | `bifrost_golden_source` `raw_market.*` / `features_daily.*` / `ops_jobs.*` |
-| Flex Query job queue | Flex Query Plugin | `bifrost_golden_source` `ops_jobs.*` (+ compat `flex_ops.*` views) |
+| Flex Query job queue | Flex Query Plugin | `bifrost_golden_source` `ops_jobs.*` (`flex_ops.*` compat views **DEPRECATED** Wave 6.3) |
 | Research dbt Elementary | bifrost-research dbt | `bifrost_golden_source` `ops_dbt.*` |
 
 ## Per-env vs Golden Source
@@ -20,15 +36,22 @@ bifrost_golden_source
 ├── ops_jobs.*                                   # Plugin job queues (market + flex)
 ├── ops_dbt.*                                    # dbt / Elementary observability
 ├── dw_stock.* / features_option.* / features_signals.* / features_forecasts.* / features_backtests.* … # Research outputs
-└── flex_ops.* (views → ops_jobs)                # Legacy compat; not on Trade DBs
+└── flex_ops.* (DEPRECATED views → ops_jobs; audit only)
 
 bifrost_{dev,stg,prod}
-├── public.*          # strategy_*, gate_safety_*, preferences, watchlist, jobs, Flex tokens (settings)
+├── public.*          # strategy_*, gate_safety_*, preferences, watchlist, bridge tables (settings)
 ├── brokerage.*       # postgres_fdw foreign tables → raw_broker + local views
-└── market.*          # postgres_fdw foreign tables → raw_market + local views
+└── market.*          # postgres_fdw foreign tables → raw_market (canonical GS: raw_market.*)
 ```
 
 Do not create `flex_ops` on Trade env databases. Flex queue + freshness live in Golden Source `ops_jobs` only.
+
+**Compat shims (Golden Source only, not on Trade DBs)**
+
+| Shim | Canonical target | Notes |
+|------|------------------|-------|
+| `data_ops.ingest_freshness` (view) | `ops_jobs.ingest_freshness` | platform-api probe compatibility; removal after probe cutover (future wave) |
+| `flex_ops.*` (views) | `ops_jobs.job_flex_ingest`, `flex_ingest_freshness` | **DEPRECATED** (Wave 6.3); no new consumers |
 
 Qualified names: [`brokerage_tables.py`](../src/bifrost_core/persistence/postgres/brokerage_tables.py), [`market_tables.py`](../src/bifrost_core/persistence/postgres/market_tables.py).
 
@@ -77,9 +100,9 @@ Bridge tables remain per-env (FK to `strategy_instance`):
 
 | Per-env FDW | Golden Source | Purpose |
 |-------------|---------------|---------|
-| `market.ticker` | `market.ticker` | Full ticker catalog (FDW foreign table) |
-| `market.v_us_equity_universe` | — | Local VIEW: active US CS equities (same filter as Golden Source view) |
-| `public.v_us_equity_universe` | — | Backward-compat VIEW over `market.v_us_equity_universe` (adds `tickers_id`) |
+| `market.ticker` | `raw_market.ticker` | Full ticker catalog (FDW foreign table) |
+| `market.v_us_equity_universe` | `raw_market.v_us_equity_universe` | Local VIEW: active US CS equities |
+| `public.v_us_equity_universe` | — | **Stable Trade read contract** over `market.v_us_equity_universe` (adds synthetic `tickers_id`); not scheduled for removal |
 
 Setup: `setup_fdw_market_tables()` in [`brokerage_ddl.py`](../src/bifrost_core/persistence/postgres/brokerage_ddl.py). Requires `golden_source_server` to exist (created by `setup_fdw_foreign_tables`).
 
@@ -97,4 +120,4 @@ make db-init-brokerage       # Golden Source brokerage DDL only
 make db-init-brokerage-fdw   # + FDW into current per-env DB (needs superuser)
 ```
 
-See also [BROKERAGE_GOLDEN_SOURCE.md](BROKERAGE_GOLDEN_SOURCE.md) and [DAEMON_IPC_REDIS.md](DAEMON_IPC_REDIS.md).
+See also [BROKERAGE_GOLDEN_SOURCE.md](BROKERAGE_GOLDEN_SOURCE.md), [DAEMON_IPC_REDIS.md](DAEMON_IPC_REDIS.md), and [GOLDEN_SOURCE_RETENTION.md](../../bifrost-trade-infra/docs/GOLDEN_SOURCE_RETENTION.md).

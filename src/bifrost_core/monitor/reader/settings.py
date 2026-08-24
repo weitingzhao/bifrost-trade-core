@@ -10,6 +10,26 @@ from bifrost_core.persistence.postgres.connection import _get_conn_params
 
 logger = logging.getLogger(__name__)
 
+_ACTIVE_REF_CHECKS: tuple[tuple[str, str, str], ...] = (
+    ("active_gate_safety_strategy_id", "gate_safety_strategy", "gate_safety_strategy_id"),
+    ("active_strategy_structure_id", "strategy_structure", "strategy_structure_id"),
+    ("active_strategy_allocation_id", "strategy_allocation", "strategy_allocation_id"),
+)
+
+
+def validate_settings_active_refs(cur: Any, payload: Dict[str, Any]) -> None:
+    """Raise ValueError if any non-null active_*_id in payload does not exist."""
+    for field, table, pk_col in _ACTIVE_REF_CHECKS:
+        ref_id = payload.get(field)
+        if ref_id is None:
+            continue
+        cur.execute(
+            f"SELECT 1 FROM {table} WHERE {pk_col} = %s",
+            (int(ref_id),),
+        )
+        if cur.fetchone() is None:
+            raise ValueError(f"{field}={ref_id} does not exist in {table}")
+
 
 # ----- Conn-based (for common.StatusReader delegation) -----
 
@@ -123,6 +143,14 @@ def write_active_strategy_and_gates(
         conn = psycopg2.connect(**params)
         try:
             with conn.cursor() as cur:
+                validate_settings_active_refs(
+                    cur,
+                    {
+                        "active_strategy_structure_id": active_strategy_structure_id,
+                        "active_gate_safety_strategy_id": active_gate_safety_strategy_id,
+                        "active_strategy_allocation_id": active_strategy_allocation_id,
+                    },
+                )
                 cur.execute(
                     """
                     UPDATE settings SET
@@ -141,12 +169,16 @@ def write_active_strategy_and_gates(
             return True
         finally:
             conn.close()
+    except ValueError:
+        raise
     except Exception as e:
         logger.warning("write_active_strategy_and_gates failed: %s", e)
         return False
 
 
 __all__ = [
+    "get_ib_config",
     "write_ib_config",
     "write_active_strategy_and_gates",
+    "validate_settings_active_refs",
 ]

@@ -1,14 +1,14 @@
 # Brokerage Golden Source
 
 IB / brokerage account data lives in a shared schema on `bifrost_golden_source`,
-symmetric to Market Data (`market.*`).
+symmetric to Market Data (`raw_market.*`).
 
 ## Layout
 
 ```
 bifrost_golden_source
-├── market.* / market_analytics.* / data_ops.*   # Polygon (Plugin)
-└── brokerage.*                                  # Brokerage / IB adapter
+├── raw_market.* / features_daily.* / ops_jobs.*   # Polygon (Market Data Plugin)
+└── raw_broker.*                                   # Brokerage / IB adapter (canonical)
     ├── account, positions
     ├── executions_raw_{tws,flex,journal}
     ├── commissions, transactions
@@ -19,8 +19,10 @@ bifrost_golden_source
 bifrost_{dev,stg,prod}
 ├── public.*          # strategy_*, preferences, execution bridge tables
 │                     # (daemon IPC is Redis — see docs/DAEMON_IPC_REDIS.md)
-└── brokerage.*       # postgres_fdw foreign tables + local views (read path)
+└── brokerage.*       # postgres_fdw foreign tables + local views → raw_broker.*
 ```
+
+**Legacy names (historical only):** Golden Source `market.*` → `raw_market.*`; `market_analytics.*` → `features_daily.*`; `data_ops.*` → `ops_jobs.*` (view shim may remain for platform-api probe).
 
 ## Connection
 

@@ -35,9 +35,10 @@ make db-init        # 初始化/刷新 PostgreSQL schema
 
 ## 版本发布规范
 
-- 修改 `src/bifrost_core/` 中的共享库后，必须 bump `pyproject.toml` 中的 version（当前 **0.15.1**）
+- 修改 `src/bifrost_core/` 中的共享库后，必须 bump `pyproject.toml` 中的 version（当前 **0.15.2**）
 - 其他 repo 通过 git tag 安装：`pip install git+https://github.com/ORG/bifrost-trade-core.git@v0.x.x`
 - 破坏性变更需要同步更新所有依赖 repo 的 pyproject.toml
+- **0.15.2**: Wave 6.3 — `validate_settings_active_refs()` for settings `active_*_id` write guard; Golden Source canonical docs
 - **0.15.1**: Wave 6.1 config hygiene — remove dead `ops.celery.*` / `use_for_celery_bars` from `config.yaml.example` (Trade Celery retired Wave 5)
 - **0.15.0**: Wave 6 DB hygiene — `ops_audit_log` retired; actuation audit routed to platform-api
 - **0.14.0**: Wave 5 Celery removal — dropped `celery_redis_url_from_config()` + monitor self_check Celery segment from `derive_health_roll_up`
