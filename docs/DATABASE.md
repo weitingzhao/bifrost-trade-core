@@ -7,11 +7,10 @@ Use these names in docs, catalogs, and new code. Legacy aliases appear only in m
 | Canonical | Legacy alias (historical only) | Owner |
 |-----------|-------------------------------|--------|
 | `raw_market.*` | `market.*` (Golden Source physical rename) | Market Data Plugin |
-| `features_daily.*` | `market_analytics.*` | Research volatility + Plugin DDL bootstrap |
+| `features.*` | `features_daily.*` / `features_option.*` / `features_signals.*` / `features_forecasts.*` / `features_backtests.*` (Wave 6.6 retired) | Research Feature Store |
 | `dw_stock.*` | `analytics.*` | bifrost-research dbt |
-| `ops_jobs.*` | `data_ops.*` (view shim on GS for platform-api probe) | Market Data + Flex Query Plugins |
+| `ops_jobs.*` | `data_ops.*` (**retired Wave 8**) | Market Data + Flex Query Plugins |
 | `raw_broker.*` | per-env FDW local name `brokerage.*` | IB / Flex + core FDW |
-| `features_option.*` / `features_signals.*` / `features_forecasts.*` / `features_backtests.*` | `research.*`, `signals.*`, etc. | Research engines |
 | `ops_dbt.*` | `analytics_elementary.*` | dbt Elementary |
 
 Retention policy matrix: [GOLDEN_SOURCE_RETENTION.md](../../bifrost-trade-infra/docs/GOLDEN_SOURCE_RETENTION.md) (infra repo).
@@ -23,7 +22,7 @@ Authoritative runtime DDL:
 | Per-env Trade (`strategy_*`, `gate_safety_*`, `preference_*`, `watchlist`, jobs, bridge tables) | [`ddl.py`](../src/bifrost_core/persistence/postgres/ddl.py) `_ensure_tables()` | `bifrost_{dev,stg,prod}` `public.*` |
 | Daemon / Account Sync process IPC | [`redis_daemon_state.py`](../src/bifrost_core/persistence/redis_daemon_state.py) — see [DAEMON_IPC_REDIS.md](DAEMON_IPC_REDIS.md) | per-env Redis (`config.redis`) |
 | Brokerage Golden Source (IB account / positions / executions) | [`brokerage_ddl.py`](../src/bifrost_core/persistence/postgres/brokerage_ddl.py) | `bifrost_golden_source` `raw_broker.*` |
-| Market Data (Polygon) | Market Data Plugin | `bifrost_golden_source` `raw_market.*` / `features_daily.*` / `ops_jobs.*` |
+| Market Data (Polygon) | Market Data Plugin | `bifrost_golden_source` `raw_market.*` / `ops_jobs.*` |
 | Flex Query job queue | Flex Query Plugin | `bifrost_golden_source` `ops_jobs.*` (`flex_ops.*` compat views **DEPRECATED** Wave 6.3) |
 | Research dbt Elementary | bifrost-research dbt | `bifrost_golden_source` `ops_dbt.*` |
 
@@ -31,11 +30,12 @@ Authoritative runtime DDL:
 
 ```
 bifrost_golden_source
-├── raw_market.* / features_daily.*              # Polygon Plugin
-├── raw_broker.*                                 # IB / Flex brokerage adapter
+├── raw_market.*                                   # Polygon Plugin
+├── raw_broker.*                                   # IB / Flex brokerage adapter
 ├── ops_jobs.*                                   # Plugin job queues (market + flex)
 ├── ops_dbt.*                                    # dbt / Elementary observability
-├── dw_stock.* / features_option.* / features_signals.* / features_forecasts.* / features_backtests.* … # Research outputs
+├── dw_stock.*                                   # Research dbt marts (human read)
+├── features.*                                   # Research Feature Store (model read)
 └── flex_ops.* (DEPRECATED views → ops_jobs; audit only)
 
 bifrost_{dev,stg,prod}
@@ -50,8 +50,12 @@ Do not create `flex_ops` on Trade env databases. Flex queue + freshness live in 
 
 | Shim | Canonical target | Notes |
 |------|------------------|-------|
-| `data_ops.ingest_freshness` (view) | `ops_jobs.ingest_freshness` | platform-api probe compatibility; removal after probe cutover (future wave) |
+| `raw_market.stock_financials` (view) | 6 entity financials tables | **Wave 8** compat UNION view; legacy table dropped |
 | `flex_ops.*` (views) | `ops_jobs.job_flex_ingest`, `flex_ingest_freshness` | **DEPRECATED** (Wave 6.3); no new consumers |
+
+**Wave 8 — `settings.active_*_id` FK** (core 0.16.0): `ON DELETE SET NULL` to `strategy_structure`, `gate_safety_strategy`, `strategy_allocation`.
+
+**Wave 8 — Flex tokens**: canonical source is K8s Secret (`FLEX_HOST_TOKEN` / `FLEX_SECONDARY_TOKEN`); `settings.ib_flex_*_token` columns **DEPRECATED** (not dropped yet).
 
 Qualified names: [`brokerage_tables.py`](../src/bifrost_core/persistence/postgres/brokerage_tables.py), [`market_tables.py`](../src/bifrost_core/persistence/postgres/market_tables.py).
 

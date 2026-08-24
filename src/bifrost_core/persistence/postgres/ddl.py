@@ -215,6 +215,47 @@ def _retire_ops_audit_log(cur) -> None:
     cur.execute("DROP TABLE IF EXISTS ops_audit_log CASCADE")
 
 
+def _ensure_settings_active_refs_fk(cur) -> None:
+    """Wave 8: DB-level ON DELETE SET NULL for settings.active_*_id."""
+    fk_specs = (
+        (
+            "settings_active_strategy_structure_fk",
+            "active_strategy_structure_id",
+            "strategy_structure",
+            "strategy_structure_id",
+        ),
+        (
+            "settings_active_gate_safety_strategy_fk",
+            "active_gate_safety_strategy_id",
+            "gate_safety_strategy",
+            "gate_safety_strategy_id",
+        ),
+        (
+            "settings_active_strategy_allocation_fk",
+            "active_strategy_allocation_id",
+            "strategy_allocation",
+            "strategy_allocation_id",
+        ),
+    )
+    for conname, col, ref_table, ref_col in fk_specs:
+        cur.execute(
+            f"""
+            DO $$
+            BEGIN
+              IF NOT EXISTS (
+                SELECT 1 FROM pg_constraint WHERE conname = '{conname}'
+              ) THEN
+                ALTER TABLE settings
+                  ADD CONSTRAINT {conname}
+                  FOREIGN KEY ({col})
+                  REFERENCES {ref_table}({ref_col})
+                  ON DELETE SET NULL;
+              END IF;
+            END $$;
+            """
+        )
+
+
 def _ensure_tables(conn, log=None, log_table=None) -> None:
     """Apply full DDL (per DATABASE.md). CREATE IF NOT EXISTS and index DDL only.
     If log is callable, it is called with a short step name before each DDL section (for progress/debug).
@@ -247,8 +288,8 @@ def _ensure_tables(conn, log=None, log_table=None) -> None:
                 ib_host_account_id text,
                 stream_host_account_id text,
                 stream_secondary_account_id text,
-                ib_flex_host_token text,
-                ib_flex_secondary_token text,
+                ib_flex_host_token text,  -- DEPRECATED Wave 8: canonical FLEX_HOST_TOKEN Secret
+                ib_flex_secondary_token text,  -- DEPRECATED Wave 8: canonical FLEX_SECONDARY_TOKEN Secret
                 flex_default_range_days integer NOT NULL DEFAULT 30,
                 flex_init_range_days integer NOT NULL DEFAULT 360,
                 active_strategy_structure_id bigint,
@@ -646,6 +687,7 @@ def _ensure_tables(conn, log=None, log_table=None) -> None:
             "CREATE INDEX IF NOT EXISTS strategy_allocation_opportunity_opportunity_id "
             "ON strategy_allocation_opportunity (strategy_opportunity_id)"
         )
+        _ensure_settings_active_refs_fk(cur)
         _log("strategy_history retired (Wave 3)")
         _retire_strategy_history(cur)
         _log("watchlist")
