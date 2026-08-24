@@ -35,9 +35,10 @@ make db-init        # 初始化/刷新 PostgreSQL schema
 
 ## 版本发布规范
 
-- 修改 `src/bifrost_core/` 中的共享库后，必须 bump `pyproject.toml` 中的 version（当前 **0.14.0**）
+- 修改 `src/bifrost_core/` 中的共享库后，必须 bump `pyproject.toml` 中的 version（当前 **0.15.0**）
 - 其他 repo 通过 git tag 安装：`pip install git+https://github.com/ORG/bifrost-trade-core.git@v0.x.x`
 - 破坏性变更需要同步更新所有依赖 repo 的 pyproject.toml
+- **0.15.0**: Wave 6 DB hygiene — `ops_audit_log` retired; actuation audit routed to platform-api
 - **0.14.0**: Wave 5 Celery removal — dropped `celery_redis_url_from_config()` + monitor self_check Celery segment from `derive_health_roll_up`
 - **0.13.0**: Wave 4 DB hygiene — `ops_audit_log` partitioned by month (`timestamptz`), 90-day partition drop on ensure_tables; Flex token columns retained as env-fallback only
 - **0.12.0**: Wave 3 DB hygiene — drop `strategy_history` (DDL/reader/writer); extend `raw_broker.transactions` UNIQUE to `(account_id, ts, amount, type, report_date)`

@@ -34,7 +34,7 @@ EXPECTED_TABLES_BY_CATEGORY: Dict[str, List[str]] = {
         # preference_data_gap_ack retired → Golden Source ops_jobs.data_source_void
     ],
     "reference": [],  # reference_us_holidays → market.us_market_holiday (FDW)
-    "settings": ["settings", "ops_audit_log"],
+    "settings": ["settings"],
     "stock": [],
     "strategy": [
         "strategy_allocation",

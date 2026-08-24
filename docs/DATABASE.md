@@ -87,17 +87,7 @@ Retired (core 0.8.3): `public.us_equity_universe` (physical table), `public.sepa
 
 Retired (core **0.10.10** / Market Data Plugin **0.7.9**): `public.preference_data_gap_ack` (and legacy `preference_sepa_gap_ack`) — source-void acknowledgments now live in Golden Source `ops_jobs.data_source_void` via Plugin `/market/readiness/source-void`. Trade `/research/data/readiness/*` is a thin HTTP passthrough for readiness summary / gap-ack / backfill enqueue.
 
-## Ops audit log (Wave 4 / core 0.13.0)
-
-| Item | Value |
-|------|-------|
-| Table | `public.ops_audit_log` |
-| Partition | `RANGE (timestamp)` monthly (`ops_audit_log_yYYYYmMM` + `_default`) |
-| Column | `timestamp timestamptz` (was `double precision` epoch) |
-| Retention | 90 days — drop on `_ensure_tables()` + `scripts/db/drop_ops_audit_partitions.py` |
-| Writers | Trade API `ops.services.audit_store` (`to_timestamp` on insert) |
-
-Upgrade is idempotent via `_upgrade_ops_audit_log_to_partitioned` (rename-swap from heap).
+Retired (core **0.15.0** / Wave 6): `public.ops_audit_log` — actuation audit routed to platform-api `POST /api/v1/audit/append`; table dropped idempotently on `_ensure_tables()`.
 
 ## Commands
 
@@ -105,7 +95,6 @@ Upgrade is idempotent via `_upgrade_ops_audit_log_to_partitioned` (rename-swap f
 make db-init                 # per-env DDL + brokerage schema + FDW (if golden_source configured)
 make db-init-brokerage       # Golden Source brokerage DDL only
 make db-init-brokerage-fdw   # + FDW into current per-env DB (needs superuser)
-python scripts/db/drop_ops_audit_partitions.py --months 3
 ```
 
 See also [BROKERAGE_GOLDEN_SOURCE.md](BROKERAGE_GOLDEN_SOURCE.md) and [DAEMON_IPC_REDIS.md](DAEMON_IPC_REDIS.md).
