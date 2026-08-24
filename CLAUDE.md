@@ -35,9 +35,10 @@ make db-init        # 初始化/刷新 PostgreSQL schema
 
 ## 版本发布规范
 
-- 修改 `src/bifrost_core/` 中的共享库后，必须 bump `pyproject.toml` 中的 version
+- 修改 `src/bifrost_core/` 中的共享库后，必须 bump `pyproject.toml` 中的 version（当前 **0.10.10**）
 - 其他 repo 通过 git tag 安装：`pip install git+https://github.com/ORG/bifrost-trade-core.git@v0.x.x`
 - 破坏性变更需要同步更新所有依赖 repo 的 pyproject.toml
+- **0.10.10**: `preference_data_gap_ack` retired — dropped on startup; Golden Source `ops_jobs.data_source_void` is authoritative
 
 ## 数据库规范
 

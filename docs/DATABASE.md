@@ -85,6 +85,8 @@ Setup: `setup_fdw_market_tables()` in [`brokerage_ddl.py`](../src/bifrost_core/p
 
 Retired (core 0.8.3): `public.us_equity_universe` (physical table), `public.sepa_symbol_price_readiness` (physical table), `public.v_sepa_us_equity_universe` (view), `public.v_sepa_symbol_price_readiness` (view), `universe_sync.py` (Plugin API sync module). Universe data now comes directly from Golden Source via FDW. Price readiness summary is computed at query time from Plugin API `/readiness/bar-aggregate`.
 
+Retired (core **0.10.10** / Market Data Plugin **0.7.9**): `public.preference_data_gap_ack` (and legacy `preference_sepa_gap_ack`) — source-void acknowledgments now live in Golden Source `ops_jobs.data_source_void` via Plugin `/market/readiness/source-void`. Trade `/research/data/readiness/*` is a thin HTTP passthrough for readiness summary / gap-ack / backfill enqueue.
+
 ## Commands
 
 ```bash

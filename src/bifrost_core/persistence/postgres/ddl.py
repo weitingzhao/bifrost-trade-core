@@ -36,6 +36,13 @@ _P7_RETIRED_PUBLIC_TABLES = frozenset(
         "research_sepa_fundamentals_cache",
     }
 )
+# P8: data completeness / source-void moved to Market Data Plugin ops_jobs.data_source_void.
+_P8_RETIRED_PUBLIC_TABLES = frozenset(
+    {
+        "preference_data_gap_ack",
+        "preference_sepa_gap_ack",
+    }
+)
 # 1:1 child tables merged into gate_safety_strategy (scalar columns; earnings_dates stays 1:N).
 _GATE_SAFETY_RETIRED_CHILD_TABLES = frozenset(
     {"gate_safety_state", "gate_safety_intent", "gate_safety_guard"}
@@ -196,6 +203,10 @@ def _ensure_tables(conn, log=None, log_table=None) -> None:
         _log("research_sepa_fundamentals_cache dropped (analytics marts)")
         cur.execute("DROP VIEW IF EXISTS public.v_sepa_symbol_fund_cache_readiness CASCADE")
         cur.execute("DROP TABLE IF EXISTS public.research_sepa_fundamentals_cache CASCADE")
+        # P8: source-void ack lives in Golden Source ops_jobs.data_source_void (Market Data Plugin).
+        _log("preference_data_gap_ack dropped (ops_jobs.data_source_void)")
+        cur.execute("DROP TABLE IF EXISTS public.preference_sepa_gap_ack CASCADE")
+        cur.execute("DROP TABLE IF EXISTS public.preference_data_gap_ack CASCADE")
         # One-time: drop legacy stocks / job_stock_reference_state (no Trade ticker tables).
         cur.execute(
             """
@@ -277,30 +288,7 @@ def _ensure_tables(conn, log=None, log_table=None) -> None:
             )
             """
         )
-        _log("preference_data_gap_ack")
-        # Rename legacy table if it still exists under the old sepa-prefixed name
-        cur.execute(
-            "ALTER TABLE IF EXISTS preference_sepa_gap_ack RENAME TO preference_data_gap_ack"
-        )
-        _log_table(
-            "preference_data_gap_ack",
-            "Data gap source-void acknowledgment per data type (preference)",
-        )
-        cur.execute(
-            """
-            CREATE TABLE IF NOT EXISTS preference_data_gap_ack (
-                data_type        varchar(64) PRIMARY KEY,
-                is_void          boolean NOT NULL DEFAULT false,
-                acked_gap_count  integer NOT NULL DEFAULT 0,
-                void_reason      text,
-                acked_at         timestamptz NOT NULL DEFAULT now()
-            )
-            """
-        )
-        cur.execute(
-            "ALTER TABLE preference_data_gap_ack "
-            "ADD COLUMN IF NOT EXISTS acked_gap_count integer NOT NULL DEFAULT 0"
-        )
+        # preference_data_gap_ack retired → ops_jobs.data_source_void (Market Data Plugin)
         conn.commit()
         # reference_us_holidays retired → market.us_market_holiday (Golden Source / FDW)
         _log("gate_safety_*, strategy_*, settings active_*")
