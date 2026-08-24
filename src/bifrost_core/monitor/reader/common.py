@@ -442,26 +442,6 @@ class StatusReader:
         self._end_read_txn()
         return result
 
-    def get_strategy_history(
-        self,
-        from_ts: Optional[float] = None,
-        to_ts: Optional[float] = None,
-        strategy_structure_id: Optional[int] = None,
-        limit: int = 100,
-    ) -> List[Dict[str, Any]]:
-        """Return strategy_history rows with optional filters."""
-        if not self._connect():
-            return []
-        result = strategy_module.get_strategy_history(
-            self._conn,
-            from_ts=from_ts,
-            to_ts=to_ts,
-            strategy_structure_id=strategy_structure_id,
-            limit=limit,
-        )
-        self._end_read_txn()
-        return result
-
     def list_strategy_instances(
         self,
         account_id: Optional[str] = None,

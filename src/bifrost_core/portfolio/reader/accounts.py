@@ -1207,6 +1207,17 @@ def upsert_account_transactions(status_config: dict, rows: List[Dict[str, Any]])
                     security_id_type = (r.get("security_id_type") or "").strip() or None
                     listing_exchange = (r.get("listing_exchange") or "").strip() or None
                     report_date = (r.get("report_date") or "").strip() or None
+                    # Wave 3 D-W3.3: UNIQUE includes report_date — skip unindexable rows.
+                    if not report_date:
+                        logger.warning(
+                            "upsert_account_transactions: skip row without report_date "
+                            "(account_id=%s ts=%s amount=%s type=%s)",
+                            account_id,
+                            ts_float,
+                            amount_float,
+                            tx_type,
+                        )
+                        continue
                     available_for_trading_date = (r.get("available_for_trading_date") or "").strip() or None
                     fx_rate_to_base = r.get("fx_rate_to_base")
                     try:
@@ -1233,7 +1244,7 @@ def upsert_account_transactions(status_config: dict, rows: List[Dict[str, Any]])
                             %s, %s, %s,
                             %s, %s
                         )
-                        ON CONFLICT (account_id, ts, amount, type) DO UPDATE SET
+                        ON CONFLICT (account_id, ts, amount, type, report_date) DO UPDATE SET
                             currency = COALESCE(EXCLUDED.currency, {TRANSACTIONS}.currency),
                             description = COALESCE(EXCLUDED.description, {TRANSACTIONS}.description),
                             flex_transaction_id = COALESCE(EXCLUDED.flex_transaction_id, {TRANSACTIONS}.flex_transaction_id),
@@ -1246,7 +1257,6 @@ def upsert_account_transactions(status_config: dict, rows: List[Dict[str, Any]])
                             security_id = COALESCE(EXCLUDED.security_id, {TRANSACTIONS}.security_id),
                             security_id_type = COALESCE(EXCLUDED.security_id_type, {TRANSACTIONS}.security_id_type),
                             listing_exchange = COALESCE(EXCLUDED.listing_exchange, {TRANSACTIONS}.listing_exchange),
-                            report_date = COALESCE(EXCLUDED.report_date, {TRANSACTIONS}.report_date),
                             available_for_trading_date = COALESCE(EXCLUDED.available_for_trading_date, {TRANSACTIONS}.available_for_trading_date),
                             fx_rate_to_base = COALESCE(EXCLUDED.fx_rate_to_base, {TRANSACTIONS}.fx_rate_to_base),
                             raw_extra = COALESCE(EXCLUDED.raw_extra, {TRANSACTIONS}.raw_extra)

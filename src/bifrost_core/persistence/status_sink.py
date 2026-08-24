@@ -39,15 +39,14 @@ class StatusSink(ABC):
     """Abstract sink for writing current state snapshot.
 
     Implementations (e.g. PostgreSQLSink) persist to backend; caller (GsTrading)
-    decides when to write. ``append_history`` still triggers strategy_history append.
+    decides when to write.
     """
 
     @abstractmethod
-    def write_snapshot(self, snapshot: Dict[str, Any], append_history: bool = False) -> None:
-        """Write state snapshot. Updates current view; optionally appends to strategy_history.
+    def write_snapshot(self, snapshot: Dict[str, Any]) -> None:
+        """Write state snapshot. Updates current view (Redis trading state HASH).
 
         snapshot: dict with keys from SNAPSHOT_KEYS (daemon_state, trading_state, symbol, spot, ...).
-        append_history: if True, also append one row to strategy_history.
         """
         ...
 

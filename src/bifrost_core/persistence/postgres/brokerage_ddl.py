@@ -105,6 +105,99 @@ _EXEC_RAW_COLUMNS_DDL = """
 """
 
 
+def _migrate_transactions_dedupe_key(cur: Any, physical: str) -> None:
+    """Widen transactions UNIQUE from 4 cols to 5 (add report_date). Idempotent.
+
+    Wave 3 (D-W3.3): UNIQUE(account_id, ts, amount, type, report_date).
+    Aborts with a clear log if any row has NULL report_date (cannot participate
+    in a UNIQUE that includes that column without coalescing).
+    """
+    new_con = "raw_broker_transactions_dedupe_v2"
+
+    cur.execute(
+        f"""
+        SELECT count(*) FROM {physical}.transactions WHERE report_date IS NULL
+        """
+    )
+    null_n = cur.fetchone()[0]
+    if null_n and int(null_n) > 0:
+        logger.error(
+            "%s.transactions has %s row(s) with NULL report_date; "
+            "cannot migrate UNIQUE to include report_date (Wave 3 D-W3.3)",
+            physical,
+            null_n,
+        )
+        raise RuntimeError(
+            f"{physical}.transactions has {null_n} NULL report_date row(s); "
+            "backfill before Wave 3 UNIQUE migration"
+        )
+
+    # Already on v2?
+    cur.execute(
+        """
+        SELECT 1
+        FROM pg_constraint c
+        JOIN pg_class t ON t.oid = c.conrelid
+        JOIN pg_namespace n ON n.oid = t.relnamespace
+        WHERE n.nspname = %s
+          AND t.relname = 'transactions'
+          AND c.contype = 'u'
+          AND c.conname = %s
+        """,
+        (physical, new_con),
+    )
+    if cur.fetchone() is not None:
+        return
+
+    # Find existing UNIQUE constraints whose key columns are a prefix of the
+    # new 5-col key (typically the old 4-col UNIQUE).
+    cur.execute(
+        """
+        SELECT c.conname, array_agg(a.attname ORDER BY u.ord) AS cols
+        FROM pg_constraint c
+        JOIN pg_class t ON t.oid = c.conrelid
+        JOIN pg_namespace n ON n.oid = t.relnamespace
+        JOIN LATERAL unnest(c.conkey) WITH ORDINALITY AS u(attnum, ord) ON true
+        JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = u.attnum
+        WHERE n.nspname = %s
+          AND t.relname = 'transactions'
+          AND c.contype = 'u'
+        GROUP BY c.conname
+        """,
+        (physical,),
+    )
+    rows = cur.fetchall() or []
+    target_cols = ["account_id", "ts", "amount", "type", "report_date"]
+    old_prefix = ["account_id", "ts", "amount", "type"]
+    for conname, cols in rows:
+        col_list = list(cols) if cols is not None else []
+        if col_list == target_cols:
+            # Already equivalent under a different name — leave it.
+            return
+        if col_list == old_prefix:
+            cur.execute(
+                f'ALTER TABLE {physical}.transactions DROP CONSTRAINT "{conname}"'
+            )
+            logger.info(
+                "Dropped old UNIQUE %s on %s.transactions (Wave 3 dedupe)",
+                conname,
+                physical,
+            )
+
+    cur.execute(
+        f"""
+        ALTER TABLE {physical}.transactions
+          ADD CONSTRAINT {new_con}
+          UNIQUE (account_id, ts, amount, type, report_date)
+        """
+    )
+    logger.info(
+        "Added UNIQUE %s on %s.transactions (Wave 3 D-W3.3)",
+        new_con,
+        physical,
+    )
+
+
 def ensure_brokerage_schema(
     conn: Any,
     *,
@@ -217,7 +310,7 @@ def ensure_brokerage_schema(
                 fx_rate_to_base double precision,
                 raw_extra jsonb,
                 created_at timestamptz DEFAULT now(),
-                UNIQUE(account_id, ts, amount, type)
+                UNIQUE(account_id, ts, amount, type, report_date)
             )
             """
         )
@@ -225,6 +318,7 @@ def ensure_brokerage_schema(
             f"CREATE INDEX IF NOT EXISTS brokerage_transactions_account_ts "
             f"ON {physical}.transactions (account_id, ts DESC)"
         )
+        _migrate_transactions_dedupe_key(cur, physical)
         _log(f"{physical}.transactions")
 
         cur.execute(

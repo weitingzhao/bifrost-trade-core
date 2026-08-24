@@ -200,6 +200,11 @@ def _migrate_strategy_kv_to_jsonb(cur) -> None:
     cur.execute("DROP TABLE IF EXISTS strategy_structure_meta CASCADE")
 
 
+def _retire_strategy_history(cur) -> None:
+    """Drop strategy_history (Wave 3). Idempotent: table was never written in production."""
+    cur.execute("DROP TABLE IF EXISTS strategy_history CASCADE")
+
+
 def _ensure_tables(conn, log=None, log_table=None) -> None:
     """Apply full DDL (per DATABASE.md). CREATE IF NOT EXISTS and index DDL only.
     If log is callable, it is called with a short step name before each DDL section (for progress/debug).
@@ -631,24 +636,8 @@ def _ensure_tables(conn, log=None, log_table=None) -> None:
             "CREATE INDEX IF NOT EXISTS strategy_allocation_opportunity_opportunity_id "
             "ON strategy_allocation_opportunity (strategy_opportunity_id)"
         )
-        _log_table("strategy_history", "Strategy run / state history")
-        cur.execute(
-            """
-            CREATE TABLE IF NOT EXISTS strategy_history (
-                strategy_history_id bigserial PRIMARY KEY,
-                strategy_structure_id bigint REFERENCES strategy_structure(strategy_structure_id),
-                ts timestamptz NOT NULL,
-                state_summary jsonb,
-                created_at timestamptz NOT NULL DEFAULT now()
-            )
-            """
-        )
-        cur.execute(
-            "CREATE INDEX IF NOT EXISTS strategy_history_ts ON strategy_history (ts DESC)"
-        )
-        cur.execute(
-            "CREATE INDEX IF NOT EXISTS strategy_history_structure_id ON strategy_history (strategy_structure_id)"
-        )
+        _log("strategy_history retired (Wave 3)")
+        _retire_strategy_history(cur)
         _log("watchlist")
         _log_table("watchlist", "Watchlist items (STK/OPT)")
         cur.execute(

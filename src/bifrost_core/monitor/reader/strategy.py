@@ -1,4 +1,4 @@
-"""Strategy structure and strategy_history readers. Used by StatusReader and API."""
+"""Strategy structure readers. Used by StatusReader and API."""
 
 from typing import Any, Dict, List, Optional
 
@@ -333,45 +333,3 @@ def get_allocation_by_id(conn: Any, strategy_allocation_id: int) -> Optional[Dic
         return _allocation_row_to_dict(dict(row)) if row else None
     except Exception:
         return None
-
-
-def get_strategy_history(
-    conn: Any,
-    from_ts: Optional[float] = None,
-    to_ts: Optional[float] = None,
-    strategy_structure_id: Optional[int] = None,
-    limit: int = 100,
-) -> List[Dict[str, Any]]:
-    """Query strategy_history with optional time range and structure filter.
-    Returns list of rows (strategy_history_id, strategy_structure_id, ts, state_summary, created_at).
-    """
-    limit = min(max(1, limit), 500)
-    conditions: List[str] = []
-    params: List[Any] = []
-    if from_ts is not None:
-        conditions.append("h.ts >= to_timestamp(%s)")
-        params.append(from_ts)
-    if to_ts is not None:
-        conditions.append("h.ts <= to_timestamp(%s)")
-        params.append(to_ts)
-    if strategy_structure_id is not None:
-        conditions.append("h.strategy_structure_id = %s")
-        params.append(strategy_structure_id)
-    where = " AND ".join(conditions) if conditions else "TRUE"
-    params.append(limit)
-    try:
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute(
-                f"""
-                SELECT strategy_history_id, strategy_structure_id, ts, state_summary, created_at
-                FROM strategy_history h
-                WHERE {where}
-                ORDER BY h.ts DESC
-                LIMIT %s
-                """,
-                params,
-            )
-            rows = cur.fetchall()
-        return [dict(r) for r in rows]
-    except Exception:
-        return []

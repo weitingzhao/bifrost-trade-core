@@ -1,6 +1,5 @@
 """PostgreSQL implementation of StatusSink. See docs/DATABASE.md."""
 
-import json
 import logging
 import math
 import os
@@ -41,7 +40,7 @@ logger = logging.getLogger(__name__)
 
 
 class PostgreSQLSink(StatusSink):
-    """Daemon IPC state in Redis; PG still used for strategy_history / brokerage / settings."""
+    """Daemon IPC state in Redis; PG still used for brokerage / settings."""
 
     def __init__(self, config: dict):
         self._config = config
@@ -169,10 +168,8 @@ class PostgreSQLSink(StatusSink):
                 self._connect_golden()
         return self._golden_conn is not None
 
-    def write_snapshot(
-        self, snapshot: Dict[str, Any], append_history: bool = False
-    ) -> None:
-        """Write trading status snapshot to Redis HASH; optionally append strategy_history in PG."""
+    def write_snapshot(self, snapshot: Dict[str, Any]) -> None:
+        """Write trading status snapshot to Redis HASH; optionally sync accounts to PG."""
         keys = tuple(SNAPSHOT_KEYS)
         fields = {k: snapshot.get(k) for k in keys}
         if self._ensure_redis():
@@ -183,8 +180,8 @@ class PostgreSQLSink(StatusSink):
             if ACCOUNTS_SNAPSHOT_KEY in snapshot
             else None
         )
-        # strategy_history + accounts still need PG
-        if not append_history and not (
+        # Accounts sync still needs PG (when ACCOUNT_SYNC_DAEMON_ENABLED is off)
+        if not (
             isinstance(raw_accounts, list)
             and raw_accounts
             and os.environ.get("ACCOUNT_SYNC_DAEMON_ENABLED", "").strip().lower()
@@ -194,35 +191,6 @@ class PostgreSQLSink(StatusSink):
         if not self._ensure_conn():
             return
         try:
-            with self._conn.cursor() as cur:
-                if append_history:
-                    cur.execute(
-                        "SELECT active_strategy_structure_id FROM settings WHERE id = 1"
-                    )
-                    set_row = cur.fetchone()
-                    structure_id = set_row[0] if set_row and set_row[0] is not None else None
-                    ts_val = snapshot.get("ts")
-                    if ts_val is None:
-                        ts_val = time.time()
-                    state_summary = {
-                        k: snapshot.get(k)
-                        for k in (
-                            "daemon_state",
-                            "trading_state",
-                            "symbol",
-                            "net_delta",
-                            "daily_hedge_count",
-                            "daily_pnl",
-                            "config_summary",
-                        )
-                    }
-                    cur.execute(
-                        """
-                        INSERT INTO strategy_history (strategy_structure_id, ts, state_summary, created_at)
-                        VALUES (%s, to_timestamp(%s), %s::jsonb, now())
-                        """,
-                        (structure_id, ts_val, json.dumps(state_summary)),
-                    )
             if isinstance(raw_accounts, list) and raw_accounts:
                 if os.environ.get("ACCOUNT_SYNC_DAEMON_ENABLED", "").strip().lower() not in ("1", "true", "yes"):
                     if self._ensure_golden_conn():
@@ -236,7 +204,7 @@ class PostgreSQLSink(StatusSink):
                     self._golden_conn.rollback()
                 except Exception:
                     pass
-            logger.warning("PostgreSQL write_snapshot (history/accounts) failed: %s", e, exc_info=True)
+            logger.warning("PostgreSQL write_snapshot (accounts) failed: %s", e, exc_info=True)
 
     def sync_accounts_only(self, accounts_list: Optional[List[Dict[str, Any]]]) -> None:
         """R-A1 / Secondary: write only the given accounts to brokerage.account + brokerage.positions.
