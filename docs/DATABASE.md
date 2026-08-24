@@ -19,7 +19,7 @@ bifrost_golden_source
 ├── raw_broker.*                                 # IB / Flex brokerage adapter
 ├── ops_jobs.*                                   # Plugin job queues (market + flex)
 ├── ops_dbt.*                                    # dbt / Elementary observability
-├── dw_stock.* / features_option.* / signals.* … # Research outputs
+├── dw_stock.* / features_option.* / features_signals.* / features_forecasts.* / features_backtests.* … # Research outputs
 └── flex_ops.* (views → ops_jobs)                # Legacy compat; not on Trade DBs
 
 bifrost_{dev,stg,prod}
