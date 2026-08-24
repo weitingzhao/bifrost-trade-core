@@ -125,6 +125,81 @@ def _upgrade_gate_safety_strategy(cur) -> None:
         cur.execute(f"DROP TABLE IF EXISTS {name} CASCADE")
 
 
+def _migrate_strategy_kv_to_jsonb(cur) -> None:
+    """Fold strategy_template_param / characteristic / structure_meta into parent jsonb.
+
+    Idempotent: ADD COLUMN IF NOT EXISTS, copy when child tables exist, then DROP.
+    """
+    cur.execute(
+        """
+        ALTER TABLE strategy_template
+          ADD COLUMN IF NOT EXISTS params_json jsonb NOT NULL DEFAULT '[]'::jsonb,
+          ADD COLUMN IF NOT EXISTS characteristics_json jsonb NOT NULL DEFAULT '[]'::jsonb
+        """
+    )
+    cur.execute(
+        """
+        ALTER TABLE strategy_structure
+          ADD COLUMN IF NOT EXISTS meta_json jsonb NOT NULL DEFAULT '{}'::jsonb
+        """
+    )
+    cur.execute("SELECT to_regclass('public.strategy_template_param')")
+    if cur.fetchone()[0] is not None:
+        cur.execute(
+            """
+            UPDATE strategy_template t SET params_json = COALESCE(agg.params, '[]'::jsonb)
+            FROM (
+              SELECT strategy_template_id,
+                     jsonb_agg(
+                       jsonb_build_object(
+                         'meta_key', meta_key,
+                         'display_label', display_label,
+                         'default_value_text', default_value_text,
+                         'param_kind', param_kind,
+                         'sort_order', sort_order
+                       )
+                       ORDER BY sort_order, meta_key
+                     ) AS params
+              FROM strategy_template_param
+              GROUP BY strategy_template_id
+            ) agg
+            WHERE t.strategy_template_id = agg.strategy_template_id
+            """
+        )
+    cur.execute("SELECT to_regclass('public.strategy_template_characteristic')")
+    if cur.fetchone()[0] is not None:
+        cur.execute(
+            """
+            UPDATE strategy_template t SET characteristics_json = COALESCE(agg.chars, '[]'::jsonb)
+            FROM (
+              SELECT strategy_template_id,
+                     jsonb_agg(characteristic_text ORDER BY sort_order) AS chars
+              FROM strategy_template_characteristic
+              GROUP BY strategy_template_id
+            ) agg
+            WHERE t.strategy_template_id = agg.strategy_template_id
+            """
+        )
+    cur.execute("SELECT to_regclass('public.strategy_structure_meta')")
+    if cur.fetchone()[0] is not None:
+        cur.execute(
+            """
+            UPDATE strategy_structure s SET meta_json = COALESCE(agg.meta, '{}'::jsonb)
+            FROM (
+              SELECT strategy_structure_id,
+                     jsonb_object_agg(meta_key, meta_value_text) AS meta
+              FROM strategy_structure_meta
+              WHERE meta_key IS NOT NULL AND meta_key <> ''
+              GROUP BY strategy_structure_id
+            ) agg
+            WHERE s.strategy_structure_id = agg.strategy_structure_id
+            """
+        )
+    cur.execute("DROP TABLE IF EXISTS strategy_template_param CASCADE")
+    cur.execute("DROP TABLE IF EXISTS strategy_template_characteristic CASCADE")
+    cur.execute("DROP TABLE IF EXISTS strategy_structure_meta CASCADE")
+
+
 def _ensure_tables(conn, log=None, log_table=None) -> None:
     """Apply full DDL (per DATABASE.md). CREATE IF NOT EXISTS and index DDL only.
     If log is callable, it is called with a short step name before each DDL section (for progress/debug).
@@ -415,40 +490,6 @@ def _ensure_tables(conn, log=None, log_table=None) -> None:
         cur.execute(
             "CREATE INDEX IF NOT EXISTS strategy_template_leg_template_id ON strategy_template_leg (strategy_template_id)"
         )
-        _log_table("strategy_template_param", "Template meta param definition")
-        cur.execute(
-            """
-            CREATE TABLE IF NOT EXISTS strategy_template_param (
-                strategy_template_param_id bigserial PRIMARY KEY,
-                strategy_template_id bigint NOT NULL REFERENCES strategy_template(strategy_template_id) ON DELETE CASCADE,
-                meta_key text NOT NULL,
-                display_label text,
-                default_value_text text,
-                param_kind text,
-                sort_order integer NOT NULL DEFAULT 0,
-                created_at timestamptz NOT NULL DEFAULT now(),
-                UNIQUE (strategy_template_id, meta_key)
-            )
-            """
-        )
-        cur.execute(
-            "CREATE INDEX IF NOT EXISTS strategy_template_param_template_id ON strategy_template_param (strategy_template_id)"
-        )
-        _log_table("strategy_template_characteristic", "Template characteristic lines")
-        cur.execute(
-            """
-            CREATE TABLE IF NOT EXISTS strategy_template_characteristic (
-                strategy_template_characteristic_id bigserial PRIMARY KEY,
-                strategy_template_id bigint NOT NULL REFERENCES strategy_template(strategy_template_id) ON DELETE CASCADE,
-                sort_order integer NOT NULL DEFAULT 0,
-                characteristic_text text NOT NULL,
-                created_at timestamptz NOT NULL DEFAULT now()
-            )
-            """
-        )
-        cur.execute(
-            "CREATE INDEX IF NOT EXISTS strategy_template_char_template_id ON strategy_template_characteristic (strategy_template_id)"
-        )
         _log_table("strategy_structure", "Structure strategy")
         cur.execute(
             """
@@ -464,6 +505,8 @@ def _ensure_tables(conn, log=None, log_table=None) -> None:
             )
             """
         )
+        _log("strategy_template_param / characteristic / structure_meta → parent jsonb")
+        _migrate_strategy_kv_to_jsonb(cur)
         _log_table("strategy_structure_leg", "Structure strategy leg (one row per leg)")
         cur.execute(
             """
@@ -486,22 +529,6 @@ def _ensure_tables(conn, log=None, log_table=None) -> None:
         )
         cur.execute("DROP TABLE IF EXISTS strategy_structure_constraint CASCADE")
         _log("strategy_structure_constraint dropped (over-designed, never used)")
-        _log_table("strategy_structure_meta", "Structure strategy metadata key-value")
-        cur.execute(
-            """
-            CREATE TABLE IF NOT EXISTS strategy_structure_meta (
-                strategy_structure_meta_id bigserial PRIMARY KEY,
-                strategy_structure_id bigint NOT NULL REFERENCES strategy_structure(strategy_structure_id) ON DELETE CASCADE,
-                meta_key text NOT NULL,
-                meta_value_text text,
-                created_at timestamptz NOT NULL DEFAULT now(),
-                UNIQUE (strategy_structure_id, meta_key)
-            )
-            """
-        )
-        cur.execute(
-            "CREATE INDEX IF NOT EXISTS strategy_structure_meta_structure_id ON strategy_structure_meta (strategy_structure_id)"
-        )
         _log_table("strategy_opportunity", "Opportunity strategy")
         cur.execute(
             """
@@ -734,6 +761,30 @@ def _ensure_tables(conn, log=None, log_table=None) -> None:
         cur.execute(
             "CREATE INDEX IF NOT EXISTS account_exec_opt_stock_link_stock "
             "ON account_execution_option_stock_link (account_id, stock_account_executions_id)"
+        )
+
+        _log_table("ops_audit_log", "Ops control plane audit trail")
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS ops_audit_log (
+                id          BIGSERIAL PRIMARY KEY,
+                timestamp   DOUBLE PRECISION NOT NULL DEFAULT EXTRACT(EPOCH FROM NOW()),
+                operator    TEXT NOT NULL DEFAULT 'unknown',
+                source_ip   TEXT,
+                action      TEXT NOT NULL,
+                target      TEXT NOT NULL,
+                command_id  TEXT,
+                outcome     TEXT NOT NULL,
+                detail      TEXT,
+                request_id  TEXT
+            )
+            """
+        )
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_ops_audit_log_ts ON ops_audit_log (timestamp DESC)"
+        )
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_ops_audit_log_outcome ON ops_audit_log (outcome)"
         )
 
         conn.commit()

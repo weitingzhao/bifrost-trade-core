@@ -1,5 +1,6 @@
 """Write strategy_structure and child tables. Used by POST/PUT structures API."""
 
+import json
 import logging
 from typing import Any, Dict, List, Optional
 
@@ -107,23 +108,23 @@ def _insert_legs(
 def _insert_meta(
     cur: Any, strategy_structure_id: int, meta: List[Dict[str, Any]]
 ) -> None:
-    if not meta or not isinstance(meta, list):
-        return
-    for m in meta:
-        if not isinstance(m, dict) or not m.get("meta_key"):
-            continue
-        cur.execute(
-            """
-            INSERT INTO strategy_structure_meta (
-                strategy_structure_id, meta_key, meta_value_text
-            ) VALUES (%s, %s, %s)
-            """,
-            (
-                strategy_structure_id,
-                (m.get("meta_key") or "").strip(),
-                m.get("meta_value_text"),
-            ),
-        )
+    meta_obj: Dict[str, Any] = {}
+    if meta and isinstance(meta, list):
+        for m in meta:
+            if not isinstance(m, dict) or not m.get("meta_key"):
+                continue
+            key = (m.get("meta_key") or "").strip()
+            if not key:
+                continue
+            meta_obj[key] = m.get("meta_value_text")
+    cur.execute(
+        """
+        UPDATE strategy_structure
+        SET meta_json = %s::jsonb, updated_at = now()
+        WHERE strategy_structure_id = %s
+        """,
+        (json.dumps(meta_obj), strategy_structure_id),
+    )
 
 
 def _resolve_template_id(
@@ -289,10 +290,6 @@ def update_structure(
                 return False
             cur.execute(
                 "DELETE FROM strategy_structure_leg WHERE strategy_structure_id = %s",
-                (strategy_structure_id,),
-            )
-            cur.execute(
-                "DELETE FROM strategy_structure_meta WHERE strategy_structure_id = %s",
                 (strategy_structure_id,),
             )
             _insert_legs(cur, strategy_structure_id, legs)

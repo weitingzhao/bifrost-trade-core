@@ -147,22 +147,29 @@ def get_template_detail(conn: Any, strategy_template_id: int) -> Optional[Dict[s
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(
                 """
-                SELECT meta_key, display_label, default_value_text, param_kind, sort_order
-                FROM strategy_template_param
-                WHERE strategy_template_id = %s ORDER BY sort_order, meta_key
+                SELECT params_json, characteristics_json
+                FROM strategy_template
+                WHERE strategy_template_id = %s
                 """,
                 (strategy_template_id,),
             )
-            row["meta_params"] = [dict(r) for r in cur.fetchall()]
-            cur.execute(
-                """
-                SELECT characteristic_text, sort_order
-                FROM strategy_template_characteristic
-                WHERE strategy_template_id = %s ORDER BY sort_order
-                """,
-                (strategy_template_id,),
-            )
-            row["characteristics"] = [r["characteristic_text"] for r in cur.fetchall()]
+            jrow = cur.fetchone() or {}
+        params = jrow.get("params_json") or []
+        if isinstance(params, str):
+            import json
+
+            params = json.loads(params)
+        if not isinstance(params, list):
+            params = []
+        row["meta_params"] = [dict(p) for p in params if isinstance(p, dict)]
+        chars = jrow.get("characteristics_json") or []
+        if isinstance(chars, str):
+            import json
+
+            chars = json.loads(chars)
+        if not isinstance(chars, list):
+            chars = []
+        row["characteristics"] = [str(c) for c in chars if c is not None and str(c).strip()]
     except Exception:
         row["meta_params"] = []
         row["characteristics"] = []

@@ -56,14 +56,22 @@ def get_structure_by_id(conn: Any, strategy_structure_id: int) -> Optional[Dict[
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(
                 """
-                SELECT meta_key, meta_value_text
-                FROM strategy_structure_meta
+                SELECT meta_json
+                FROM strategy_structure
                 WHERE strategy_structure_id = %s
                 """,
                 (strategy_structure_id,),
             )
-            meta_rows = cur.fetchall()
-        metadata = {r["meta_key"]: r.get("meta_value_text") for r in meta_rows if r.get("meta_key")}
+            meta_row = cur.fetchone() or {}
+        raw_meta = meta_row.get("meta_json") or {}
+        if isinstance(raw_meta, str):
+            import json
+
+            raw_meta = json.loads(raw_meta)
+        if isinstance(raw_meta, dict):
+            metadata = {str(k): v for k, v in raw_meta.items() if k}
+        else:
+            metadata = {}
         out["metadata"] = metadata
 
         return out

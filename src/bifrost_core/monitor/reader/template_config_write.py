@@ -1,5 +1,6 @@
 """Write strategy_dim and strategy_template (+ legs, params, characteristics)."""
 
+import json
 import logging
 import re
 from typing import Any, Dict, List, Optional
@@ -360,38 +361,37 @@ def replace_template_params(
     if conn is None:
         raise ValueError("Database not configured")
     try:
+        params_out: List[Dict[str, Any]] = []
+        for it in items:
+            if not isinstance(it, dict):
+                continue
+            mk = (it.get("meta_key") or "").strip()
+            if not mk:
+                continue
+            pk = (it.get("param_kind") or "fixed").strip()
+            if pk not in _const.PARAM_KIND_ALLOWED:
+                raise ValueError(f"Invalid param_kind: {pk}")
+            params_out.append(
+                {
+                    "meta_key": mk,
+                    "display_label": (it.get("display_label") or "").strip() or None,
+                    "default_value_text": it.get("default_value_text"),
+                    "param_kind": pk,
+                    "sort_order": int(it.get("sort_order") or 0),
+                }
+            )
+        params_out.sort(key=lambda p: (p.get("sort_order") or 0, p.get("meta_key") or ""))
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT 1 FROM strategy_template WHERE strategy_template_id = %s",
-                (strategy_template_id,),
+                """
+                UPDATE strategy_template
+                SET params_json = %s::jsonb, updated_at = now()
+                WHERE strategy_template_id = %s
+                """,
+                (json.dumps(params_out), strategy_template_id),
             )
-            if not cur.fetchone():
+            if cur.rowcount == 0:
                 raise ValueError("Template not found")
-            cur.execute("DELETE FROM strategy_template_param WHERE strategy_template_id = %s", (strategy_template_id,))
-            for it in items:
-                if not isinstance(it, dict):
-                    continue
-                mk = (it.get("meta_key") or "").strip()
-                if not mk:
-                    continue
-                pk = (it.get("param_kind") or "fixed").strip()
-                if pk not in _const.PARAM_KIND_ALLOWED:
-                    raise ValueError(f"Invalid param_kind: {pk}")
-                cur.execute(
-                    """
-                    INSERT INTO strategy_template_param
-                        (strategy_template_id, meta_key, display_label, default_value_text, param_kind, sort_order)
-                    VALUES (%s,%s,%s,%s,%s,%s)
-                    """,
-                    (
-                        strategy_template_id,
-                        mk,
-                        (it.get("display_label") or "").strip() or None,
-                        it.get("default_value_text"),
-                        pk,
-                        int(it.get("sort_order") or 0),
-                    ),
-                )
         conn.commit()
     finally:
         conn.close()
@@ -404,29 +404,18 @@ def replace_template_characteristics(
     if conn is None:
         raise ValueError("Database not configured")
     try:
+        chars_out = [(text or "").strip() for text in (lines or []) if (text or "").strip()]
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT 1 FROM strategy_template WHERE strategy_template_id = %s",
-                (strategy_template_id,),
+                """
+                UPDATE strategy_template
+                SET characteristics_json = %s::jsonb, updated_at = now()
+                WHERE strategy_template_id = %s
+                """,
+                (json.dumps(chars_out), strategy_template_id),
             )
-            if not cur.fetchone():
+            if cur.rowcount == 0:
                 raise ValueError("Template not found")
-            cur.execute(
-                "DELETE FROM strategy_template_characteristic WHERE strategy_template_id = %s",
-                (strategy_template_id,),
-            )
-            for i, text in enumerate(lines or []):
-                t = (text or "").strip()
-                if not t:
-                    continue
-                cur.execute(
-                    """
-                    INSERT INTO strategy_template_characteristic
-                        (strategy_template_id, sort_order, characteristic_text)
-                    VALUES (%s,%s,%s)
-                    """,
-                    (strategy_template_id, i, t),
-                )
         conn.commit()
     finally:
         conn.close()

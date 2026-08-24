@@ -34,7 +34,7 @@ EXPECTED_TABLES_BY_CATEGORY: Dict[str, List[str]] = {
         # preference_data_gap_ack retired → Golden Source ops_jobs.data_source_void
     ],
     "reference": [],  # reference_us_holidays → market.us_market_holiday (FDW)
-    "settings": ["settings"],
+    "settings": ["settings", "ops_audit_log"],
     "stock": [],
     "strategy": [
         "strategy_allocation",
@@ -47,11 +47,8 @@ EXPECTED_TABLES_BY_CATEGORY: Dict[str, List[str]] = {
         "strategy_opportunity_symbol",
         "strategy_structure",
         "strategy_structure_leg",
-        "strategy_structure_meta",
         "strategy_template",
-        "strategy_template_characteristic",
         "strategy_template_leg",
-        "strategy_template_param",
     ],
     "watchlist": ["watchlist"],
 }
