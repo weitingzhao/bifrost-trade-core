@@ -57,7 +57,6 @@ ib_operator:
   health_refresh_sec: 30
   max_result_bytes: 4194304
   block_ms: 5000
-  # use_for_celery_bars: retired (P7 — Market Data Plugin minute-bars enqueue)
 
 ib_connection:
   reconnect_base_sec: 2
@@ -88,28 +87,12 @@ frontend:
   prod_path: "http://127.0.0.1"
 
 ops:
-  celery_inspect_timeout_sec: 15
-  celery_inspect_wall_sec: 10
   worker_list_mode: redis_presence
   worker_list_fallback_inspect: true
   worker_list_inspect_quick_timeout_sec: 10
   worker_list_inspect_cache_ttl_sec: 20
   auth:
     allow_unauthenticated_reads: true
-  celery:
-    default_max_worker_instances: 1
-    # Hostnames (Celery nodename suffix) for Worker instance situation Dev/Prod columns when
-    # Redis presence lacks config_profile (legacy Linux prod workers). Example: server-app-ubt
-    prod_worker_hostnames: []
-    dev_worker_hostnames: []
-    canonical_queue_order:
-      - stocks_ib
-    broker_queue_display_names:
-      stocks_ib: "Stocks IB"
-  worker_profiles:
-    stocks_ib:
-      queues: ["stocks_ib"]
-      max_worker_instances: 1
 
 history_backfill:
   stock:

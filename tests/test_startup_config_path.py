@@ -70,14 +70,10 @@ def test_bifrost_config_env_wins(project_root: Path, monkeypatch: pytest.MonkeyP
     assert rest == ["--prod", "ignored"]
 
 
-def test_read_config_dev_includes_ops_worker_profiles_from_config_yaml(
+def test_read_config_dev_has_no_retired_ops_celery_fields(
     project_root: Path, tmp_path: Path
 ) -> None:
-    """run_celery --instance stocks_ib-N must see profiles merged from base config.yaml (not only dev overlay).
-
-    Uses config.yaml.example as the merge base so the assertion matches the tracked template
-    (local gitignored config.yaml may lag on developer machines).
-    """
+    """Wave 6.1: example config must not ship retired Celery worker_profiles / ops.celery blocks."""
     import shutil
 
     import yaml
@@ -88,24 +84,17 @@ def test_read_config_dev_includes_ops_worker_profiles_from_config_yaml(
         pytest.skip("config.yaml.example / config.dev.yaml not present")
 
     example_cfg = yaml.safe_load(example.read_text(encoding="utf-8")) or {}
-    example_profiles = (example_cfg.get("ops") or {}).get("worker_profiles") or {}
-    assert set(example_profiles.keys()) == {"stocks_ib"}
-    assert example_profiles["stocks_ib"].get("queues") == ["stocks_ib"]
-    example_celery = (example_cfg.get("ops") or {}).get("celery") or {}
-    assert example_celery.get("canonical_queue_order") == ["stocks_ib"]
-    assert "massive_worker_concurrency" not in example_celery
+    example_ops = example_cfg.get("ops") or {}
+    assert "worker_profiles" not in example_ops
+    assert "celery" not in example_ops
+    assert "celery_inspect_timeout_sec" not in example_ops
+    assert "celery_inspect_wall_sec" not in example_ops
 
     cfg_dir = tmp_path / "config"
     cfg_dir.mkdir()
     shutil.copy(example, cfg_dir / "config.yaml")
     shutil.copy(dev_src, cfg_dir / "config.dev.yaml")
     cfg, _ = read_config(str(cfg_dir / "config.dev.yaml"))
-    profiles = (cfg.get("ops") or {}).get("worker_profiles") or {}
-    assert "stocks_ib" in profiles
-    assert profiles["stocks_ib"].get("queues") == ["stocks_ib"]
-    assert "options_massive" not in profiles
-    assert "stocks_massive" not in profiles
-    assert "stocks_massive_high" not in profiles
-    assert "options_massive_high" not in profiles
-    celery = (cfg.get("ops") or {}).get("celery") or {}
-    assert celery.get("canonical_queue_order") == ["stocks_ib"]
+    ops = cfg.get("ops") or {}
+    assert "worker_profiles" not in ops
+    assert "celery" not in ops
