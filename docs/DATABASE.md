@@ -91,6 +91,21 @@ Retired (Wave 9): `strategy_dim` (→ six `dim_*_t` enum types + read-only catal
 
 **Wave 9 — strategy collapse** (core **0.17.0**): one-shot migration `migrate_wave9_strategy_collapse()` in [`wave9_migrations.py`](../src/bifrost_core/persistence/postgres/wave9_migrations.py).
 
+## §6 Schema changelog (Wave 1–10)
+
+| Wave | Core version | Change |
+|------|--------------|--------|
+| Wave 1 | 0.8.1+ | Merge `gate_safety_state/intent/guard` into `gate_safety_strategy` flat columns |
+| Wave 2 | 0.11.0 | Fold `strategy_template_param/characteristic`, `strategy_structure_meta` into parent jsonb |
+| Wave 3 | 0.12.0 | Drop `strategy_history`; extend `raw_broker.transactions` UNIQUE |
+| Wave 4 | 0.13.0 | `ops_audit_log` partitioned (later dropped Wave 6) |
+| Wave 5 | 0.14.0 | Trade Celery / `job_*` queues retired → Plugin `ops_jobs` |
+| Wave 6 | 0.15.0 | Drop `ops_audit_log`; audit → platform-api |
+| Wave 8 | 0.16.0 | `settings.active_*_id` FK ON DELETE SET NULL; Flex token columns DEPRECATED |
+| Wave 9 | 0.17.0 | Collapse strategy child tables + gate flat cols → jsonb; `strategy_dim` → enum + catalog |
+| Wave 10 | 0.17.2 | Remove Wave 1 `_upgrade_gate_safety_strategy` DDL path; `ensure_dim_enum_types()` from catalog; CREATE uses `dim_*_t` |
+| Wave 11 | 0.18.0 | DROP `settings.ib_flex_host_token` / `ib_flex_secondary_token`; Flex Plugin Secret-only token path |
+
 
 ## Brokerage tables
 

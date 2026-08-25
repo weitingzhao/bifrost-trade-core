@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
-from bifrost_core.persistence.postgres.wave9_migrations import migrate_wave9_strategy_collapse
+from bifrost_core.persistence.postgres.wave9_migrations import (
+    ensure_dim_enum_types,
+    migrate_wave9_strategy_collapse,
+)
+from bifrost_core.persistence.postgres.wave11_migrations import migrate_wave11_drop_flex_token_columns
 
 # IB / brokerage tables live in bifrost_golden_source.raw_broker.* (see brokerage_ddl.py).
 # Per-env DBs expose them via postgres_fdw. Do not recreate in public.
@@ -51,80 +55,10 @@ _P8_RETIRED_PUBLIC_TABLES = frozenset(
 _GATE_SAFETY_RETIRED_CHILD_TABLES = frozenset(
     {"gate_safety_state", "gate_safety_intent", "gate_safety_guard"}
 )
-_GATE_SAFETY_MERGED_COLUMN_DDL = (
-    "epsilon_band integer NOT NULL DEFAULT 10",
-    "threshold_hedge_shares integer NOT NULL DEFAULT 25",
-    "max_delta_limit integer NOT NULL DEFAULT 500",
-    "vol_window_min integer NOT NULL DEFAULT 5",
-    "stale_ts_threshold_ms integer NOT NULL DEFAULT 5000",
-    "wide_spread_pct double precision NOT NULL DEFAULT 0.1",
-    "extreme_spread_pct double precision NOT NULL DEFAULT 0.5",
-    "data_lag_threshold_ms integer NOT NULL DEFAULT 1000",
-    "min_hedge_shares integer NOT NULL DEFAULT 10",
-    "cooldown_seconds integer NOT NULL DEFAULT 60",
-    "max_hedge_shares_per_order integer NOT NULL DEFAULT 500",
-    "min_price_move_pct double precision NOT NULL DEFAULT 0.2",
-    "max_daily_hedge_count integer NOT NULL DEFAULT 50",
-    "max_position_shares integer NOT NULL DEFAULT 2000",
-    "max_daily_loss_usd double precision NOT NULL DEFAULT 5000.0",
-    "max_net_delta_shares integer NOT NULL DEFAULT 100",
-    "max_spread_pct double precision NOT NULL DEFAULT 0.05",
-    "paper_trade boolean NOT NULL DEFAULT true",
-)
 
 
-def _upgrade_gate_safety_strategy(cur) -> None:
-    """Add merged state/intent/guard columns, copy from 1:1 children, drop children.
-
-    Idempotent: ADD COLUMN IF NOT EXISTS + DROP TABLE IF EXISTS. Safe to re-run.
-    """
-    alters = ", ".join(f"ADD COLUMN IF NOT EXISTS {col}" for col in _GATE_SAFETY_MERGED_COLUMN_DDL)
-    cur.execute(f"ALTER TABLE gate_safety_strategy {alters}")
-    cur.execute("SELECT to_regclass('public.gate_safety_state')")
-    if cur.fetchone()[0] is not None:
-        cur.execute(
-            """
-            UPDATE gate_safety_strategy s SET
-                epsilon_band = st.epsilon_band,
-                threshold_hedge_shares = st.threshold_hedge_shares,
-                max_delta_limit = st.max_delta_limit,
-                vol_window_min = st.vol_window_min,
-                stale_ts_threshold_ms = st.stale_ts_threshold_ms,
-                wide_spread_pct = st.wide_spread_pct,
-                extreme_spread_pct = st.extreme_spread_pct,
-                data_lag_threshold_ms = st.data_lag_threshold_ms
-            FROM gate_safety_state st
-            WHERE s.gate_safety_strategy_id = st.gate_safety_strategy_id
-            """
-        )
-    cur.execute("SELECT to_regclass('public.gate_safety_intent')")
-    if cur.fetchone()[0] is not None:
-        cur.execute(
-            """
-            UPDATE gate_safety_strategy s SET
-                min_hedge_shares = i.min_hedge_shares,
-                cooldown_seconds = i.cooldown_seconds,
-                max_hedge_shares_per_order = i.max_hedge_shares_per_order,
-                min_price_move_pct = i.min_price_move_pct
-            FROM gate_safety_intent i
-            WHERE s.gate_safety_strategy_id = i.gate_safety_strategy_id
-            """
-        )
-    cur.execute("SELECT to_regclass('public.gate_safety_guard')")
-    if cur.fetchone()[0] is not None:
-        cur.execute(
-            """
-            UPDATE gate_safety_strategy s SET
-                max_daily_hedge_count = g.max_daily_hedge_count,
-                max_position_shares = g.max_position_shares,
-                max_daily_loss_usd = g.max_daily_loss_usd,
-                max_net_delta_shares = g.max_net_delta_shares,
-                max_spread_pct = g.max_spread_pct,
-                paper_trade = g.paper_trade
-            FROM gate_safety_guard g
-            WHERE s.gate_safety_strategy_id = g.gate_safety_strategy_id
-            """
-        )
+def _drop_gate_safety_retired_child_tables(cur) -> None:
+    """Drop Wave 1 child tables if they still exist on legacy databases."""
     for name in _GATE_SAFETY_RETIRED_CHILD_TABLES:
         cur.execute(f"DROP TABLE IF EXISTS {name} CASCADE")
 
@@ -287,8 +221,6 @@ def _ensure_tables(conn, log=None, log_table=None) -> None:
                 ib_host_account_id text,
                 stream_host_account_id text,
                 stream_secondary_account_id text,
-                ib_flex_host_token text,  -- DEPRECATED Wave 8: canonical FLEX_HOST_TOKEN Secret
-                ib_flex_secondary_token text,  -- DEPRECATED Wave 8: canonical FLEX_SECONDARY_TOKEN Secret
                 flex_default_range_days integer NOT NULL DEFAULT 30,
                 flex_init_range_days integer NOT NULL DEFAULT 360,
                 active_strategy_structure_id bigint,
@@ -303,6 +235,7 @@ def _ensure_tables(conn, log=None, log_table=None) -> None:
             ON CONFLICT (id) DO NOTHING
         """
         )
+        migrate_wave11_drop_flex_token_columns(cur)
         _log(
             "account / account_positions / contract_quote_live / commissions / "
             "transactions skipped (brokerage.* Golden Source)"
@@ -422,6 +355,7 @@ def _ensure_tables(conn, log=None, log_table=None) -> None:
         conn.commit()
         # reference_us_holidays retired → market.us_market_holiday (Golden Source / FDW)
         _log("gate_safety_*, strategy_*, settings active_*")
+        ensure_dim_enum_types(cur)
         _log_table("gate_safety_strategy", "Safety boundary set (metadata + params_json)")
         cur.execute(
             """
@@ -429,12 +363,12 @@ def _ensure_tables(conn, log=None, log_table=None) -> None:
                 gate_safety_strategy_id bigserial PRIMARY KEY,
                 name text NOT NULL,
                 version integer NOT NULL DEFAULT 1,
-                dim_direction text,
-                dim_structure text,
-                dim_coverage text,
-                dim_risk text,
-                dim_volatility text,
-                dim_time text,
+                dim_direction dim_direction_t,
+                dim_structure dim_structure_t,
+                dim_coverage dim_coverage_t,
+                dim_risk dim_risk_t,
+                dim_volatility dim_volatility_t,
+                dim_time dim_time_t,
                 is_active boolean NOT NULL DEFAULT true,
                 params_json jsonb NOT NULL DEFAULT '{}'::jsonb,
                 created_at timestamptz NOT NULL DEFAULT now(),
@@ -442,7 +376,7 @@ def _ensure_tables(conn, log=None, log_table=None) -> None:
             )
             """
         )
-        _upgrade_gate_safety_strategy(cur)
+        _drop_gate_safety_retired_child_tables(cur)
         _log("gate_safety_state / intent / guard skipped (merged into gate_safety_strategy)")
         _log_table(
             "strategy_template", "Flat option structure template (six dims + legs_json)"
@@ -453,12 +387,12 @@ def _ensure_tables(conn, log=None, log_table=None) -> None:
                 strategy_template_id bigserial PRIMARY KEY,
                 template_code text NOT NULL UNIQUE,
                 display_name text NOT NULL,
-                dim_direction text,
-                dim_structure text,
-                dim_coverage text,
-                dim_risk text,
-                dim_volatility text,
-                dim_time text,
+                dim_direction dim_direction_t,
+                dim_structure dim_structure_t,
+                dim_coverage dim_coverage_t,
+                dim_risk dim_risk_t,
+                dim_volatility dim_volatility_t,
+                dim_time dim_time_t,
                 explanation text,
                 typical_use text,
                 example text,

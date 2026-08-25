@@ -70,6 +70,28 @@ for dim_type, entries in _DIM_ENTRIES.items():
     _DIM_BY_TYPE[dim_type] = items
     _ALLOWED_CODES[dim_type] = codes
 
+# Wave 10: canonical enum type names + literals for PostgreSQL dim_*_t types.
+DIM_TYPE_TO_ENUM: Dict[str, str] = {
+    "direction": "dim_direction_t",
+    "structure": "dim_structure_t",
+    "coverage": "dim_coverage_t",
+    "risk": "dim_risk_t",
+    "volatility": "dim_volatility_t",
+    "time": "dim_time_t",
+}
+
+
+def dim_literals_by_type() -> Dict[str, tuple[str, ...]]:
+    """Return dim codes per type (order matches catalog sort_order)."""
+    return {
+        dim_type: tuple(code for code, _, _ in entries) for dim_type, entries in _DIM_ENTRIES.items()
+    }
+
+
+def dim_default_code(dim_type: str) -> str:
+    literals = dim_literals_by_type().get(dim_type, ())
+    return literals[0] if literals else ""
+
 
 def list_dims_grouped() -> Dict[str, List[Dict[str, Any]]]:
     return {dt: list(items) for dt, items in _DIM_BY_TYPE.items()}

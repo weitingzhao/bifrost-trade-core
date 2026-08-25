@@ -35,9 +35,12 @@ make db-init        # 初始化/刷新 PostgreSQL schema
 
 ## 版本发布规范
 
-- 修改 `src/bifrost_core/` 中的共享库后，必须 bump `pyproject.toml` 中的 version（当前 **0.17.0**）
+- 修改 `src/bifrost_core/` 中的共享库后，必须 bump `pyproject.toml` 中的 version（当前 **0.18.0**）
 - 其他 repo 通过 git tag 安装：`pip install git+https://github.com/ORG/bifrost-trade-core.git@v0.x.x`
 - 破坏性变更需要同步更新所有依赖 repo 的 pyproject.toml
+- **0.18.0**: Wave 11 BREAKING — DROP `settings.ib_flex_*_token`; Flex Plugin Secret-only tokens
+- **0.17.2**: Wave 10 — remove Wave 1 `_upgrade_gate_safety_strategy` dead path; `ensure_dim_enum_types()` from catalog; CREATE TABLE uses `dim_*_t` enums directly
+- **0.17.1**: fix — add `pydantic>=2.0` dependency for `gate_params.py`
 - **0.17.0**: Wave 9 — strategy child tables + gate flat cols → jsonb; `strategy_dim` → enum types + catalog; `migrate_wave9_strategy_collapse()`
 - **0.16.0**: Wave 8 — `settings.active_*_id` FK ON DELETE SET NULL; Flex token columns DEPRECATED
 - **0.15.2**: Wave 6.3 — `validate_settings_active_refs()` for settings `active_*_id` write guard; Golden Source canonical docs
@@ -47,7 +50,7 @@ make db-init        # 初始化/刷新 PostgreSQL schema
 - **0.13.0**: Wave 4 DB hygiene — `ops_audit_log` partitioned by month (`timestamptz`), 90-day partition drop on ensure_tables; Flex token columns retained as env-fallback only
 - **0.12.0**: Wave 3 DB hygiene — drop `strategy_history` (DDL/reader/writer); extend `raw_broker.transactions` UNIQUE to `(account_id, ts, amount, type, report_date)`
 - **0.11.0**: Wave 2 DB hygiene — strategy_template_param/characteristic + strategy_structure_meta folded into parent jsonb; ops_audit_log DDL owned by core; preference_* retained (live FE/API consumers)
-- **0.10.11**: Wave 1 DB hygiene — gate_safety_state/intent/guard DROP already idempotent via `_upgrade_gate_safety_strategy`
+- **0.10.11**: Wave 1 DB hygiene — gate_safety_state/intent/guard merged then retired (Wave 9 params_json)
 - **0.10.10**: `preference_data_gap_ack` retired — dropped on startup; Golden Source `ops_jobs.data_source_void` is authoritative
 
 ## 数据库规范
@@ -55,7 +58,7 @@ make db-init        # 初始化/刷新 PostgreSQL schema
 - 开发库：`bifrost_dev`，生产库：`bifrost_prod`
 - 表命名前缀：`daemon_`、`account_`、`contract_`、`strategy_`、`gate_safety_`、`job_`、`preference_`
 - FK 列名与被引用 PK 名完全一致
-- `gate_safety_*` 表：标量列，不使用 jsonb
+- `gate_safety_strategy`：metadata 标量 + **`params_json`**（Wave 9）；六个 `dim_*` 列为 `dim_*_t` enum（Wave 10）
 - DDL 变更必须在 `docs/DATABASE.md` 的 §6 变更日志中记录
 
 ## 测试标记

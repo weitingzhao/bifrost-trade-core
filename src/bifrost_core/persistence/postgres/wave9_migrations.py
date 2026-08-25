@@ -6,6 +6,7 @@ import json
 from typing import Any
 
 from bifrost_core.monitor.reader.gate_safety import build_gate_params_from_flat_row
+from bifrost_core.monitor.reader.strategy_dim_catalog import DIM_TYPE_TO_ENUM, dim_literals_by_type
 from bifrost_core.monitor.schemas.gate_params import GateParams
 
 _WAVE9_RETIRED_TABLES = (
@@ -17,14 +18,7 @@ _WAVE9_RETIRED_TABLES = (
     "strategy_dim",
 )
 
-_DIM_TYPE_TO_ENUM = {
-    "direction": "dim_direction_t",
-    "structure": "dim_structure_t",
-    "coverage": "dim_coverage_t",
-    "risk": "dim_risk_t",
-    "volatility": "dim_volatility_t",
-    "time": "dim_time_t",
-}
+_DIM_TYPE_TO_ENUM = DIM_TYPE_TO_ENUM
 
 _DIM_COL_TO_TYPE = {
     "dim_direction": "direction",
@@ -316,6 +310,26 @@ def _migrate_gate_params(cur: Any) -> None:
         )
 
 
+def ensure_dim_enum_types(cur: Any) -> None:
+    """Create dim_*_t enum types from strategy_dim_catalog literals (Wave 10 canonical source)."""
+    literals_map = dim_literals_by_type()
+    for dim_type, enum_name in DIM_TYPE_TO_ENUM.items():
+        literals = literals_map.get(dim_type, ())
+        if not literals:
+            continue
+        labels_sql = ", ".join("'" + v.replace("'", "''") + "'" for v in literals)
+        cur.execute(
+            f"""
+            DO $enum$
+            BEGIN
+              IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = '{enum_name}') THEN
+                CREATE TYPE {enum_name} AS ENUM ({labels_sql});
+              END IF;
+            END $enum$;
+            """
+        )
+
+
 def _collect_dim_literals(cur: Any, dim_type: str) -> list[str]:
     literals: set[str] = set()
     if _table_exists(cur, "strategy_dim"):
@@ -340,21 +354,8 @@ def _collect_dim_literals(cur: Any, dim_type: str) -> list[str]:
 
 
 def _create_dim_enums(cur: Any) -> None:
-    for dim_type, enum_name in _DIM_TYPE_TO_ENUM.items():
-        literals = _collect_dim_literals(cur, dim_type)
-        if not literals:
-            continue
-        labels_sql = ", ".join("'" + v.replace("'", "''") + "'" for v in literals)
-        cur.execute(
-            f"""
-            DO $enum$
-            BEGIN
-              IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = '{enum_name}') THEN
-                CREATE TYPE {enum_name} AS ENUM ({labels_sql});
-              END IF;
-            END $enum$;
-            """
-        )
+    """Legacy alias — Wave 10 uses catalog literals only."""
+    ensure_dim_enum_types(cur)
 
 
 def _alter_dim_columns_to_enum(cur: Any) -> None:
