@@ -61,32 +61,54 @@ class StatusReader:
         """Compat helper mirroring PostgreSQLSink._ensure_conn()."""
         return self._connect()
 
+    def _drop_conn(self) -> None:
+        conn = self._conn
+        self._conn = None
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
     def _connect(self) -> bool:
         if self._conn is not None:
             try:
-                self._conn.rollback()
-                return True
+                # Server-side idle/statement timeouts leave a dead client handle;
+                # rollback alone is not enough — check closed and reset.
+                if getattr(self._conn, "closed", 1):
+                    self._drop_conn()
+                else:
+                    self._conn.rollback()
+                    return True
             except Exception:
-                self._conn = None
+                self._drop_conn()
         try:
             params = _get_conn_params(self._config)
             self._conn = psycopg2.connect(**params)
             with self._conn.cursor() as cur:
                 cur.execute("SET lock_timeout = '5s'")
-                cur.execute("SET idle_in_transaction_session_timeout = '30s'")
+                # Cap runaway /status account-position SQL (correlated exec lookups).
+                # Must stay well under platform probe HTTP timeout (8s).
+                # Light accounts path is cheap; 5s leaves headroom without wedging probes.
+                cur.execute("SET statement_timeout = '5s'")
+                cur.execute("SET idle_in_transaction_session_timeout = '15s'")
             self._conn.commit()
             return True
         except Exception as e:
             logger.warning("StatusReader connect failed: %s", e)
+            self._drop_conn()
             return False
 
     def _end_read_txn(self) -> None:
         """End any implicit read transaction to avoid idle-in-transaction between requests."""
         if self._conn is not None:
             try:
+                if getattr(self._conn, "closed", 1):
+                    self._drop_conn()
+                    return
                 self._conn.rollback()
             except Exception:
-                pass
+                self._drop_conn()
 
     def close(self) -> None:
         if self._conn:
@@ -541,19 +563,46 @@ class StatusReader:
         return status_module.get_risk_summary(status_config=self._config)
 
     # --- Accounts domain (delegate to accounts module) ---
-    def get_accounts_from_tables(self) -> Optional[List[Dict[str, Any]]]:
-        if not self._connect():
-            return None
-        result = accounts_module.get_accounts_from_tables(self._conn)
-        self._end_read_txn()
-        return result
+    def get_accounts_from_tables(
+        self,
+        *,
+        include_position_exec_times: bool = True,
+    ) -> Optional[List[Dict[str, Any]]]:
+        last_err: Optional[BaseException] = None
+        for attempt in range(2):
+            if not self._connect():
+                return None
+            try:
+                result = accounts_module.get_accounts_from_tables(
+                    self._conn,
+                    include_position_exec_times=include_position_exec_times,
+                )
+                # Module may return None after a dead connection; retry once for Live streams.
+                if result is not None:
+                    return result
+                if attempt == 0 and (
+                    self._conn is None or getattr(self._conn, "closed", 0)
+                ):
+                    self._drop_conn()
+                    continue
+                return result
+            except (psycopg2.OperationalError, psycopg2.InterfaceError) as e:
+                last_err = e
+                self._drop_conn()
+                continue
+            finally:
+                self._end_read_txn()
+        if last_err is not None:
+            logger.warning("get_accounts_from_tables failed after reconnect: %s", last_err)
+        return None
 
     def get_accounts_fetched_at(self) -> Optional[float]:
         if not self._connect():
             return None
-        result = accounts_module.get_accounts_fetched_at(self._conn)
-        self._end_read_txn()
-        return result
+        try:
+            return accounts_module.get_accounts_fetched_at(self._conn)
+        finally:
+            self._end_read_txn()
 
     # --- Portfolio model analysis (R-M8) ---
     def get_model_analysis(self, account_id: str) -> Optional[Dict[str, Any]]:

@@ -35,9 +35,10 @@ make db-init        # 初始化/刷新 PostgreSQL schema
 
 ## 版本发布规范
 
-- 修改 `src/bifrost_core/` 中的共享库后，必须 bump `pyproject.toml` 中的 version（当前 **0.18.0**）
+- 修改 `src/bifrost_core/` 中的共享库后，必须 bump `pyproject.toml` 中的 version（当前 **0.18.1**）
 - 其他 repo 通过 git tag 安装：`pip install git+https://github.com/ORG/bifrost-trade-core.git@v0.x.x`
 - 破坏性变更需要同步更新所有依赖 repo 的 pyproject.toml
+- **0.18.1**: Flex/GS writes use `raw_broker.*` (`GOLDEN_*`) — `write_account_executions_to_db` / commissions / transactions no longer insert into `brokerage.*` on Golden Source
 - **0.18.0**: Wave 11 BREAKING — DROP `settings.ib_flex_*_token`; Flex Plugin Secret-only tokens
 - **0.17.2**: Wave 10 — remove Wave 1 `_upgrade_gate_safety_strategy` dead path; `ensure_dim_enum_types()` from catalog; CREATE TABLE uses `dim_*_t` enums directly
 - **0.17.1**: fix — add `pydantic>=2.0` dependency for `gate_params.py`

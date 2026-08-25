@@ -20,6 +20,11 @@ from bifrost_core.persistence.postgres.brokerage_tables import (
     EXECUTIONS_RAW_FLEX,
     EXECUTIONS_RAW_JOURNAL,
     EXECUTIONS_RAW_TWS,
+    GOLDEN_COMMISSIONS,
+    GOLDEN_EXECUTIONS_RAW_FLEX,
+    GOLDEN_EXECUTIONS_RAW_JOURNAL,
+    GOLDEN_EXECUTIONS_RAW_TWS,
+    GOLDEN_TRANSACTIONS,
     INSTANCE_ALLOCATION,
     POSITIONS,
     TRANSACTIONS,
@@ -189,9 +194,20 @@ def _raw_table_pk_for_account_executions_id(account_executions_id: int) -> Tuple
     return (EXECUTIONS_RAW_TWS, "executions_raw_tws_id", -aid)
 
 
-def get_accounts_from_tables(conn: Any) -> Optional[List[Dict[str, Any]]]:
+def get_accounts_from_tables(
+    conn: Any,
+    *,
+    include_position_exec_times: bool = True,
+) -> Optional[List[Dict[str, Any]]]:
+    """Load account snapshots.
+
+    When ``include_position_exec_times`` is False (Live /status light path), also skip
+    per-position stock-day fallback lookups and strategy_links exec scans — those were
+    closing the StatusReader connection under statement_timeout and emptying Market Streams.
+    """
     if conn is None:
         return None
+    light = not include_position_exec_times
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(
@@ -217,18 +233,8 @@ def get_accounts_from_tables(conn: Any) -> Optional[List[Dict[str, Any]]]:
                 for k, v in extra.items():
                     summary[k] = v if isinstance(v, str) else str(v)
             _exec_tbl = _EXEC_READ_TABLE
-            with conn.cursor(cursor_factory=RealDictCursor) as cur2:
-                cur2.execute(
-                    f"""
-                    SELECT
-                        ap.account_id,
-                        ap.symbol,
-                        ap.sec_type,
-                        ap.exchange,
-                        ap.currency,
-                        ap.position,
-                        ap.avg_cost,
-                        ap.updated_at AS position_updated_at,
+            if include_position_exec_times:
+                _exec_time_cols = f"""
                         (SELECT e.exec_time
                          FROM {_exec_tbl} e
                          WHERE e.account_id = ap.account_id
@@ -278,7 +284,24 @@ def get_accounts_from_tables(conn: Any) -> Optional[List[Dict[str, Any]]]:
                              )
                            )
                          ORDER BY e.exec_time DESC NULLS LAST
-                         LIMIT 1) AS position_trade_date,
+                         LIMIT 1) AS position_trade_date,"""
+            else:
+                _exec_time_cols = """
+                        NULL::timestamptz AS position_exec_time,
+                        NULL::date AS position_trade_date,"""
+            with conn.cursor(cursor_factory=RealDictCursor) as cur2:
+                cur2.execute(
+                    f"""
+                    SELECT
+                        ap.account_id,
+                        ap.symbol,
+                        ap.sec_type,
+                        ap.exchange,
+                        ap.currency,
+                        ap.position,
+                        ap.avg_cost,
+                        ap.updated_at AS position_updated_at,
+                        {_exec_time_cols}
                         ap.expiry,
                         ap.strike,
                         ap.option_right,
@@ -393,20 +416,23 @@ def get_accounts_from_tables(conn: Any) -> Optional[List[Dict[str, Any]]]:
                 used_stock_day_price = False
 
                 if sec_typ == "STK":
-                    stale = stk_contract_quote_stale_for_positions(p)
-                    fb = market_module.get_stock_day_fallback_price(conn, p.get("symbol") or "")
-                    if from_live is not None and not stale:
+                    if light:
                         price_val = from_live
-                    elif fb is not None:
-                        price_val = fb[0]
-                        used_stock_day_price = True
-                        pos_dict["price_updated_at"] = fb[1]
-                        # Latest bar today → prev_close is yesterday; otherwise bar close is yesterday.
-                        dpc = resolve_daily_prev_close_from_fallback(fb[0], fb[1], fb[2])
-                        if dpc is not None:
-                            pos_dict["daily_prev_close"] = dpc
-                    elif from_live is not None:
-                        price_val = from_live
+                    else:
+                        stale = stk_contract_quote_stale_for_positions(p)
+                        fb = market_module.get_stock_day_fallback_price(conn, p.get("symbol") or "")
+                        if from_live is not None and not stale:
+                            price_val = from_live
+                        elif fb is not None:
+                            price_val = fb[0]
+                            used_stock_day_price = True
+                            pos_dict["price_updated_at"] = fb[1]
+                            # Latest bar today → prev_close is yesterday; otherwise bar close is yesterday.
+                            dpc = resolve_daily_prev_close_from_fallback(fb[0], fb[1], fb[2])
+                            if dpc is not None:
+                                pos_dict["daily_prev_close"] = dpc
+                        elif from_live is not None:
+                            price_val = from_live
                 else:
                     price_val = from_live
 
@@ -475,7 +501,7 @@ def get_accounts_from_tables(conn: Any) -> Optional[List[Dict[str, Any]]]:
             # Derive strategy_links from account_executions (one position may map to multiple strategies)
             ck_list = [pd.get("contract_key") for pd in positions if pd.get("contract_key")]
             strat_links_map: Dict[str, list] = {}
-            if ck_list:
+            if ck_list and not light:
                 try:
                     with conn.cursor(cursor_factory=RealDictCursor) as cur_sl:
                         cur_sl.execute(
@@ -533,6 +559,9 @@ def get_accounts_from_tables(conn: Any) -> Optional[List[Dict[str, Any]]]:
                     pd["strategy_links"] = links
             out.append({"account_id": acc_id, "summary": summary, "positions": positions})
         return out
+    except (psycopg2.OperationalError, psycopg2.InterfaceError):
+        # Let StatusReader reconnect/retry — swallowing left Live Market Streams empty.
+        raise
     except Exception as e:
         logger.warning("get_accounts_from_tables failed: %s", e)
         try:
@@ -806,16 +835,16 @@ def write_account_executions_to_db(
                         model,
                         raw_extra,
                     )
-                    # ── Write to source-split raw tables (brokerage.*) ──
+                    # ── Write to source-split raw tables (raw_broker.* on Golden Source) ──
                     try:
                         is_flex_source = (source == "flex_trades")
                         is_journal_source = (source == "journal_closed")
                         if is_flex_source:
-                            raw_table = EXECUTIONS_RAW_FLEX
+                            raw_table = GOLDEN_EXECUTIONS_RAW_FLEX
                         elif is_journal_source:
-                            raw_table = EXECUTIONS_RAW_JOURNAL
+                            raw_table = GOLDEN_EXECUTIONS_RAW_JOURNAL
                         else:
-                            raw_table = EXECUTIONS_RAW_TWS
+                            raw_table = GOLDEN_EXECUTIONS_RAW_TWS
                         if exec_id:
                             if is_flex_source:
                                 raw_update_set = ", ".join(
@@ -833,7 +862,7 @@ def write_account_executions_to_db(
                             else:
                                 _ret = (
                                     "\nRETURNING executions_raw_tws_id"
-                                    if raw_table == EXECUTIONS_RAW_TWS
+                                    if raw_table == GOLDEN_EXECUTIONS_RAW_TWS
                                     else ""
                                 )
                                 cur.execute(
@@ -844,7 +873,7 @@ def write_account_executions_to_db(
                                     """,
                                     vals,
                                 )
-                                if stats_out is not None and raw_table == EXECUTIONS_RAW_TWS:
+                                if stats_out is not None and raw_table == GOLDEN_EXECUTIONS_RAW_TWS:
                                     ins_row = cur.fetchone()
                                     if ins_row and ins_row[0] is not None:
                                         stats_out["tws_raw_inserted"] += 1
@@ -854,7 +883,7 @@ def write_account_executions_to_db(
                                         cur.execute(
                                             f"""
                                             SELECT executions_raw_tws_id
-                                            FROM {EXECUTIONS_RAW_TWS}
+                                            FROM {GOLDEN_EXECUTIONS_RAW_TWS}
                                             WHERE exec_id = %s
                                             LIMIT 1
                                             """,
@@ -866,7 +895,7 @@ def write_account_executions_to_db(
                         else:
                             _ret_ins = (
                                 "\nRETURNING executions_raw_tws_id"
-                                if raw_table == EXECUTIONS_RAW_TWS
+                                if raw_table == GOLDEN_EXECUTIONS_RAW_TWS
                                 else ""
                             )
                             cur.execute(
@@ -876,7 +905,7 @@ def write_account_executions_to_db(
                                 """,
                                 vals,
                             )
-                            if stats_out is not None and raw_table == EXECUTIONS_RAW_TWS:
+                            if stats_out is not None and raw_table == GOLDEN_EXECUTIONS_RAW_TWS:
                                 ins_row = cur.fetchone() if _ret_ins else None
                                 if ins_row and ins_row[0] is not None:
                                     stats_out["tws_raw_inserted"] += 1
@@ -886,7 +915,10 @@ def write_account_executions_to_db(
                         if getattr(_raw_e, "pgcode", None) == "42P01":
                             if stats_out is not None:
                                 stats_out["tws_raw_missing_table"] = True
-                            pass
+                            try:
+                                conn.rollback()
+                            except Exception:
+                                pass
                         else:
                             logger.warning(
                                 "write_account_executions_to_db: raw insert failed table=%s exec_id=%r: %s",
@@ -928,28 +960,28 @@ def write_account_executions_to_db(
                     if exec_id and has_comm:
                         cur.execute(
                             f"""
-                            INSERT INTO {COMMISSIONS} (exec_id, commission, currency, realized_pnl, yield_, yield_redemption_date)
+                            INSERT INTO {GOLDEN_COMMISSIONS} (exec_id, commission, currency, realized_pnl, yield_, yield_redemption_date)
                             VALUES (%s, %s, %s, %s, %s, %s)
                             ON CONFLICT (exec_id) DO UPDATE SET
                                 commission = CASE
                                     WHEN EXCLUDED.commission IS NOT NULL AND EXCLUDED.commission != 0 THEN EXCLUDED.commission
-                                    ELSE {COMMISSIONS}.commission
+                                    ELSE {GOLDEN_COMMISSIONS}.commission
                                 END,
                                 currency = CASE
                                     WHEN EXCLUDED.currency IS NOT NULL AND TRIM(COALESCE(EXCLUDED.currency, '')) != '' THEN EXCLUDED.currency
-                                    ELSE {COMMISSIONS}.currency
+                                    ELSE {GOLDEN_COMMISSIONS}.currency
                                 END,
                                 realized_pnl = CASE
                                     WHEN EXCLUDED.realized_pnl IS NOT NULL AND EXCLUDED.realized_pnl != 0 THEN EXCLUDED.realized_pnl
-                                    ELSE {COMMISSIONS}.realized_pnl
+                                    ELSE {GOLDEN_COMMISSIONS}.realized_pnl
                                 END,
                                 yield_ = CASE
                                     WHEN EXCLUDED.yield_ IS NOT NULL AND EXCLUDED.yield_ != 0 THEN EXCLUDED.yield_
-                                    ELSE {COMMISSIONS}.yield_
+                                    ELSE {GOLDEN_COMMISSIONS}.yield_
                                 END,
                                 yield_redemption_date = CASE
                                     WHEN EXCLUDED.yield_redemption_date IS NOT NULL AND EXCLUDED.yield_redemption_date != 0 THEN EXCLUDED.yield_redemption_date
-                                    ELSE {COMMISSIONS}.yield_redemption_date
+                                    ELSE {GOLDEN_COMMISSIONS}.yield_redemption_date
                                 END
                             """,
                             (exec_id, commission_val, currency_val, realized_pnl_val, yield_val, yield_redemption_date_val),
@@ -998,28 +1030,28 @@ def update_execution_commission(
             with conn.cursor() as cur:
                 cur.execute(
                     f"""
-                    INSERT INTO {COMMISSIONS} (exec_id, commission, currency, realized_pnl, yield_, yield_redemption_date)
+                    INSERT INTO {GOLDEN_COMMISSIONS} (exec_id, commission, currency, realized_pnl, yield_, yield_redemption_date)
                     VALUES (%s, %s, %s, %s, %s, %s)
                     ON CONFLICT (exec_id) DO UPDATE SET
                         commission = CASE
                             WHEN EXCLUDED.commission IS NOT NULL AND EXCLUDED.commission != 0 THEN EXCLUDED.commission
-                            ELSE {COMMISSIONS}.commission
+                            ELSE {GOLDEN_COMMISSIONS}.commission
                         END,
                         currency = CASE
                             WHEN EXCLUDED.currency IS NOT NULL AND TRIM(COALESCE(EXCLUDED.currency, '')) != '' THEN EXCLUDED.currency
-                            ELSE {COMMISSIONS}.currency
+                            ELSE {GOLDEN_COMMISSIONS}.currency
                         END,
                         realized_pnl = CASE
                             WHEN EXCLUDED.realized_pnl IS NOT NULL AND EXCLUDED.realized_pnl != 0 THEN EXCLUDED.realized_pnl
-                            ELSE {COMMISSIONS}.realized_pnl
+                            ELSE {GOLDEN_COMMISSIONS}.realized_pnl
                         END,
                         yield_ = CASE
                             WHEN EXCLUDED.yield_ IS NOT NULL AND EXCLUDED.yield_ != 0 THEN EXCLUDED.yield_
-                            ELSE {COMMISSIONS}.yield_
+                            ELSE {GOLDEN_COMMISSIONS}.yield_
                         END,
                         yield_redemption_date = CASE
                             WHEN EXCLUDED.yield_redemption_date IS NOT NULL AND EXCLUDED.yield_redemption_date != 0 THEN EXCLUDED.yield_redemption_date
-                            ELSE {COMMISSIONS}.yield_redemption_date
+                            ELSE {GOLDEN_COMMISSIONS}.yield_redemption_date
                         END
                     """,
                     (exec_id, commission_val, currency_val, realized_pnl_val, yield_val, yield_redemption_date_val),
@@ -1228,7 +1260,7 @@ def upsert_account_transactions(status_config: dict, rows: List[Dict[str, Any]])
 
                     cur.execute(
                         f"""
-                        INSERT INTO {TRANSACTIONS} (
+                        INSERT INTO {GOLDEN_TRANSACTIONS} (
                             account_id, ts, amount, type, currency, description,
                             flex_transaction_id, flex_type, flex_code,
                             asset_category, asset_subcategory,
@@ -1245,21 +1277,21 @@ def upsert_account_transactions(status_config: dict, rows: List[Dict[str, Any]])
                             %s, %s
                         )
                         ON CONFLICT (account_id, ts, amount, type, report_date) DO UPDATE SET
-                            currency = COALESCE(EXCLUDED.currency, {TRANSACTIONS}.currency),
-                            description = COALESCE(EXCLUDED.description, {TRANSACTIONS}.description),
-                            flex_transaction_id = COALESCE(EXCLUDED.flex_transaction_id, {TRANSACTIONS}.flex_transaction_id),
-                            flex_type = COALESCE(EXCLUDED.flex_type, {TRANSACTIONS}.flex_type),
-                            flex_code = COALESCE(EXCLUDED.flex_code, {TRANSACTIONS}.flex_code),
-                            asset_category = COALESCE(EXCLUDED.asset_category, {TRANSACTIONS}.asset_category),
-                            asset_subcategory = COALESCE(EXCLUDED.asset_subcategory, {TRANSACTIONS}.asset_subcategory),
-                            symbol = COALESCE(EXCLUDED.symbol, {TRANSACTIONS}.symbol),
-                            conid = COALESCE(EXCLUDED.conid, {TRANSACTIONS}.conid),
-                            security_id = COALESCE(EXCLUDED.security_id, {TRANSACTIONS}.security_id),
-                            security_id_type = COALESCE(EXCLUDED.security_id_type, {TRANSACTIONS}.security_id_type),
-                            listing_exchange = COALESCE(EXCLUDED.listing_exchange, {TRANSACTIONS}.listing_exchange),
-                            available_for_trading_date = COALESCE(EXCLUDED.available_for_trading_date, {TRANSACTIONS}.available_for_trading_date),
-                            fx_rate_to_base = COALESCE(EXCLUDED.fx_rate_to_base, {TRANSACTIONS}.fx_rate_to_base),
-                            raw_extra = COALESCE(EXCLUDED.raw_extra, {TRANSACTIONS}.raw_extra)
+                            currency = COALESCE(EXCLUDED.currency, {GOLDEN_TRANSACTIONS}.currency),
+                            description = COALESCE(EXCLUDED.description, {GOLDEN_TRANSACTIONS}.description),
+                            flex_transaction_id = COALESCE(EXCLUDED.flex_transaction_id, {GOLDEN_TRANSACTIONS}.flex_transaction_id),
+                            flex_type = COALESCE(EXCLUDED.flex_type, {GOLDEN_TRANSACTIONS}.flex_type),
+                            flex_code = COALESCE(EXCLUDED.flex_code, {GOLDEN_TRANSACTIONS}.flex_code),
+                            asset_category = COALESCE(EXCLUDED.asset_category, {GOLDEN_TRANSACTIONS}.asset_category),
+                            asset_subcategory = COALESCE(EXCLUDED.asset_subcategory, {GOLDEN_TRANSACTIONS}.asset_subcategory),
+                            symbol = COALESCE(EXCLUDED.symbol, {GOLDEN_TRANSACTIONS}.symbol),
+                            conid = COALESCE(EXCLUDED.conid, {GOLDEN_TRANSACTIONS}.conid),
+                            security_id = COALESCE(EXCLUDED.security_id, {GOLDEN_TRANSACTIONS}.security_id),
+                            security_id_type = COALESCE(EXCLUDED.security_id_type, {GOLDEN_TRANSACTIONS}.security_id_type),
+                            listing_exchange = COALESCE(EXCLUDED.listing_exchange, {GOLDEN_TRANSACTIONS}.listing_exchange),
+                            available_for_trading_date = COALESCE(EXCLUDED.available_for_trading_date, {GOLDEN_TRANSACTIONS}.available_for_trading_date),
+                            fx_rate_to_base = COALESCE(EXCLUDED.fx_rate_to_base, {GOLDEN_TRANSACTIONS}.fx_rate_to_base),
+                            raw_extra = COALESCE(EXCLUDED.raw_extra, {GOLDEN_TRANSACTIONS}.raw_extra)
                         """,
                         (
                             account_id,
