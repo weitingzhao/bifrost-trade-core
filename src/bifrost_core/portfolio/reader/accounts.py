@@ -175,7 +175,11 @@ def replace_execution_instance_allocations(
         return False
 
 
-def _raw_table_pk_for_account_executions_id(account_executions_id: int) -> Tuple[str, str, int]:
+def _raw_table_pk_for_account_executions_id(
+    account_executions_id: int,
+    *,
+    golden: bool = True,
+) -> Tuple[str, str, int]:
     """
     Map overlay account_executions_id to the row in executions_raw_flex | executions_raw_tws | executions_raw_journal.
 
@@ -184,14 +188,27 @@ def _raw_table_pk_for_account_executions_id(account_executions_id: int) -> Tuple
     - TWS:     account_executions_id = -executions_raw_tws_id  (negative, > -_JOURNAL_ID_OFFSET)
     - journal: account_executions_id = -(_JOURNAL_ID_OFFSET + executions_raw_journal_id)  (<= -_JOURNAL_ID_OFFSET)
 
-    Source field (flex_trades / tws_client / journal_closed) follows from which table the row lives in; do not UPDATE the view.
+    ``golden=True`` (default): physical tables on bifrost_golden_source (``raw_broker.*``).
+    ``golden=False``: Trade-env FDW names (``brokerage.*``) for updatable foreign tables.
     """
     aid = int(account_executions_id)
     if aid > 0:
-        return (EXECUTIONS_RAW_FLEX, "executions_raw_flex_id", aid)
+        return (
+            (GOLDEN_EXECUTIONS_RAW_FLEX if golden else EXECUTIONS_RAW_FLEX),
+            "executions_raw_flex_id",
+            aid,
+        )
     if aid <= -_JOURNAL_ID_OFFSET:
-        return (EXECUTIONS_RAW_JOURNAL, "executions_raw_journal_id", -aid - _JOURNAL_ID_OFFSET)
-    return (EXECUTIONS_RAW_TWS, "executions_raw_tws_id", -aid)
+        return (
+            (GOLDEN_EXECUTIONS_RAW_JOURNAL if golden else EXECUTIONS_RAW_JOURNAL),
+            "executions_raw_journal_id",
+            -aid - _JOURNAL_ID_OFFSET,
+        )
+    return (
+        (GOLDEN_EXECUTIONS_RAW_TWS if golden else EXECUTIONS_RAW_TWS),
+        "executions_raw_tws_id",
+        -aid,
+    )
 
 
 def get_accounts_from_tables(
@@ -1123,7 +1140,7 @@ def insert_one_execution(status_config: dict, body: Dict[str, Any]) -> Optional[
                 if source == "journal_closed":
                     cur.execute(
                         f"""
-                        INSERT INTO {EXECUTIONS_RAW_JOURNAL} ({cols}, legacy_account_executions_id)
+                        INSERT INTO {GOLDEN_EXECUTIONS_RAW_JOURNAL} ({cols}, legacy_account_executions_id)
                         VALUES ({placeholders}, NULL)
                         RETURNING executions_raw_journal_id
                         """,
@@ -1136,7 +1153,7 @@ def insert_one_execution(status_config: dict, body: Dict[str, Any]) -> Optional[
                 else:
                     cur.execute(
                         f"""
-                        INSERT INTO {EXECUTIONS_RAW_TWS} ({cols}, legacy_account_executions_id)
+                        INSERT INTO {GOLDEN_EXECUTIONS_RAW_TWS} ({cols}, legacy_account_executions_id)
                         VALUES ({placeholders}, NULL)
                         RETURNING executions_raw_tws_id
                         """,
@@ -1152,12 +1169,12 @@ def insert_one_execution(status_config: dict, body: Dict[str, Any]) -> Optional[
                 if commission is not None or realized_pnl is not None or (currency and str(currency).strip()):
                     cur.execute(
                         f"""
-                        INSERT INTO {COMMISSIONS} (exec_id, commission, currency, realized_pnl, yield_, yield_redemption_date)
+                        INSERT INTO {GOLDEN_COMMISSIONS} (exec_id, commission, currency, realized_pnl, yield_, yield_redemption_date)
                         VALUES (%s, %s, %s, %s, NULL, NULL)
                         ON CONFLICT (exec_id) DO UPDATE SET
-                            commission = COALESCE(EXCLUDED.commission, {COMMISSIONS}.commission),
-                            currency = COALESCE(NULLIF(TRIM(COALESCE(EXCLUDED.currency, '')), ''), {COMMISSIONS}.currency),
-                            realized_pnl = COALESCE(EXCLUDED.realized_pnl, {COMMISSIONS}.realized_pnl)
+                            commission = COALESCE(EXCLUDED.commission, {GOLDEN_COMMISSIONS}.commission),
+                            currency = COALESCE(NULLIF(TRIM(COALESCE(EXCLUDED.currency, '')), ''), {GOLDEN_COMMISSIONS}.currency),
+                            realized_pnl = COALESCE(EXCLUDED.realized_pnl, {GOLDEN_COMMISSIONS}.realized_pnl)
                         """,
                         (exec_id, commission, currency or None, realized_pnl),
                     )
@@ -1410,12 +1427,12 @@ def update_one_execution(status_config: dict, account_executions_id: int, body: 
                     cur_ = body.get("currency")
                     cur.execute(
                         f"""
-                        INSERT INTO {COMMISSIONS} (exec_id, commission, currency, realized_pnl, yield_, yield_redemption_date)
+                        INSERT INTO {GOLDEN_COMMISSIONS} (exec_id, commission, currency, realized_pnl, yield_, yield_redemption_date)
                         VALUES (%s, %s, %s, %s, NULL, NULL)
                         ON CONFLICT (exec_id) DO UPDATE SET
-                            commission = CASE WHEN EXCLUDED.commission IS NOT NULL THEN EXCLUDED.commission ELSE {COMMISSIONS}.commission END,
-                            currency = CASE WHEN EXCLUDED.currency IS NOT NULL AND TRIM(EXCLUDED.currency) != '' THEN EXCLUDED.currency ELSE {COMMISSIONS}.currency END,
-                            realized_pnl = CASE WHEN EXCLUDED.realized_pnl IS NOT NULL THEN EXCLUDED.realized_pnl ELSE {COMMISSIONS}.realized_pnl END
+                            commission = CASE WHEN EXCLUDED.commission IS NOT NULL THEN EXCLUDED.commission ELSE {GOLDEN_COMMISSIONS}.commission END,
+                            currency = CASE WHEN EXCLUDED.currency IS NOT NULL AND TRIM(EXCLUDED.currency) != '' THEN EXCLUDED.currency ELSE {GOLDEN_COMMISSIONS}.currency END,
+                            realized_pnl = CASE WHEN EXCLUDED.realized_pnl IS NOT NULL THEN EXCLUDED.realized_pnl ELSE {GOLDEN_COMMISSIONS}.realized_pnl END
                         """,
                         (exec_id, comm, cur_, pnl),
                     )
@@ -1451,7 +1468,7 @@ def delete_one_execution(status_config: dict, account_executions_id: int) -> boo
                     (int(account_executions_id),),
                 )
                 if exec_id:
-                    cur.execute(f"DELETE FROM {COMMISSIONS} WHERE exec_id = %s", (exec_id,))
+                    cur.execute(f"DELETE FROM {GOLDEN_COMMISSIONS} WHERE exec_id = %s", (exec_id,))
                 cur.execute(f"DELETE FROM {raw_tbl} WHERE {pk_col} = %s", (pk_val,))
                 if cur.rowcount == 0:
                     golden.rollback()
@@ -1495,7 +1512,9 @@ def batch_update_execution_strategy(
                     return -1
                 for eid in execution_ids:
                     try:
-                        raw_tbl, pk_col, pk_val = _raw_table_pk_for_account_executions_id(int(eid))
+                        raw_tbl, pk_col, pk_val = _raw_table_pk_for_account_executions_id(
+                            int(eid), golden=False
+                        )
                     except (TypeError, ValueError):
                         continue
                     cur.execute(
