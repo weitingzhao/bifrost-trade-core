@@ -1,6 +1,7 @@
 ---
 description: Core package versioning — bump, tag, and downstream notification rules
 alwaysApply: true
+parity-id: core-versioning-v2
 ---
 
 # bifrost-core 版本管理规范
@@ -24,7 +25,7 @@ alwaysApply: true
 ## 破坏性变更流程
 
 1. 在 core 的 PR 描述中**明确列出**受影响的下游 repo：
-   - `bifrost-trade-ib-edge`
+   - `bifrost-trade-socket`
    - `bifrost-trade-worker`
    - `bifrost-trade-api`
 2. Bump core 版本并打 tag（如 `v0.2.0`）
@@ -42,6 +43,6 @@ alwaysApply: true
 
 下游 repo 通过 git tag 安装 core：
 ```
-pip install git+https://github.com/ORG/bifrost-trade-core.git@v0.x.x
+pip install git+https://github.com/weitingzhao/bifrost-trade-core.git@v0.x.x
 ```
 Docker 构建时通过 `BIFROST_CORE_REF` 变量控制版本。
