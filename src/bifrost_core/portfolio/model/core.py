@@ -207,7 +207,7 @@ def shares_backing_short_calls(opt_positions: List[RiskPosition], stock_qty: int
 
 def _compute_car_per_leg(
     p: RiskPosition,
-    stock_qty: int,
+    shares_available: int,
     spot: Optional[float],
 ) -> Tuple[float, str]:
     """Capital this leg currently commits. Returns (car_value, car_type_label).
@@ -220,13 +220,18 @@ def _compute_car_per_leg(
 
     Measured on the live book, cost basis made this the denominator of a return
     that read 5,857% on RKLB: 1,000 shares bought at 19.79 and worth 71.89.
+
+    ``shares_available`` is what is left after earlier legs took their cover, not
+    the whole holding: called once per leg with the full position, two short
+    calls on one symbol each claimed the same shares and the committed total came
+    out at 165,496 against 91,942 of actual stock.
     """
     if p.qty > 0:
         return abs(p.avg_cost) * abs(p.qty) * 100, "premium_paid"
     if p.right == "P" and p.qty < 0:
         return p.strike * abs(p.qty) * 100, "cash_secured"
     if p.right == "C" and p.qty < 0:
-        covered = min(abs(p.qty) * 100, max(stock_qty, 0))
+        covered = min(abs(p.qty) * 100, max(shares_available, 0))
         if covered <= 0:
             return float("inf"), "naked_unbounded"
         if spot is None or spot <= 0:
@@ -247,8 +252,19 @@ def _compute_car(
     leg_cars: List[Dict[str, Any]] = []
     total_leg = 0.0
     has_unbounded = False
-    for p in opt_positions:
-        val, label = _compute_car_per_leg(p, stock_qty, spot)
+
+    # Shares are allocated once, lowest strike first — the order assignment
+    # actually takes them in, and the same order _forward_returns walks.
+    remaining_shares = max(stock_qty, 0)
+    ordered = sorted(
+        opt_positions,
+        key=lambda x: (0, x.strike) if (x.right == "C" and x.qty < 0) else (1, x.strike),
+    )
+
+    for p in ordered:
+        val, label = _compute_car_per_leg(p, remaining_shares, spot)
+        if p.right == "C" and p.qty < 0 and remaining_shares > 0:
+            remaining_shares = max(0, remaining_shares - abs(p.qty) * 100)
         if math.isnan(val):
             leg_cars.append({"strike": p.strike, "right": p.right, "qty": p.qty, "car": None, "type": label})
             continue
@@ -425,7 +441,7 @@ def _compute_greeks_for_group(
     stock_qty: int,
     spot: Optional[float],
     farthest_expiry: Optional[date],
-    opt_mid_prices: Dict[Tuple[float, str], float],
+    opt_mid_prices: Dict[Tuple[float, str, Optional[date]], float],
     r: float = 0.04,
 ) -> Dict[str, Any]:
     """Compute portfolio delta for one underlying group. Returns delta info dict."""
@@ -441,8 +457,7 @@ def _compute_greeks_for_group(
 
     for p in opt_positions:
         t = _years_to(p.expiry or farthest_expiry)
-        mid_key = (p.strike, p.right)
-        mid = opt_mid_prices.get(mid_key)
+        mid = opt_mid_prices.get((p.strike, p.right, p.expiry))
         iv: Optional[float] = None
         leg_delta: Optional[float] = None
         if mid is not None and mid > 0 and spot > 0 and t > 0:
@@ -488,7 +503,7 @@ def _stress_matrix(
     stock_avg_cost: Optional[float],
     spot: Optional[float],
     farthest_expiry: Optional[date],
-    opt_mid_prices: Dict[Tuple[float, str], float],
+    opt_mid_prices: Dict[Tuple[float, str, Optional[date]], float],
     r: float = 0.04,
 ) -> Dict[str, Any]:
     """Compute P&L matrix for spot shocks x IV shocks."""
@@ -506,7 +521,7 @@ def _stress_matrix(
     # Compute base IVs for each leg
     leg_ivs: Dict[int, Optional[float]] = {}
     for i, p in enumerate(opt_positions):
-        mid = opt_mid_prices.get((p.strike, p.right))
+        mid = opt_mid_prices.get((p.strike, p.right, p.expiry))
         t_i = leg_t[i]
         if mid and mid > 0 and t_i > 0:
             leg_ivs[i] = _implied_vol(mid, spot, p.strike, t_i, r, p.right)
@@ -527,7 +542,14 @@ def _stress_matrix(
                 intrinsic_pnl += (intr - p.avg_cost) * abs_qty * 100
             else:
                 intrinsic_pnl += (p.avg_cost - intr) * abs_qty * 100
-        stock_pnl = (new_spot - stock_avg_cost) * stock_qty if stock_qty and stock_avg_cost else 0.0
+        # `if stock_avg_cost` treated a genuine zero basis as missing and zeroed
+        # the whole stock leg — a free position is the one whose P&L is entirely
+        # gain, so silencing it understates exactly the largest case.
+        stock_pnl = (
+            (new_spot - stock_avg_cost) * stock_qty
+            if stock_qty and stock_avg_cost is not None
+            else 0.0
+        )
 
         base_row = {
             "spot_shock": spot_shock,
@@ -562,8 +584,10 @@ def _stress_matrix(
                             opt_pnl += (intr - p.avg_cost) * abs_qty * 100
                         else:
                             opt_pnl += (p.avg_cost - intr) * abs_qty * 100
-                        if iv_shock != 0:
-                            method = "mixed_intrinsic"
+                        # Whatever the IV shock, this leg was not repriced —
+                        # the label has to say so, or a row claims a Black-Scholes
+                        # valuation that part of it never had.
+                        method = "mixed_intrinsic"
                 scenarios.append({
                     "spot_shock": spot_shock,
                     "iv_shock": iv_shock,
@@ -628,7 +652,12 @@ def compute_model_analysis(conn: Any, account_id: str) -> Dict[str, Any]:
     groups = _group_positions(rows)
 
     # Build per-leg mid prices lookup for greeks/stress (keyed by underlying)
-    per_underlying_mids: Dict[str, Dict[Tuple[float, str], float]] = defaultdict(dict)
+    # Keyed by expiry as well as strike and right. Without it, the two legs a
+    # roll leaves on one underlying — same strike, same right, different dates —
+    # collided and the later row won, so one leg was priced off the other's mid.
+    # That was survivable while every leg shared the group's expiry; it is not
+    # now that each is priced to its own.
+    per_underlying_mids: Dict[str, Dict[Tuple[float, str, Optional[date]], float]] = defaultdict(dict)
     for r in rows:
         sec = (r.get("sec_type") or "").strip().upper()
         sym = (r.get("symbol") or "").strip().upper()
@@ -637,7 +666,8 @@ def compute_model_analysis(conn: Any, account_id: str) -> Dict[str, Any]:
             right = (r.get("option_right") or "").strip().upper()
             mid = _best_price(r)
             if strike is not None and right in ("C", "P") and mid is not None:
-                per_underlying_mids[sym][(float(strike), right)] = mid
+                key = (float(strike), right, _parse_expiry(r.get("expiry")))
+                per_underlying_mids[sym][key] = mid
 
     per_underlying: List[Dict[str, Any]] = []
     total_car = 0.0

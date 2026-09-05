@@ -41,9 +41,15 @@ make db-init        # 初始化/刷新 PostgreSQL schema
 
 ## 版本发布规范
 
-- 修改 `src/bifrost_core/` 中的共享库后，必须 bump `pyproject.toml` 中的 version（当前 **0.20.0**）
+- 修改 `src/bifrost_core/` 中的共享库后，必须 bump `pyproject.toml` 中的 version（当前 **0.20.1**）
 - 其他 repo 通过 git tag 安装：`pip install git+https://github.com/ORG/bifrost-trade-core.git@v0.x.x`
 - 破坏性变更需要同步更新所有依赖 repo 的 pyproject.toml
+- **0.20.1**: four defects the 0.19/0.20 review surfaced. Cover is allocated once across a
+  symbol's short calls (two legs each claimed the same shares: 165,496 committed against
+  91,942 of stock, and both read covered while four contracts were naked); option mids are
+  keyed by expiry so a roll's two same-strike legs stop sharing one price; a zero stock cost
+  basis is no longer treated as missing; and a stress row with any intrinsic fallback is
+  labelled `mixed_intrinsic` on every row rather than only the IV-shocked ones.
 - **0.20.0**: returns are measured forward, over committed capital. The payoff is
   scoped to the shares the options actually cover (`covered_shares_modeled`), CAR for a
   covered call is the shares' market value rather than their sunk cost, and

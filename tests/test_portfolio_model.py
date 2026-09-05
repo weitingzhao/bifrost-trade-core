@@ -5,6 +5,7 @@ from bifrost_core.portfolio.model.payoff import (
     compute_risk_profile,
     payoff_options_at_price,
     payoff_stock_at_price,
+    _strip_naked_short_calls,
 )
 from bifrost_core.portfolio.model.core import (
     _compute_car,
@@ -303,14 +304,12 @@ class TestOptionCostBasisLoading:
             },
             self._row(),
         ]
-        groups = _group_positions(rows)
-        g = groups["DAVE"]
-        legs = g["opt_positions"]
-        # Max gain of a covered call: stock to the strike, plus the premium.
-        gain = (280.0 - 182.38) * 100 + legs[0].avg_cost * 1 * 100
-        assert gain == pytest.approx(18177.78, abs=0.01)
-        # Before the fix this read 851,339.60.
-        assert gain < 20_000
+        g = _group_positions(rows)["DAVE"]
+        # Through the payoff engine, not a hand-rolled repeat of its formula —
+        # the engine is what shipped the 851,339.60.
+        profile = compute_risk_profile(g["opt_positions"], g["stock_qty"], g["stock_avg_cost"])
+        assert profile.max_gain == pytest.approx(18_177.78, abs=0.01)
+        assert profile.net_premium == pytest.approx(8_415.78, abs=0.01)
 
     def test_a_zero_cost_leg_is_still_loaded(self):
         groups = _group_positions([self._row(avg_cost=0.0)])
@@ -357,13 +356,22 @@ class TestPerLegExpiry:
         assert _years_to(date.today() + timedelta(days=365)) == pytest.approx(1.0)
 
     def test_hedged_reconstruction_keeps_the_expiry(self):
-        # _hedged_positions rebuilds legs; dropping expiry there would silently
-        # restore the group-wide date for the hedged view only.
-        p = RiskPosition(
-            strike=100.0, right="C", qty=-2, avg_cost=5.0, expiry=date(2026, 10, 16)
-        )
-        assert p.expiry == date(2026, 10, 16)
-        # Default keeps every existing constructor working.
+        # _strip_naked_short_calls rebuilds the legs it keeps. Dropping expiry in
+        # that rebuild would silently restore the group-wide date for the hedged
+        # view only — so this calls it rather than asserting the field exists.
+        near, far = date(2026, 10, 16), date(2027, 1, 15)
+        legs = [
+            RiskPosition(strike=100.0, right="C", qty=-2, avg_cost=5.0, expiry=near),
+            RiskPosition(strike=120.0, right="C", qty=-3, avg_cost=2.0, expiry=far),
+        ]
+        # Strip two contracts: the highest strike goes first.
+        hedged = _strip_naked_short_calls(legs, 2)
+        by_strike = {p.strike: p for p in hedged}
+        assert by_strike[100.0].expiry == near
+        assert by_strike[120.0].expiry == far
+        assert by_strike[120.0].qty == -1
+
+    def test_the_default_keeps_every_existing_constructor_working(self):
         assert RiskPosition(strike=1.0, right="P", qty=1, avg_cost=1.0).expiry is None
 
 
@@ -556,3 +564,108 @@ class TestCarIsCommittedCapital:
         legs = [RiskPosition(strike=90.0, right="C", qty=-1, avg_cost=3.69)]
         car = _compute_car(legs, 100, None, None)
         assert car["effective"] is None or car["effective"] == 0
+
+
+class TestCoverIsAllocatedOnce:
+    """Two short calls on one symbol cannot both claim the same shares.
+
+    Called once per leg with the whole holding, each computed
+    min(its own need, everything held) — 500 shares backing 900 shares of calls
+    reported 165,496 committed against 91,942 of actual stock, and both legs
+    looked covered while four contracts were naked.
+    """
+
+    LEGS = [
+        RiskPosition(strike=245.0, right="C", qty=-5, avg_cost=9.99),
+        RiskPosition(strike=255.0, right="C", qty=-4, avg_cost=7.81),
+    ]
+
+    def test_the_shares_are_spent_not_reused(self):
+        car = _compute_car(self.LEGS, 500, 183.885, None)
+        details = {d["strike"]: d for d in car["leg_details"]}
+        # 500 shares go to the lower strike; the higher one has none left.
+        assert details[245.0]["car"] == pytest.approx(183.885 * 500)
+        assert details[255.0]["type"] == "naked_unbounded"
+
+    def test_it_now_agrees_with_naked_call_detection(self):
+        # The payoff engine says 400 shares are uncovered; CAR used to disagree.
+        covered = shares_backing_short_calls(self.LEGS, 500)
+        profile = compute_risk_profile(self.LEGS, covered, 20.0)
+        assert profile.naked_short_call_contracts == 4
+        assert _compute_car(self.LEGS, 500, 183.885, None)["has_unbounded"] is True
+
+    def test_enough_stock_covers_both_legs(self):
+        car = _compute_car(self.LEGS, 900, 183.885, None)
+        assert car["has_unbounded"] is False
+        assert car["committed"] == pytest.approx(183.885 * 900, abs=1)
+
+    def test_lowest_strike_is_covered_first(self):
+        # Assignment takes the in-the-money strike first, so cover follows it.
+        car = _compute_car(self.LEGS, 400, 183.885, None)
+        details = {d["strike"]: d for d in car["leg_details"]}
+        assert details[245.0]["car"] == pytest.approx(183.885 * 400)
+        assert details[255.0]["type"] == "naked_unbounded"
+
+
+class TestStressStockLegZeroBasis:
+    def test_a_zero_cost_basis_is_not_treated_as_missing(self):
+        # `if stock_avg_cost` silenced the whole stock leg on a free position —
+        # the one case where the P&L is entirely gain.
+        result = _stress_matrix([], 100, 0.0, 100.0, None, {})
+        by_shock = {s["spot_shock"]: s for s in result["scenarios"]}
+        assert by_shock[0.0]["stock_pnl"] == pytest.approx(10_000.0)
+        assert by_shock[-0.15]["pnl_change"] == pytest.approx(-1_500.0)
+
+    def test_a_genuinely_absent_basis_still_reports_nothing(self):
+        result = _stress_matrix([], 100, None, 100.0, None, {})
+        assert all(s["stock_pnl"] == 0.0 for s in result["scenarios"])
+
+
+class TestMidPriceKeyedByExpiry:
+    def test_two_legs_at_one_strike_do_not_share_a_mid(self):
+        # What a roll leaves: same strike and right, two dates. Keyed without the
+        # expiry, the later row won and one leg was priced off the other's mid.
+        near, far = date.today() + timedelta(days=20), date.today() + timedelta(days=200)
+        legs = [
+            RiskPosition(strike=100.0, right="C", qty=-1, avg_cost=2.0, expiry=near),
+            RiskPosition(strike=100.0, right="C", qty=-1, avg_cost=6.0, expiry=far),
+        ]
+        mids = {(100.0, "C", near): 2.5, (100.0, "C", far): 7.5}
+        greeks = _compute_greeks_for_group(legs, 0, 100.0, far, mids)
+        ivs = [leg["iv"] for leg in greeks["per_leg"]]
+        assert all(v is not None for v in ivs)
+        # The far leg carries the richer premium over the longer life; if both
+        # read one mid they would come out equal.
+        assert ivs[0] != ivs[1]
+
+    def test_a_leg_with_no_mid_of_its_own_is_degraded_not_borrowed(self):
+        near, far = date.today() + timedelta(days=20), date.today() + timedelta(days=200)
+        legs = [
+            RiskPosition(strike=100.0, right="C", qty=-1, avg_cost=2.0, expiry=near),
+            RiskPosition(strike=100.0, right="C", qty=-1, avg_cost=6.0, expiry=far),
+        ]
+        greeks = _compute_greeks_for_group(legs, 0, 100.0, far, {(100.0, "C", far): 7.5})
+        assert greeks["degraded_leg_count"] == 1
+
+
+class TestStressMethodLabel:
+    def test_a_leg_that_fell_back_is_labelled_on_every_row(self):
+        # method was downgraded only when iv_shock != 0, so the unshocked row
+        # claimed bs_reprice while part of it was intrinsic.
+        near = date.today() + timedelta(days=30)
+        legs = [
+            RiskPosition(strike=100.0, right="C", qty=-1, avg_cost=2.0, expiry=near),
+            RiskPosition(strike=110.0, right="C", qty=-1, avg_cost=1.0, expiry=near),
+        ]
+        # Only the first leg has a mid, so the second falls back to intrinsic.
+        result = _stress_matrix(legs, 0, None, 100.0, near, {(100.0, "C", near): 3.0})
+        assert result["iv_stress_available"] is True
+        unshocked = [s for s in result["scenarios"] if s["iv_shock"] == 0.0]
+        assert unshocked
+        assert all(s["method"] == "mixed_intrinsic" for s in unshocked)
+
+    def test_a_fully_priced_row_still_says_bs_reprice(self):
+        near = date.today() + timedelta(days=30)
+        legs = [RiskPosition(strike=100.0, right="C", qty=-1, avg_cost=2.0, expiry=near)]
+        result = _stress_matrix(legs, 0, None, 100.0, near, {(100.0, "C", near): 3.0})
+        assert all(s["method"] == "bs_reprice" for s in result["scenarios"])
