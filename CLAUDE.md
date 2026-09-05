@@ -41,9 +41,14 @@ make db-init        # 初始化/刷新 PostgreSQL schema
 
 ## 版本发布规范
 
-- 修改 `src/bifrost_core/` 中的共享库后，必须 bump `pyproject.toml` 中的 version（当前 **0.18.2**）
+- 修改 `src/bifrost_core/` 中的共享库后，必须 bump `pyproject.toml` 中的 version（当前 **0.19.0**）
 - 其他 repo 通过 git tag 安装：`pip install git+https://github.com/ORG/bifrost-trade-core.git@v0.x.x`
 - 破坏性变更需要同步更新所有依赖 repo 的 pyproject.toml
+- **0.19.0**: portfolio model correctness — option `avg_cost` is loaded per SHARE (IB reports
+  per contract), fixing a 100x overstatement of every option payoff / CAR / stress figure;
+  stress grid spans ±15% (portfolio-margin range) and carries a 0% baseline row plus
+  `pnl_change` measured from it; Greeks use each leg's own expiry instead of the group's
+  farthest. Values change — response shape is additive (`pnl_change`).
 - **0.18.2**: `update_one_execution` / insert / delete write `raw_broker.*` on Golden Source (not `brokerage.*`)
 - **0.18.1**: Flex/GS writes use `raw_broker.*` (`GOLDEN_*`) — `write_account_executions_to_db` / commissions / transactions no longer insert into `brokerage.*` on Golden Source
 - **0.18.0**: Wave 11 BREAKING — DROP `settings.ib_flex_*_token`; Flex Plugin Secret-only tokens

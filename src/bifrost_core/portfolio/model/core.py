@@ -15,6 +15,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from psycopg2.extras import RealDictCursor
 
 from bifrost_core.persistence.postgres.brokerage_tables import ACCOUNT, CONTRACT_QUOTE_LIVE, POSITIONS
+from bifrost_core.portfolio.units import option_cost_per_share
 from bifrost_core.portfolio.model.payoff import (
     RiskPosition,
     ScenarioBreakdown,
@@ -156,11 +157,18 @@ def _group_positions(rows: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
                 avg_cost_f = float(avg_cost)
             except (TypeError, ValueError):
                 continue
+            # IB reports avgCost per CONTRACT; RiskPosition.avg_cost is declared
+            # per share and every consumer multiplies by the multiplier on the way
+            # out. See portfolio/units.py for why this conversion is centralised.
+            per_share = option_cost_per_share(avg_cost_f, "OPT")
+            if per_share is None:
+                continue
             g["opt_positions"].append(RiskPosition(
                 strike=strike_f,
                 right=right,
                 qty=int(qty),
-                avg_cost=avg_cost_f,
+                avg_cost=per_share,
+                expiry=_parse_expiry(r.get("expiry")),
             ))
             price = _best_price(r)
             if price is not None and g["spot"] is None:
@@ -302,6 +310,13 @@ def _implied_vol(
     return sigma if abs(_bs_price(S, K, T, r, sigma, right) - market_price) < 0.05 else None
 
 
+def _years_to(expiry: Optional[date]) -> float:
+    """Year fraction to an expiry, floored at 0. Expired legs have no time value."""
+    if expiry is None:
+        return 0.0
+    return max((expiry - date.today()).days, 0) / 365.0
+
+
 def _compute_greeks_for_group(
     opt_positions: List[RiskPosition],
     stock_qty: int,
@@ -314,17 +329,15 @@ def _compute_greeks_for_group(
     if spot is None or spot <= 0:
         return {"delta": None, "delta_dollars": None, "degraded": True, "reason": "no_spot"}
 
-    T = None
-    if farthest_expiry is not None:
-        days = (farthest_expiry - date.today()).days
-        T = max(days, 0) / 365.0
-
+    # Each leg is priced to its own expiry. Using the group's farthest for all of
+    # them overstates the time value of every nearer leg, which is exactly the
+    # position a roll leaves behind — two expiries on one underlying.
     total_delta = float(stock_qty)
     degraded_legs = 0
     per_leg: List[Dict[str, Any]] = []
 
     for p in opt_positions:
-        t = T if T is not None and T > 0 else 0.0
+        t = _years_to(p.expiry or farthest_expiry)
         mid_key = (p.strike, p.right)
         mid = opt_mid_prices.get(mid_key)
         iv: Optional[float] = None
@@ -358,7 +371,11 @@ def _compute_greeks_for_group(
 # Stress matrix — V1.3
 # ---------------------------------------------------------------------------
 
-SPOT_SHOCKS = [-0.10, -0.05, 0.05, 0.10]
+#: Spot shocks, in the range portfolio margin actually stresses equities over
+#: (TIMS uses +/-15%). 0 is present on purpose: without an unshocked row there is
+#: nothing to measure the others against, and a scenario table whose rows are all
+#: absolute P&L reads as a stress test while showing none of the stress.
+SPOT_SHOCKS = [-0.15, -0.10, -0.05, 0.0, 0.05, 0.10, 0.15]
 IV_SHOCKS = [-0.05, 0.05]  # absolute vol points
 
 
@@ -375,17 +392,21 @@ def _stress_matrix(
     if spot is None or spot <= 0:
         return {"available": False, "reason": "no_spot"}
 
-    T = 0.0
-    if farthest_expiry is not None:
-        days = (farthest_expiry - date.today()).days
-        T = max(days, 0) / 365.0
+    # Per leg, matching _compute_greeks_for_group. A single group-wide T priced
+    # every leg of a rolled position to the far date, which is the one shape a
+    # premium seller reliably holds.
+    leg_t: Dict[int, float] = {
+        i: _years_to(p.expiry or farthest_expiry) for i, p in enumerate(opt_positions)
+    }
+    any_time_left = any(t > 0 for t in leg_t.values())
 
     # Compute base IVs for each leg
     leg_ivs: Dict[int, Optional[float]] = {}
     for i, p in enumerate(opt_positions):
         mid = opt_mid_prices.get((p.strike, p.right))
-        if mid and mid > 0 and T > 0:
-            leg_ivs[i] = _implied_vol(mid, spot, p.strike, T, r, p.right)
+        t_i = leg_t[i]
+        if mid and mid > 0 and t_i > 0:
+            leg_ivs[i] = _implied_vol(mid, spot, p.strike, t_i, r, p.right)
         else:
             leg_ivs[i] = None
 
@@ -416,15 +437,15 @@ def _stress_matrix(
         }
 
         # If we have IVs, compute BS-repriced rows for base + IV shocks
-        if iv_available and T > 0:
+        if iv_available and any_time_left:
             for iv_shock in [0.0] + IV_SHOCKS:
                 opt_pnl = 0.0
                 method = "bs_reprice"
                 for i, p in enumerate(opt_positions):
                     base_iv = leg_ivs.get(i)
-                    if base_iv is not None and base_iv > 0:
+                    if base_iv is not None and base_iv > 0 and leg_t[i] > 0:
                         new_iv = max(base_iv + iv_shock, 0.01)
-                        new_price = _bs_price(new_spot, p.strike, T, r, new_iv, p.right)
+                        new_price = _bs_price(new_spot, p.strike, leg_t[i], r, new_iv, p.right)
                         old_price = p.avg_cost
                         abs_qty = abs(p.qty)
                         if p.qty > 0:
@@ -452,11 +473,35 @@ def _stress_matrix(
         else:
             scenarios.append(base_row)
 
+    _stamp_pnl_change(scenarios)
+
     return {
         "available": True,
         "iv_stress_available": iv_available,
         "scenarios": scenarios,
     }
+
+
+def _stamp_pnl_change(scenarios: List[Dict[str, Any]]) -> None:
+    """Add ``pnl_change`` — each row's P&L relative to the unshocked one.
+
+    ``total_pnl`` is the position's P&L against cost basis at that price, which
+    is a payoff diagram rather than a stress reading: a book holding long-held
+    stock prints a large positive number under a 15% drop, and that is the
+    correct payoff and the wrong answer to "what does this shock cost me".
+    Both are kept, named for what they are.
+    """
+    baseline = next(
+        (s for s in scenarios if s.get("spot_shock") == 0.0 and s.get("iv_shock") == 0.0),
+        None,
+    )
+    if baseline is None:
+        # No unshocked row means there is nothing to measure against; leaving the
+        # field absent is honest, filling it with total_pnl would not be.
+        return
+    base_total = baseline.get("total_pnl") or 0.0
+    for sc in scenarios:
+        sc["pnl_change"] = round((sc.get("total_pnl") or 0.0) - base_total, 2)
 
 
 # ---------------------------------------------------------------------------
@@ -630,14 +675,33 @@ def _aggregate_stress(per_underlying: List[Dict[str, Any]]) -> Dict[str, Any]:
         for sc in st.get("scenarios", []):
             key = (sc["spot_shock"], sc["iv_shock"])
             if key not in combined:
-                combined[key] = {"total_pnl": 0.0}
+                combined[key] = {"total_pnl": 0.0, "pnl_change": 0.0, "contributors": 0}
             combined[key]["total_pnl"] += sc["total_pnl"]
+            combined[key]["pnl_change"] += sc.get("pnl_change") or 0.0
+            combined[key]["contributors"] += 1
 
     if not any_available:
         return {"available": False}
 
+    # An underlying with no option mids only produces iv_shock = 0 rows, so the
+    # IV-shocked totals cover a smaller set of symbols than the unshocked ones.
+    # Summing them anyway is fine; presenting them as comparable is not, so each
+    # row carries how many underlyings it actually covers.
+    contributing = sum(1 for e in per_underlying if (e.get("stress") or {}).get("available"))
     scenarios = [
-        {"spot_shock": k[0], "iv_shock": k[1], "total_pnl": round(v["total_pnl"], 2)}
+        {
+            "spot_shock": k[0],
+            "iv_shock": k[1],
+            "total_pnl": round(v["total_pnl"], 2),
+            "pnl_change": round(v["pnl_change"], 2),
+            "contributors": v["contributors"],
+            "partial": v["contributors"] < contributing,
+        }
         for k, v in sorted(combined.items())
     ]
-    return {"available": True, "iv_stress_available": iv_available, "scenarios": scenarios}
+    return {
+        "available": True,
+        "iv_stress_available": iv_available,
+        "underlyings": contributing,
+        "scenarios": scenarios,
+    }

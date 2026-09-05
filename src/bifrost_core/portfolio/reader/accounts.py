@@ -12,9 +12,9 @@ import psycopg2
 from psycopg2.extras import RealDictCursor
 
 from bifrost_core.persistence.postgres.accounts_sync import sync_accounts_snapshot_to_tables
+from bifrost_core.portfolio.units import option_cost_per_share, position_value
 from bifrost_core.persistence.postgres.brokerage_tables import (
     ACCOUNT,
-    COMMISSIONS,
     CONTRACT_QUOTE_LIVE,
     EXECUTIONS,
     EXECUTIONS_RAW_FLEX,
@@ -27,7 +27,6 @@ from bifrost_core.persistence.postgres.brokerage_tables import (
     GOLDEN_TRANSACTIONS,
     INSTANCE_ALLOCATION,
     POSITIONS,
-    TRANSACTIONS,
 )
 from bifrost_core.persistence.postgres.connection import (
     _get_conn_params,
@@ -502,17 +501,15 @@ def get_accounts_from_tables(
                 pos_qty = p.get("position")
                 pos_avg = p.get("avg_cost")
                 sec_type = (p.get("sec_type") or "").strip().upper()
-                if price_for_pnl is not None and pos_qty is not None and pos_avg is not None:
-                    try:
-                        q = float(pos_qty)
-                        c = float(pos_avg)
-                        if math.isfinite(q) and math.isfinite(c):
-                            if sec_type == "OPT":
-                                pos_dict["unrealized_pnl"] = round((price_for_pnl - c) * q * 100, 2)
-                            else:
-                                pos_dict["unrealized_pnl"] = round((price_for_pnl - c) * q, 2)
-                    except (TypeError, ValueError):
-                        pass
+                # price_for_pnl is quoted per share; avg_cost arrives per contract
+                # for options. Subtracting them directly and then multiplying by
+                # the multiplier mixed units — currently masked because option
+                # quotes are absent, which is not a reason to leave it.
+                cost_per_share = option_cost_per_share(pos_avg, sec_type)
+                if price_for_pnl is not None and pos_qty is not None and cost_per_share is not None:
+                    pnl = position_value(price_for_pnl - cost_per_share, pos_qty, sec_type)
+                    if pnl is not None:
+                        pos_dict["unrealized_pnl"] = round(pnl, 2)
 
                 positions.append(pos_dict)
             # Derive strategy_links from account_executions (one position may map to multiple strategies)

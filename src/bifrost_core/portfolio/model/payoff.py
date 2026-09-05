@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+from datetime import date
 from typing import List, Optional
 
 
@@ -16,6 +17,11 @@ class RiskPosition:
     right: str  # "C" or "P"
     qty: int  # +long / -short, in contracts
     avg_cost: float  # per-share premium (not per-contract)
+    #: This leg's own expiry. Optional because the intrinsic payoff engine does
+    #: not need it — every leg is evaluated at expiration there — but anything
+    #: pricing time value must use the leg's own date rather than the group's
+    #: farthest, which is what a rolled position leaves behind.
+    expiry: Optional[date] = None
 
 
 @dataclass
@@ -126,7 +132,15 @@ def _strip_naked_short_calls(
         nq = idx_to_new_qty.get(i)
         if nq is not None:
             if nq != 0:
-                out.append(RiskPosition(strike=p.strike, right=p.right, qty=nq, avg_cost=p.avg_cost))
+                out.append(
+                    RiskPosition(
+                        strike=p.strike,
+                        right=p.right,
+                        qty=nq,
+                        avg_cost=p.avg_cost,
+                        expiry=p.expiry,
+                    )
+                )
         else:
             out.append(p)
     return out

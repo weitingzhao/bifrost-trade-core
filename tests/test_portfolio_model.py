@@ -14,8 +14,14 @@ from bifrost_core.portfolio.model.core import (
     _bs_delta,
     _stress_matrix,
     _compute_greeks_for_group,
+    SPOT_SHOCKS,
+    _group_positions,
+    _years_to,
+    _aggregate_stress,
 )
 from datetime import date, timedelta
+
+import pytest
 
 
 # ---------------------------------------------------------------------------
@@ -184,7 +190,41 @@ class TestStress:
         result = _stress_matrix(positions, 0, None, 100.0, None, {})
         assert result["available"] is True
         assert not result["iv_stress_available"]
-        assert len(result["scenarios"]) == 4  # 4 spot shocks
+        assert len(result["scenarios"]) == len(SPOT_SHOCKS)
+
+    def test_grid_spans_the_portfolio_margin_range_and_includes_a_baseline(self):
+        # Portfolio margin stresses equities over +/-15%; without the 0 row there
+        # is nothing for the other rows to be measured against.
+        assert min(SPOT_SHOCKS) == -0.15
+        assert max(SPOT_SHOCKS) == 0.15
+        assert 0.0 in SPOT_SHOCKS
+
+    def test_pnl_change_is_measured_from_the_unshocked_row(self):
+        # Short 100 put at 3.00/share, spot 100, no stock.
+        positions = [RiskPosition(strike=100, right="P", qty=-1, avg_cost=3.0)]
+        result = _stress_matrix(positions, 0, None, 100.0, None, {})
+        by_shock = {s["spot_shock"]: s for s in result["scenarios"]}
+
+        # At spot the put expires worthless and the premium is kept.
+        assert by_shock[0.0]["total_pnl"] == 300.0
+        assert by_shock[0.0]["pnl_change"] == 0.0
+
+        # 15% down puts it 15 in the money: 3.00 collected less 15.00 intrinsic.
+        assert by_shock[-0.15]["total_pnl"] == -1200.0
+        assert by_shock[-0.15]["pnl_change"] == -1500.0
+
+        # Upside is capped at the premium, so the shock changes nothing.
+        assert by_shock[0.15]["pnl_change"] == 0.0
+
+    def test_pnl_change_separates_a_payoff_from_a_stress_reading(self):
+        # 100 long shares bought at 50 with spot at 100: the payoff at any shocked
+        # price is still a large gain, while the shock itself is a loss. Reporting
+        # only the first is what made a 15% drop look like a five-figure profit.
+        positions: list[RiskPosition] = []
+        result = _stress_matrix(positions, 100, 50.0, 100.0, None, {})
+        by_shock = {s["spot_shock"]: s for s in result["scenarios"]}
+        assert by_shock[-0.15]["total_pnl"] == 3500.0
+        assert by_shock[-0.15]["pnl_change"] == -1500.0
 
     def test_no_spot(self):
         positions = [RiskPosition(strike=100, right="P", qty=-1, avg_cost=3.0)]
@@ -219,3 +259,148 @@ class TestGreeks:
         )
         assert g["delta"] is None
         assert g["degraded"] is True
+
+
+class TestOptionCostBasisLoading:
+    """The per-contract / per-share boundary, pinned.
+
+    IB reports an option's ``avgCost`` per contract; ``RiskPosition.avg_cost`` is
+    declared per share and every consumer multiplies by 100. Loading it verbatim
+    silently inflated the option side of every payoff, CAR and stress figure by
+    100x — the kind of defect that reaches the screen as a confident number
+    rather than as an error, so it gets a test rather than a comment.
+    """
+
+    def _row(self, **over):
+        row = {
+            "symbol": "DAVE",
+            "sec_type": "OPT",
+            "position": -1,
+            "strike": 280.0,
+            "option_right": "C",
+            "avg_cost": 8415.776,  # per contract, as IB reports it
+            "expiry": "20270115",
+        }
+        row.update(over)
+        return row
+
+    def test_per_contract_cost_becomes_per_share(self):
+        groups = _group_positions([self._row()])
+        leg = groups["DAVE"]["opt_positions"][0]
+        assert leg.avg_cost == pytest.approx(84.15776)
+
+    def test_the_payoff_that_used_to_be_100x(self):
+        # 100 shares at 182.38 plus one short 280 call for 8,415.78 a contract.
+        rows = [
+            {
+                "symbol": "DAVE",
+                "sec_type": "STK",
+                "position": 100,
+                "avg_cost": 182.38,
+                "price_last": 211.05,
+            },
+            self._row(),
+        ]
+        groups = _group_positions(rows)
+        g = groups["DAVE"]
+        legs = g["opt_positions"]
+        # Max gain of a covered call: stock to the strike, plus the premium.
+        gain = (280.0 - 182.38) * 100 + legs[0].avg_cost * 1 * 100
+        assert gain == pytest.approx(18177.78, abs=0.01)
+        # Before the fix this read 851,339.60.
+        assert gain < 20_000
+
+    def test_a_zero_cost_leg_is_still_loaded(self):
+        groups = _group_positions([self._row(avg_cost=0.0)])
+        assert groups["DAVE"]["opt_positions"][0].avg_cost == 0.0
+
+    def test_stock_cost_basis_is_untouched(self):
+        # Stock avgCost is already per share; dividing it would be the same
+        # error in the other direction.
+        groups = _group_positions(
+            [{"symbol": "AAA", "sec_type": "STK", "position": 10, "avg_cost": 55.5}]
+        )
+        assert groups["AAA"]["stock_avg_cost"] == pytest.approx(55.5)
+
+
+class TestPerLegExpiry:
+    """Time value is priced to each leg's own expiry, not the group's farthest.
+
+    A rolled position holds two expiries on one underlying. Pricing the near leg
+    to the far date overstates its time value, and the error is largest exactly
+    where a seller is most active.
+    """
+
+    def test_loader_carries_each_legs_expiry(self):
+        rows = [
+            {
+                "symbol": "AAA", "sec_type": "OPT", "position": -1,
+                "strike": 100.0, "option_right": "C", "avg_cost": 500.0,
+                "expiry": "20261016",
+            },
+            {
+                "symbol": "AAA", "sec_type": "OPT", "position": -1,
+                "strike": 110.0, "option_right": "C", "avg_cost": 300.0,
+                "expiry": "20270115",
+            },
+        ]
+        legs = _group_positions(rows)["AAA"]["opt_positions"]
+        assert [leg.expiry for leg in legs] == [date(2026, 10, 16), date(2027, 1, 15)]
+        # And the group still knows its farthest, for callers that want it.
+        assert _group_positions(rows)["AAA"]["farthest_expiry"] == date(2027, 1, 15)
+
+    def test_years_to_uses_the_leg_and_floors_at_expiry(self):
+        assert _years_to(None) == 0.0
+        assert _years_to(date.today() - timedelta(days=5)) == 0.0
+        assert _years_to(date.today() + timedelta(days=365)) == pytest.approx(1.0)
+
+    def test_hedged_reconstruction_keeps_the_expiry(self):
+        # _hedged_positions rebuilds legs; dropping expiry there would silently
+        # restore the group-wide date for the hedged view only.
+        p = RiskPosition(
+            strike=100.0, right="C", qty=-2, avg_cost=5.0, expiry=date(2026, 10, 16)
+        )
+        assert p.expiry == date(2026, 10, 16)
+        # Default keeps every existing constructor working.
+        assert RiskPosition(strike=1.0, right="P", qty=1, avg_cost=1.0).expiry is None
+
+
+class TestAggregateStressCoverage:
+    """An account total must say how much of the account it covers.
+
+    Underlyings without option mids emit only the iv_shock = 0 rows, so the
+    IV-shocked account rows are summed over fewer symbols than the unshocked
+    ones. The sum is still the sum; calling the two comparable is the error.
+    """
+
+    def _entry(self, iv_rows: bool):
+        scenarios = [
+            {"spot_shock": -0.15, "iv_shock": 0.0, "total_pnl": -100.0, "pnl_change": -50.0},
+        ]
+        if iv_rows:
+            scenarios.append(
+                {"spot_shock": -0.15, "iv_shock": 0.05, "total_pnl": -120.0, "pnl_change": -70.0}
+            )
+        return {"stress": {"available": True, "iv_stress_available": iv_rows, "scenarios": scenarios}}
+
+    def test_a_row_missing_an_underlying_is_marked_partial(self):
+        agg = _aggregate_stress([self._entry(True), self._entry(False)])
+        by_key = {(s["spot_shock"], s["iv_shock"]): s for s in agg["scenarios"]}
+
+        full = by_key[(-0.15, 0.0)]
+        assert full["contributors"] == 2
+        assert full["partial"] is False
+
+        thin = by_key[(-0.15, 0.05)]
+        assert thin["contributors"] == 1
+        assert thin["partial"] is True
+        assert agg["underlyings"] == 2
+
+    def test_nothing_is_partial_when_every_underlying_contributes(self):
+        agg = _aggregate_stress([self._entry(True), self._entry(True)])
+        assert all(not s["partial"] for s in agg["scenarios"])
+
+    def test_unavailable_underlyings_are_not_counted_as_coverage(self):
+        agg = _aggregate_stress([self._entry(True), {"stress": {"available": False}}])
+        assert agg["underlyings"] == 1
+        assert all(not s["partial"] for s in agg["scenarios"])

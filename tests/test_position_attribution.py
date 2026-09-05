@@ -20,8 +20,12 @@ def _pos_row(
     contract_key="AAPL|OPT|20260320|180.0|C",
     symbol="AAPL",
     sec_type="OPT",
+    # avg_cost is PER CONTRACT, as IB reports it and as account_positions stores
+    # it — a $3.00/share premium is 300.0 here. The fixtures previously carried
+    # per-share values, which made the reader's `* 100` look correct in tests
+    # while it was mixing units against real data.
     position_qty=-5,
-    avg_cost=3.0,
+    avg_cost=300.0,
     price_mid=2.5,
     price_last=2.5,
     strategy_instance_id=None,
@@ -91,7 +95,7 @@ class TestSingleInstanceAttribution:
         rows = [
             _pos_row(
                 position_qty=3,
-                avg_cost=5.0,
+                avg_cost=500.0,
                 price_last=6.0,
                 strategy_instance_id=20,
                 net_qty_contribution=3,
@@ -146,7 +150,7 @@ class TestMultiInstanceAttribution:
         rows = [
             _pos_row(
                 position_qty=-4,
-                avg_cost=4.0,
+                avg_cost=400.0,
                 price_last=3.0,
                 strategy_instance_id=10,
                 net_qty_contribution=-3,
@@ -154,7 +158,7 @@ class TestMultiInstanceAttribution:
             ),
             _pos_row(
                 position_qty=-4,
-                avg_cost=4.0,
+                avg_cost=400.0,
                 price_last=3.0,
                 strategy_instance_id=20,
                 net_qty_contribution=-1,
@@ -290,7 +294,7 @@ class TestReconciliation:
         rows = [
             _pos_row(
                 position_qty=-6,
-                avg_cost=5.0,
+                avg_cost=500.0,
                 price_last=4.0,
                 strategy_instance_id=1,
                 net_qty_contribution=-2,
@@ -298,7 +302,7 @@ class TestReconciliation:
             ),
             _pos_row(
                 position_qty=-6,
-                avg_cost=5.0,
+                avg_cost=500.0,
                 price_last=4.0,
                 strategy_instance_id=2,
                 net_qty_contribution=-4,

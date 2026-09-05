@@ -9,6 +9,7 @@ from zoneinfo import ZoneInfo
 
 from psycopg2.extras import RealDictCursor
 
+from bifrost_core.portfolio.units import option_cost_per_share, position_value
 from bifrost_core.persistence.postgres.brokerage_tables import (
     COMMISSIONS,
     CONTRACT_QUOTE_LIVE,
@@ -1818,14 +1819,13 @@ def _build_attribution_rows(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                     pass
 
         total_unrealized: Optional[float] = None
-        if price_for_pnl is not None and avg_cost is not None and pos_qty != 0:
-            try:
-                c = float(avg_cost)
-                if math.isfinite(c):
-                    mult = 100 if sec_type == "OPT" else 1
-                    total_unrealized = round((price_for_pnl - c) * pos_qty * mult, 2)
-            except (TypeError, ValueError):
-                pass
+        if price_for_pnl is not None and pos_qty != 0:
+            # Per-share price against a per-contract cost was the unit mix; see
+            # portfolio/units.py.
+            cost_per_share = option_cost_per_share(avg_cost, sec_type)
+            if cost_per_share is not None:
+                v = position_value(price_for_pnl - cost_per_share, pos_qty, sec_type)
+                total_unrealized = None if v is None else round(v, 2)
 
         contrib_rows = [
             r
@@ -1869,16 +1869,13 @@ def _build_attribution_rows(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         sum_abs_nq = sum(abs(float(r.get("net_qty_contribution") or 0)) for r in contrib_rows)
 
         def _pnl_for_open_qty(open_qty: float) -> Optional[float]:
-            if price_for_pnl is None or avg_cost is None:
+            if price_for_pnl is None:
                 return None
-            try:
-                c = float(avg_cost)
-                if not math.isfinite(c):
-                    return None
-                mult = 100 if sec_type == "OPT" else 1
-                return round((price_for_pnl - c) * open_qty * mult, 2)
-            except (TypeError, ValueError):
+            cost_per_share = option_cost_per_share(avg_cost, sec_type)
+            if cost_per_share is None:
                 return None
+            v = position_value(price_for_pnl - cost_per_share, open_qty, sec_type)
+            return None if v is None else round(v, 2)
 
         for r in contrib_rows:
             nq = float(r.get("net_qty_contribution") or 0)
