@@ -41,9 +41,15 @@ make db-init        # 初始化/刷新 PostgreSQL schema
 
 ## 版本发布规范
 
-- 修改 `src/bifrost_core/` 中的共享库后，必须 bump `pyproject.toml` 中的 version（当前 **0.19.0**）
+- 修改 `src/bifrost_core/` 中的共享库后，必须 bump `pyproject.toml` 中的 version（当前 **0.20.0**）
 - 其他 repo 通过 git tag 安装：`pip install git+https://github.com/ORG/bifrost-trade-core.git@v0.x.x`
 - 破坏性变更需要同步更新所有依赖 repo 的 pyproject.toml
+- **0.20.0**: returns are measured forward, over committed capital. The payoff is
+  scoped to the shares the options actually cover (`covered_shares_modeled`), CAR for a
+  covered call is the shares' market value rather than their sunk cost, and
+  `annualized_return_on_car` is now the if-called return with `annualized_static_return`
+  alongside it. Owner decision 2026-09-05: current-market-value convention. RKLB went
+  from 5,857% to static 18% / if-called 107%. Values change; new fields are additive.
 - **0.19.0**: portfolio model correctness — option `avg_cost` is loaded per SHARE (IB reports
   per contract), fixing a 100x overstatement of every option payoff / CAR / stress figure;
   stress grid spans ±15% (portfolio-margin range) and carries a 0% baseline row plus

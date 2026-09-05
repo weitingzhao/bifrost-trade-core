@@ -205,24 +205,42 @@ def shares_backing_short_calls(opt_positions: List[RiskPosition], stock_qty: int
     return min(max(stock_qty, 0), required)
 
 
-def _compute_car_per_leg(p: RiskPosition, stock_avg_cost: Optional[float], stock_qty: int) -> Tuple[float, str]:
-    """Heuristic single-leg CAR. Returns (car_value, car_type_label)."""
+def _compute_car_per_leg(
+    p: RiskPosition,
+    stock_qty: int,
+    spot: Optional[float],
+) -> Tuple[float, str]:
+    """Capital this leg currently commits. Returns (car_value, car_type_label).
+
+    Every leg reports what is committed *now*, which is what closing the position
+    would free up. A cash-secured put has always been measured that way — the
+    strike notional, not what the stock once cost — and a covered call now
+    matches: the shares tie up their market value, and the price paid for them
+    years ago is sunk.
+
+    Measured on the live book, cost basis made this the denominator of a return
+    that read 5,857% on RKLB: 1,000 shares bought at 19.79 and worth 71.89.
+    """
     if p.qty > 0:
         return abs(p.avg_cost) * abs(p.qty) * 100, "premium_paid"
     if p.right == "P" and p.qty < 0:
         return p.strike * abs(p.qty) * 100, "cash_secured"
     if p.right == "C" and p.qty < 0:
         covered = min(abs(p.qty) * 100, max(stock_qty, 0))
-        if covered > 0 and stock_avg_cost is not None:
-            return stock_avg_cost * covered, "covered_stock_cost"
-        return float("inf"), "naked_unbounded"
+        if covered <= 0:
+            return float("inf"), "naked_unbounded"
+        if spot is None or spot <= 0:
+            # No mark means no committed value to report. A cost-basis fallback
+            # would look like an answer and be a different quantity.
+            return float("nan"), "covered_no_mark"
+        return spot * covered, "covered_stock_value"
     return 0.0, "unknown"
 
 
 def _compute_car(
     opt_positions: List[RiskPosition],
     stock_qty: int,
-    stock_avg_cost: Optional[float],
+    spot: Optional[float],
     envelope_max_loss: Optional[float],
 ) -> Dict[str, Any]:
     """Aggregate CAR with net-portfolio-max-loss check (PRD §4.3)."""
@@ -230,7 +248,10 @@ def _compute_car(
     total_leg = 0.0
     has_unbounded = False
     for p in opt_positions:
-        val, label = _compute_car_per_leg(p, stock_avg_cost, stock_qty)
+        val, label = _compute_car_per_leg(p, stock_qty, spot)
+        if math.isnan(val):
+            leg_cars.append({"strike": p.strike, "right": p.right, "qty": p.qty, "car": None, "type": label})
+            continue
         if math.isinf(val):
             has_unbounded = True
             leg_cars.append({"strike": p.strike, "right": p.right, "qty": p.qty, "car": None, "type": label})
@@ -251,12 +272,73 @@ def _compute_car(
         "explain": explain,
         "has_unbounded": has_unbounded,
         "leg_details": leg_cars,
+        # Capital COMMITTED, before the net-max-loss cap. The cap answers "how
+        # much can I lose", which on appreciated stock is far less than what the
+        # position ties up — RKLB can only lose its 16,100 cost basis while
+        # holding 71,885 of market value. A return has to be measured over what
+        # is actually committed, or a long-held winner reports a return it is not
+        # earning.
+        "committed": None if has_unbounded else round(total_leg, 2),
     }
 
 
 # ---------------------------------------------------------------------------
 # Annualized return — V1.1
 # ---------------------------------------------------------------------------
+
+def _forward_returns(
+    opt_positions: List[RiskPosition],
+    covered_shares: int,
+    spot: Optional[float],
+    committed: Optional[float],
+    dte_days: Optional[int],
+) -> Dict[str, Optional[float]]:
+    """What this structure can still earn, over the capital it still commits.
+
+    The payoff's max_gain measures from cost basis, which is the right way to
+    draw a payoff diagram and the wrong way to answer whether capital is well
+    placed: on a covered call over long-held stock, most of it is appreciation
+    already earned. RKLB reads 1,311% a year that way and 18% on the premium.
+
+    Two figures, both annualised and both over currently committed capital:
+
+      static    the premium, kept if nothing is assigned — the seller's base case
+      if_called every short call assigned at its strike, from today's price
+
+    Short puts have no if-called upside beyond the premium, so the two coincide
+    there, which is correct rather than a gap.
+    """
+    if committed is None or committed <= 0 or dte_days is None or dte_days <= 0:
+        return {"static": None, "if_called": None}
+
+    premium = 0.0
+    for p in opt_positions:
+        premium += p.avg_cost * abs(p.qty) * 100 * (1 if p.qty < 0 else -1)
+
+    scale = 365.0 / dte_days
+    static = round((premium / committed) * scale, 6)
+
+    if spot is None or spot <= 0 or covered_shares <= 0:
+        return {"static": static, "if_called": static}
+
+    # Assignment sells the covered shares at the strike, from where they are now.
+    called_upside = 0.0
+    remaining = covered_shares
+    for p in sorted(
+        (x for x in opt_positions if x.right == "C" and x.qty < 0),
+        key=lambda x: x.strike,
+    ):
+        if remaining <= 0:
+            break
+        shares = min(abs(p.qty) * 100, remaining)
+        called_upside += (p.strike - spot) * shares
+        remaining -= shares
+
+    return {
+        "static": static,
+        "if_called": round(((premium + called_upside) / committed) * scale, 6),
+    }
+
 
 def _annualized_return(profit: Optional[float], car: Optional[float], dte_days: Optional[int]) -> Optional[float]:
     if profit is None or car is None or car <= 0 or dte_days is None or dte_days <= 0:
@@ -580,8 +662,9 @@ def compute_model_analysis(conn: Any, account_id: str) -> Dict[str, Any]:
         profile = compute_risk_profile(opt, covered_shares, stock_avg)
 
         # V1.1: CAR + annualized
-        car = _compute_car(opt, stock_qty, stock_avg, profile.max_loss)
-        annual_max = _annualized_return(profile.max_gain, car["effective"], dte)
+        car = _compute_car(opt, stock_qty, spot, profile.max_loss)
+        fwd = _forward_returns(opt, covered_shares, spot, car["committed"], dte)
+        annual_max = fwd["if_called"]
         annual_loss = _annualized_return(
             abs(profile.max_loss) if profile.max_loss is not None else None,
             car["effective"],
@@ -618,6 +701,10 @@ def compute_model_analysis(conn: Any, account_id: str) -> Dict[str, Any]:
             # The payoff, CAR and their ratio all describe this many shares, not
             # stock_qty — visible so nobody has to infer the scope from a total.
             "covered_shares_modeled": covered_shares,
+            # Forward returns over currently committed capital. annualized_return_on_car
+            # is the if-called figure; static is the premium alone.
+            "annualized_static_return": fwd["static"],
+            "capital_committed": car["committed"],
             "stock_avg_cost": stock_avg,
             # Payoff envelope
             "max_gain": profile.max_gain,

@@ -19,6 +19,7 @@ from bifrost_core.portfolio.model.core import (
     _years_to,
     _aggregate_stress,
     shares_backing_short_calls,
+    _forward_returns,
 )
 from datetime import date, timedelta
 
@@ -464,3 +465,94 @@ class TestCoveredShareScope:
         covered = shares_backing_short_calls(legs, 2600)
         assert compute_risk_profile(legs, covered, 19.79).naked_short_call_contracts == 0
         assert compute_risk_profile([self._call(1)], 0, None).naked_short_call_contracts == 1
+
+
+class TestForwardReturns:
+    """Returns measured from here, over capital committed now.
+
+    max_gain measures from cost basis — right for a payoff diagram, wrong for
+    "is this capital well placed", because on long-held stock most of it is
+    already earned. RKLB read 1,311% a year that way against 18% on the premium.
+    """
+
+    RKLB = RiskPosition(strike=90.0, right="C", qty=-10, avg_cost=3.69)
+    SPOT = 71.885
+    COVERED = 1000
+    DTE = 104
+
+    def _fwd(self, committed, **kw):
+        args = dict(
+            opt_positions=[self.RKLB], covered_shares=self.COVERED,
+            spot=self.SPOT, committed=committed, dte_days=self.DTE,
+        )
+        args.update(kw)
+        return _forward_returns(**args)
+
+    def test_static_is_the_premium_over_committed_capital(self):
+        committed = self.SPOT * self.COVERED  # 71,885
+        r = self._fwd(committed)
+        # 3,690 premium on 71,885 over 104 days.
+        assert r["static"] == pytest.approx((3690 / committed) * (365 / self.DTE), abs=1e-4)
+        assert 0.15 < r["static"] < 0.20
+
+    def test_if_called_adds_only_the_move_from_here_to_the_strike(self):
+        committed = self.SPOT * self.COVERED
+        r = self._fwd(committed)
+        expected = ((3690 + (90.0 - self.SPOT) * self.COVERED) / committed) * (365 / self.DTE)
+        assert r["if_called"] == pytest.approx(expected, abs=1e-4)
+        assert 1.0 < r["if_called"] < 1.2
+        # And it is nowhere near the cost-basis figure it replaces.
+        assert r["if_called"] < 2.0
+
+    def test_a_short_put_has_no_if_called_upside_beyond_the_premium(self):
+        put = RiskPosition(strike=150.0, right="P", qty=-1, avg_cost=10.47)
+        r = _forward_returns([put], 0, 140.0, 15000.0, 90)
+        assert r["static"] == r["if_called"]
+
+    def test_a_long_leg_subtracts_its_premium(self):
+        long_call = RiskPosition(strike=100.0, right="C", qty=1, avg_cost=2.0)
+        r = _forward_returns([long_call], 0, 95.0, 10000.0, 30)
+        assert r["static"] is not None and r["static"] < 0
+
+    def test_assignment_walks_the_lowest_strikes_first(self):
+        # 500 covered shares against two short calls wanting 1,000: the 80 strike
+        # is assigned before the 120 one.
+        legs = [
+            RiskPosition(strike=120.0, right="C", qty=-5, avg_cost=1.0),
+            RiskPosition(strike=80.0, right="C", qty=-5, avg_cost=1.0),
+        ]
+        r = _forward_returns(legs, 500, 100.0, 50_000.0, 365)
+        premium = 1.0 * 10 * 100
+        expected = ((premium + (80.0 - 100.0) * 500) / 50_000.0)
+        assert r["if_called"] == pytest.approx(expected, abs=1e-4)
+
+    def test_no_capital_or_no_horizon_yields_nothing(self):
+        assert self._fwd(None)["static"] is None
+        assert self._fwd(0.0)["static"] is None
+        assert self._fwd(1000.0, dte_days=0)["if_called"] is None
+
+    def test_no_mark_falls_back_to_static_rather_than_inventing_a_move(self):
+        r = self._fwd(71885.0, spot=None)
+        assert r["static"] is not None
+        assert r["if_called"] == r["static"]
+
+
+class TestCarIsCommittedCapital:
+    def test_a_covered_call_commits_the_shares_market_value(self):
+        legs = [RiskPosition(strike=90.0, right="C", qty=-10, avg_cost=3.69)]
+        car = _compute_car(legs, 2600, 71.885, None)
+        # 1,000 shares covered at 71.885 — not the 19.79 they once cost.
+        assert car["effective"] == pytest.approx(71_885.0)
+
+    def test_a_cash_secured_put_still_commits_the_strike_notional(self):
+        legs = [RiskPosition(strike=150.0, right="P", qty=-2, avg_cost=10.47)]
+        assert _compute_car(legs, 0, 140.0, None)["effective"] == pytest.approx(30_000.0)
+
+    def test_a_naked_call_is_unbounded(self):
+        legs = [RiskPosition(strike=1200.0, right="C", qty=-1, avg_cost=54.99)]
+        assert _compute_car(legs, 0, 200.0, None)["has_unbounded"] is True
+
+    def test_no_mark_reports_no_capital_rather_than_the_cost_basis(self):
+        legs = [RiskPosition(strike=90.0, right="C", qty=-1, avg_cost=3.69)]
+        car = _compute_car(legs, 100, None, None)
+        assert car["effective"] is None or car["effective"] == 0
