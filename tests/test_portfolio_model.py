@@ -18,6 +18,7 @@ from bifrost_core.portfolio.model.core import (
     _group_positions,
     _years_to,
     _aggregate_stress,
+    shares_backing_short_calls,
 )
 from datetime import date, timedelta
 
@@ -404,3 +405,62 @@ class TestAggregateStressCoverage:
         agg = _aggregate_stress([self._entry(True), {"stress": {"available": False}}])
         assert agg["underlyings"] == 1
         assert all(not s["partial"] for s in agg["scenarios"])
+
+
+class TestCoveredShareScope:
+    """The payoff and CAR must describe the same shares.
+
+    CAR counts only stock backing short calls. The payoff used to model the whole
+    position, so on a name holding more stock than the calls need it carried an
+    outright long's upside — and annualized_return_on_car, being one over the
+    other, reported thousands of percent.
+    """
+
+    def _call(self, contracts: int) -> RiskPosition:
+        return RiskPosition(strike=90.0, right="C", qty=-contracts, avg_cost=3.69)
+
+    def test_extra_stock_beyond_the_calls_is_not_modelled(self):
+        # RKLB's shape: 2,600 shares held, 10 short calls needing 1,000.
+        assert shares_backing_short_calls([self._call(10)], 2600) == 1000
+
+    def test_stock_is_the_binding_constraint_when_it_is_short(self):
+        # NVDA's shape: 9 short calls want 900, only 500 shares held.
+        assert shares_backing_short_calls([self._call(9)], 500) == 500
+
+    def test_a_naked_call_covers_nothing(self):
+        assert shares_backing_short_calls([self._call(1)], 0) == 0
+
+    def test_long_calls_offset_the_requirement(self):
+        legs = [self._call(3), RiskPosition(strike=100.0, right="C", qty=2, avg_cost=1.0)]
+        assert shares_backing_short_calls(legs, 5000) == 100
+
+    def test_puts_require_no_stock_cover(self):
+        put = RiskPosition(strike=150.0, right="P", qty=-2, avg_cost=10.47)
+        assert shares_backing_short_calls([put], 1000) == 0
+
+    def test_negative_stock_does_not_produce_negative_cover(self):
+        assert shares_backing_short_calls([self._call(1)], -400) == 0
+
+    def test_the_ratio_the_scope_mismatch_used_to_inflate(self):
+        # 2,600 shares at 19.79, 10 short 90 calls at 3.69/share.
+        legs = [self._call(10)]
+        covered = shares_backing_short_calls(legs, 2600)
+        scoped = compute_risk_profile(legs, covered, 19.79)
+        whole = compute_risk_profile(legs, 2600, 19.79)
+
+        # Capital at risk counts the covered stock either way.
+        car = 19.79 * covered
+        assert car == pytest.approx(19_790.0)
+
+        # Scoped, the return is a covered call's: strike less cost, plus premium.
+        assert scoped.max_gain == pytest.approx((90.0 - 19.79) * 1000 + 3.69 * 10 * 100, abs=1)
+        assert scoped.max_gain / car < 5
+
+        # Unscoped it carried 1,600 uncovered shares' appreciation.
+        assert whole.max_gain > scoped.max_gain * 4
+
+    def test_naked_call_detection_is_unchanged_by_the_scope(self):
+        legs = [self._call(10)]
+        covered = shares_backing_short_calls(legs, 2600)
+        assert compute_risk_profile(legs, covered, 19.79).naked_short_call_contracts == 0
+        assert compute_risk_profile([self._call(1)], 0, None).naked_short_call_contracts == 1

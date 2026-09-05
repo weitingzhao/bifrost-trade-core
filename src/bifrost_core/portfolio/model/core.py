@@ -184,6 +184,27 @@ def _group_positions(rows: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
 # CAR (Capital at risk) — V1.1
 # ---------------------------------------------------------------------------
 
+def shares_backing_short_calls(opt_positions: List[RiskPosition], stock_qty: int) -> int:
+    """Shares the option structure actually uses as cover.
+
+    ``compute_risk_profile``'s second parameter is named ``covered_shares`` and
+    means exactly that, but this module used to hand it the whole stock position.
+    On a name where more stock is held than the calls need, the payoff then
+    modelled every extra share appreciating — so max gain carried an outright
+    long position's upside while capital at risk counted only the covered stock,
+    and the ratio between them (annualised return on CAR) came out in the
+    thousands of percent. RKLB: 2,600 shares held against 10 short calls, and a
+    5,857% return.
+
+    The TypeScript port has always passed ``min(held, required)``. This makes the
+    Python side agree.
+    """
+    net_short_call = sum(abs(p.qty) * 100 for p in opt_positions if p.right == "C" and p.qty < 0)
+    net_long_call = sum(p.qty * 100 for p in opt_positions if p.right == "C" and p.qty > 0)
+    required = max(0, net_short_call - net_long_call)
+    return min(max(stock_qty, 0), required)
+
+
 def _compute_car_per_leg(p: RiskPosition, stock_avg_cost: Optional[float], stock_qty: int) -> Tuple[float, str]:
     """Heuristic single-leg CAR. Returns (car_value, car_type_label)."""
     if p.qty > 0:
@@ -551,8 +572,12 @@ def compute_model_analysis(conn: Any, account_id: str) -> Dict[str, Any]:
         farthest = g["farthest_expiry"]
         dte = _dte(farthest) if farthest else None
 
-        # V1.0: payoff envelope
-        profile = compute_risk_profile(opt, stock_qty, stock_avg)
+        # V1.0: payoff envelope, scoped to the stock the options actually use.
+        # CAR is already scoped that way; the two have to match or their ratio
+        # is a return on one thing over the capital of another.
+        covered_shares = shares_backing_short_calls(opt, stock_qty)
+
+        profile = compute_risk_profile(opt, covered_shares, stock_avg)
 
         # V1.1: CAR + annualized
         car = _compute_car(opt, stock_qty, stock_avg, profile.max_loss)
@@ -590,6 +615,9 @@ def compute_model_analysis(conn: Any, account_id: str) -> Dict[str, Any]:
             "dte_basis": "farthest_expiry",
             "farthest_expiry": farthest.isoformat() if farthest else None,
             "stock_qty": stock_qty,
+            # The payoff, CAR and their ratio all describe this many shares, not
+            # stock_qty — visible so nobody has to infer the scope from a total.
+            "covered_shares_modeled": covered_shares,
             "stock_avg_cost": stock_avg,
             # Payoff envelope
             "max_gain": profile.max_gain,
