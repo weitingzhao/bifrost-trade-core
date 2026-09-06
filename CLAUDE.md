@@ -10,6 +10,19 @@ parity-ids: core-versioning-v2
 
 与本项目用户对话一律使用中文回复（无论用户用何种语言提问）；UI 字符串与代码标识符使用 English。
 
+## 工作区定位（2026-09-06）
+
+| 项 | 值 |
+|---|---|
+| 域 / 载荷 | Trade (OLTP) · Satellite 执行载荷 · **纯共享库**，无进程入口 |
+| 运行位置 | 被各 Trade 服务镜像安装（`BIFROST_CORE_REF` 钉 git ref）；改公开接口必须同 PR bump `pyproject.toml` |
+| 数据库权威 | `docs/DATABASE.md`（三环境 `bifrost_{dev,stg,prod}` @ CloudNativePG `data` NS 同步 DDL） |
+| 仓库可见性 | GitHub **PUBLIC**（12 个 repo 全部公开）—— `.env`、Secret YAML、dump、kubeconfig、账户内容永不入库 |
+| 硬边界 | D10 交易执行冻结（BLOCKED）· D13 三域边界 · 平台/业务解耦（Flywheel A/B） |
+| 事实基线 | `../AGENT_FACTS.md`（§8c 运行时与安全事实）· 规则 `../CLAUDE.md`（§8 Claude Code 运行配置） |
+
+会话请在工作区根 `/stocks` 启动（加载治理层 hooks / auto mode / 共享记忆）；运行时与安全事实以 `../AGENT_FACTS.md` §8c 为准。
+
 ## 职责范围
 
 本 repo 是 **`bifrost-core` Python 共享库** (`src/bifrost_core/`) — 被所有其他后端 repo pip install 后引用：
