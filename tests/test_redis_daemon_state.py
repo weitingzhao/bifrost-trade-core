@@ -75,3 +75,31 @@ def test_trading_status_and_account_sync_shapes() -> None:
     assert ash is not None
     assert ash["last_sync_version"] == 3
     assert ash["alive"] is True
+
+
+def test_account_sync_heartbeat_reports_why_it_is_not_alive() -> None:
+    """`alive` alone read healthy through ~2000 consecutive failures (2026-09-07)."""
+    failing = account_sync_heartbeat_from_state(
+        {
+            "last_ts": 90.0,
+            "last_sync_version": 0,
+            "alive": False,
+            "sync_failures": 2000,
+            "last_error": 'UndefinedTable: relation "brokerage.positions" does not exist',
+            "last_ok_ts": 12.0,
+        }
+    )
+    assert failing is not None
+    assert failing["alive"] is False
+    assert failing["sync_failures"] == 2000
+    assert "brokerage.positions" in failing["last_error"]
+    assert failing["last_ok_ts"] == 12.0
+
+
+def test_account_sync_heartbeat_defaults_when_the_daemon_never_reported_failures() -> None:
+    """Older daemons write no failure fields; the reader must not invent any."""
+    healthy = account_sync_heartbeat_from_state({"last_ts": 1.0, "alive": True})
+    assert healthy is not None
+    assert healthy["sync_failures"] == 0
+    assert healthy["last_error"] == ""
+    assert healthy["last_ok_ts"] is None

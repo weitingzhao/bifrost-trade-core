@@ -49,6 +49,7 @@ _INT_FIELDS = frozenset(
         "option_legs_count",
         "daily_hedge_count",
         "last_sync_version",
+        "sync_failures",
         "accounts_synced",
         "positions_synced",
         "executions_synced",
@@ -59,6 +60,7 @@ _INT_FIELDS = frozenset(
 _FLOAT_FIELDS = frozenset(
     {
         "last_ts",
+        "last_ok_ts",
         "graceful_shutdown_at",
         "spot",
         "bid",
@@ -417,4 +419,9 @@ def account_sync_heartbeat_from_state(state: Optional[Dict[str, Any]]) -> Option
         "heartbeat_interval_sec": float(hi) if hi is not None else 5.0,
         "suspended": bool(state.get("suspended", False)),
         "alive": bool(state.get("alive", True)),
+        # `alive` alone could not distinguish "loop turning, sync working" from
+        # "loop turning, every sync failing". These say which.
+        "sync_failures": state.get("sync_failures") or 0,
+        "last_error": state.get("last_error") or "",
+        "last_ok_ts": state.get("last_ok_ts"),
     }

@@ -54,9 +54,14 @@ make db-init        # 初始化/刷新 PostgreSQL schema
 
 ## 版本发布规范
 
-- 修改 `src/bifrost_core/` 中的共享库后，必须 bump `pyproject.toml` 中的 version（当前 **0.20.1**）
+- 修改 `src/bifrost_core/` 中的共享库后，必须 bump `pyproject.toml` 中的 version（当前 **0.20.2**）
 - 其他 repo 通过 git tag 安装：`pip install git+https://github.com/ORG/bifrost-trade-core.git@v0.x.x`
 - 破坏性变更需要同步更新所有依赖 repo 的 pyproject.toml
+- **0.20.2**: `account_sync_heartbeat_from_state` returns `sync_failures` / `last_error` /
+  `last_ok_ts`. `alive` alone could not tell "loop turning, sync working" from "loop
+  turning, every sync failing" — on 2026-09-07 the Account Sync daemon failed ~2000
+  consecutive syncs over five hours while every status surface read healthy. Additive:
+  new keys only, `alive` semantics unchanged for existing readers.
 - **0.20.1**: four defects the 0.19/0.20 review surfaced. Cover is allocated once across a
   symbol's short calls (two legs each claimed the same shares: 165,496 committed against
   91,942 of stock, and both read covered while four contracts were naked); option mids are
