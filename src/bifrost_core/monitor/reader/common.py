@@ -614,6 +614,15 @@ class StatusReader:
         self._end_read_txn()
         return result
 
+    def get_short_option_legs(self, account_ids: Optional[List[str]] = None) -> Optional[List[Dict[str, Any]]]:
+        if not self._connect():
+            return None
+        from bifrost_core.portfolio.reader.portfolio_facade import get_short_option_legs_for_accounts
+
+        result = get_short_option_legs_for_accounts(self._conn, account_ids)
+        self._end_read_txn()
+        return result
+
     # --- Executions / transactions / performance (delegate to executions module) ---
     def get_executions(
         self,

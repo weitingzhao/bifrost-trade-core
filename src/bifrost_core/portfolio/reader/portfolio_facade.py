@@ -17,3 +17,16 @@ def get_model_analysis_for_account(conn: Any, account_id: str) -> Optional[Dict[
     except Exception as exc:
         logger.exception("get_model_analysis_for_account failed for %s: %s", account_id, exc)
         return None
+
+
+def get_short_option_legs_for_accounts(
+    conn: Any, account_ids: Optional[list] = None
+) -> Optional[list]:
+    """Short option legs with the underlying's live price. Caller manages transaction on conn."""
+    from bifrost_core.portfolio.services.short_legs import get_short_option_legs
+
+    try:
+        return get_short_option_legs(conn, account_ids)
+    except Exception as exc:
+        logger.exception("get_short_option_legs_for_accounts failed: %s", exc)
+        return None
