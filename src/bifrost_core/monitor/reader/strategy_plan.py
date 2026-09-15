@@ -1,0 +1,549 @@
+"""Structured trade plans: read, write, and the one place their rules live.
+
+A plan records what the desk intends -- legs, size, and how it means to get out
+-- so that afterwards there is something to compare the fill against. It is
+advisory: nothing reads this table to act. The daemon and the gateway do not
+know it exists (D10).
+
+The rules are enforced here rather than in the API so there is one answer to
+"may this change happen", whichever caller asks:
+
+    create  ->  draft
+    draft   ->  intended    (needs a leg, and a written exit)
+    draft   ->  cancelled
+    intended -> filled      (linked to an instance of the same account)
+    intended -> cancelled
+
+Once intended, the content is frozen: the plan is the thing being judged, so
+editing it after the fact would remove the judgement. Roll it instead -- a new
+plan with `source_kind='roll'` and `parent_strategy_plan_id` set. There is no
+delete.
+
+`expired` is not a stored status. An intent whose `expires_at` has passed reads
+as expired, and can still be linked to a fill or cancelled; the row keeps
+saying `intended` because that is what happened.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+from datetime import datetime, timezone
+from typing import Any, Dict, List, Optional
+
+import psycopg2
+from psycopg2.extras import RealDictCursor
+
+from bifrost_core.persistence.postgres.connection import _get_conn_params
+
+logger = logging.getLogger(__name__)
+
+PLAN_STATUSES = ("draft", "intended", "filled", "cancelled")
+PLAN_EFFECTIVE_STATUSES = ("draft", "intended", "expired", "filled", "cancelled")
+
+_LEG_SIDES = ("buy", "sell")
+_LEG_SEC_TYPES = ("OPT", "STK")
+_LEG_RIGHTS = ("C", "P")
+
+_PLAN_COLUMNS = """
+    strategy_plan_id, account_id, symbol, structure_label,
+    strategy_structure_id, strategy_opportunity_id,
+    legs_json, qty, price_effect, limit_price,
+    target_kind, target_value, stop_kind, stop_value, exit_by,
+    rationale, source_kind, source_ref, source_json,
+    status, expires_at, intended_at, filled_at, cancelled_at,
+    strategy_instance_id, parent_strategy_plan_id, created_at, updated_at
+"""
+
+# Columns a draft may replace. `status` and the timestamps are the state
+# machine's, not the caller's.
+_EDITABLE_COLUMNS = (
+    "account_id",
+    "symbol",
+    "structure_label",
+    "strategy_structure_id",
+    "strategy_opportunity_id",
+    "qty",
+    "price_effect",
+    "limit_price",
+    "target_kind",
+    "target_value",
+    "stop_kind",
+    "stop_value",
+    "exit_by",
+    "rationale",
+    "source_kind",
+    "source_ref",
+    "expires_at",
+)
+
+
+class PlanRuleError(ValueError):
+    """A plan rule said no, and `reason` is what to show the reader."""
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+
+
+def plan_effective_status(
+    status: Optional[str], expires_at: Any = None, now: Optional[datetime] = None
+) -> str:
+    """The status a reader should see. `intended` past its expiry reads `expired`."""
+    current = (status or "").strip()
+    if current != "intended" or expires_at is None:
+        return current
+    if not hasattr(expires_at, "timestamp"):
+        return current
+    moment = now or datetime.now(timezone.utc)
+    deadline = expires_at
+    if deadline.tzinfo is None:
+        deadline = deadline.replace(tzinfo=timezone.utc)
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    return "expired" if deadline < moment else current
+
+
+def plan_exit_is_written(
+    target_kind: Optional[str], stop_kind: Optional[str], exit_by: Any
+) -> bool:
+    """Whether the plan says anything at all about getting out."""
+    return bool(target_kind) or bool(stop_kind) or exit_by is not None
+
+
+def normalize_plan_legs(value: Any) -> List[Dict[str, Any]]:
+    """Validate and normalise the legs array. Raises `PlanRuleError` on junk."""
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise PlanRuleError("legs must be a list")
+    legs: List[Dict[str, Any]] = []
+    for i, raw in enumerate(value):
+        if not isinstance(raw, dict):
+            raise PlanRuleError(f"leg {i + 1} is not an object")
+        side = str(raw.get("side") or "").strip().lower()
+        if side not in _LEG_SIDES:
+            raise PlanRuleError(f"leg {i + 1}: side must be buy or sell")
+        sec_type = str(raw.get("sec_type") or "").strip().upper()
+        if sec_type not in _LEG_SEC_TYPES:
+            raise PlanRuleError(f"leg {i + 1}: sec_type must be OPT or STK")
+        right = raw.get("right")
+        right = str(right).strip().upper() if right not in (None, "") else None
+        if right is not None and right not in _LEG_RIGHTS:
+            raise PlanRuleError(f"leg {i + 1}: right must be C or P")
+        strike = raw.get("strike")
+        expiry = raw.get("expiry")
+        expiry = str(expiry).strip() if expiry not in (None, "") else None
+        if sec_type == "OPT":
+            if right is None or strike is None or expiry is None:
+                raise PlanRuleError(f"leg {i + 1}: an option leg needs right, strike and expiry")
+        if expiry is not None:
+            try:
+                datetime.strptime(expiry, "%Y-%m-%d")
+            except ValueError:
+                raise PlanRuleError(f"leg {i + 1}: expiry must be YYYY-MM-DD") from None
+        try:
+            ratio = int(raw.get("ratio") if raw.get("ratio") is not None else 1)
+        except (TypeError, ValueError):
+            raise PlanRuleError(f"leg {i + 1}: ratio must be a whole number") from None
+        if ratio < 1:
+            raise PlanRuleError(f"leg {i + 1}: ratio must be 1 or more")
+        legs.append(
+            {
+                "side": side,
+                "sec_type": sec_type,
+                "right": right,
+                "strike": float(strike) if strike is not None else None,
+                "expiry": expiry,
+                "ratio": ratio,
+                "contract_key": (str(raw.get("contract_key")).strip() or None)
+                if raw.get("contract_key")
+                else None,
+                "mid_at_plan": float(raw["mid_at_plan"]) if raw.get("mid_at_plan") is not None else None,
+                "quote_asof": str(raw["quote_asof"]) if raw.get("quote_asof") else None,
+            }
+        )
+    return legs
+
+
+def _normalize_source(value: Any) -> List[Dict[str, Any]]:
+    """The provenance chain, as written when the plan was made."""
+    if not isinstance(value, list):
+        return []
+    return [dict(item) for item in value if isinstance(item, dict)]
+
+
+def _conn_from_config(status_config: Optional[dict]) -> Any:
+    """Open a connection from status_config (postgres). None when not configured."""
+    if not status_config or (
+        status_config.get("sink") != "postgres" and not status_config.get("postgres")
+    ):
+        return None
+    try:
+        return psycopg2.connect(**_get_conn_params(status_config))
+    except Exception as e:  # pragma: no cover - connection failure path
+        logger.warning("strategy_plan connect failed: %s", e)
+        return None
+
+
+def _row_out(row: Dict[str, Any]) -> Dict[str, Any]:
+    """One plan as callers read it, with the status they should show."""
+    out = dict(row)
+    for key in ("legs_json", "source_json"):
+        raw = out.get(key)
+        if isinstance(raw, str):
+            try:
+                out[key] = json.loads(raw)
+            except ValueError:
+                out[key] = []
+        elif raw is None:
+            out[key] = []
+    out["effective_status"] = plan_effective_status(out.get("status"), out.get("expires_at"))
+    return out
+
+
+def list_plans(
+    status_config: Optional[dict],
+    status: Optional[str] = None,
+    symbol: Optional[str] = None,
+    account_id: Optional[str] = None,
+    limit: int = 200,
+) -> List[Dict[str, Any]]:
+    """Plans, newest first. `status` filters the stored status, not the effective one."""
+    conn = _conn_from_config(status_config)
+    if conn is None:
+        return []
+    conditions: List[str] = []
+    values: List[Any] = []
+    if status and str(status).strip():
+        conditions.append("status = %s")
+        values.append(str(status).strip())
+    if symbol and str(symbol).strip():
+        conditions.append("upper(symbol) = upper(%s)")
+        values.append(str(symbol).strip())
+    if account_id and str(account_id).strip():
+        conditions.append("account_id = %s")
+        values.append(str(account_id).strip())
+    where = (" WHERE " + " AND ".join(conditions)) if conditions else ""
+    values.append(max(1, int(limit)))
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                f"SELECT {_PLAN_COLUMNS} FROM strategy_plan{where} "
+                "ORDER BY created_at DESC, strategy_plan_id DESC LIMIT %s",
+                values,
+            )
+            rows = cur.fetchall()
+        return [_row_out(dict(r)) for r in rows]
+    except Exception as e:
+        logger.warning("list_plans failed: %s", e)
+        return []
+    finally:
+        _close(conn)
+
+
+def get_plan(status_config: Optional[dict], strategy_plan_id: int) -> Optional[Dict[str, Any]]:
+    """One plan, or None when there is no such row."""
+    conn = _conn_from_config(status_config)
+    if conn is None:
+        return None
+    try:
+        return _get_plan_on(conn, strategy_plan_id)
+    except Exception as e:
+        logger.warning("get_plan failed: %s", e)
+        return None
+    finally:
+        _close(conn)
+
+
+def _get_plan_on(conn: Any, strategy_plan_id: int) -> Optional[Dict[str, Any]]:
+    with conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute(
+            f"SELECT {_PLAN_COLUMNS} FROM strategy_plan WHERE strategy_plan_id = %s",
+            (strategy_plan_id,),
+        )
+        row = cur.fetchone()
+    return _row_out(dict(row)) if row else None
+
+
+def create_plan(status_config: Optional[dict], payload: Dict[str, Any]) -> Optional[int]:
+    """Insert one draft. Returns its id, or None when Postgres is not configured."""
+    fields = _plan_fields(payload, require=True)
+    legs = normalize_plan_legs(payload.get("legs"))
+    source = _normalize_source(payload.get("source"))
+    conn = _conn_from_config(status_config)
+    if conn is None:
+        return None
+    columns = [*fields.keys(), "legs_json", "source_json"]
+    placeholders = ", ".join(["%s"] * len(fields) + ["%s::jsonb", "%s::jsonb"])
+    values = [*fields.values(), json.dumps(legs), json.dumps(source)]
+    parent = payload.get("parent_strategy_plan_id")
+    if parent is not None:
+        columns.append("parent_strategy_plan_id")
+        placeholders += ", %s"
+        values.append(int(parent))
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"INSERT INTO strategy_plan ({', '.join(columns)}) VALUES ({placeholders}) "
+                "RETURNING strategy_plan_id",
+                values,
+            )
+            row = cur.fetchone()
+        conn.commit()
+        return int(row[0]) if row and row[0] is not None else None
+    except Exception as e:
+        logger.warning("create_plan failed: %s", e)
+        _rollback(conn)
+        raise
+    finally:
+        _close(conn)
+
+
+def update_plan(
+    status_config: Optional[dict], strategy_plan_id: int, payload: Dict[str, Any]
+) -> bool:
+    """Replace a draft's editable fields. Raises `PlanRuleError` past draft."""
+    fields = _plan_fields(payload, require=False)
+    legs = normalize_plan_legs(payload["legs"]) if "legs" in payload else None
+    source = _normalize_source(payload["source"]) if "source" in payload else None
+    conn = _conn_from_config(status_config)
+    if conn is None:
+        return False
+    try:
+        current = _locked_status(conn, strategy_plan_id)
+        if current is None:
+            return False
+        if current != "draft":
+            raise PlanRuleError(
+                f"This plan is {current}, and only a draft can be edited. "
+                "Cancel it and write a new one, or roll it."
+            )
+        sets = [f"{name} = %s" for name in fields]
+        values: List[Any] = list(fields.values())
+        if legs is not None:
+            sets.append("legs_json = %s::jsonb")
+            values.append(json.dumps(legs))
+        if source is not None:
+            sets.append("source_json = %s::jsonb")
+            values.append(json.dumps(source))
+        if not sets:
+            conn.rollback()
+            return True
+        sets.append("updated_at = now()")
+        values.append(strategy_plan_id)
+        with conn.cursor() as cur:
+            cur.execute(
+                f"UPDATE strategy_plan SET {', '.join(sets)} WHERE strategy_plan_id = %s",
+                values,
+            )
+            updated = cur.rowcount > 0
+        conn.commit()
+        return updated
+    except PlanRuleError:
+        _rollback(conn)
+        raise
+    except Exception as e:
+        logger.warning("update_plan failed: %s", e)
+        _rollback(conn)
+        raise
+    finally:
+        _close(conn)
+
+
+def intend_plan(status_config: Optional[dict], strategy_plan_id: int) -> bool:
+    """Mark a draft intended. Raises `PlanRuleError` with what is missing."""
+    conn = _conn_from_config(status_config)
+    if conn is None:
+        return False
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                "SELECT status, legs_json, target_kind, stop_kind, exit_by "
+                "FROM strategy_plan WHERE strategy_plan_id = %s FOR UPDATE",
+                (strategy_plan_id,),
+            )
+            row = cur.fetchone()
+            if row is None:
+                conn.rollback()
+                return False
+            plan = _row_out(dict(row))
+            if plan["status"] != "draft":
+                raise PlanRuleError(
+                    f"This plan is {plan['status']}, and only a draft can be marked intended."
+                )
+            if not plan["legs_json"]:
+                raise PlanRuleError("Write at least one leg before marking this intended.")
+            if not plan_exit_is_written(plan["target_kind"], plan["stop_kind"], plan["exit_by"]):
+                raise PlanRuleError(
+                    "Write a target, a stop or an exit-by date. Without one there is "
+                    "nothing to compare the outcome against."
+                )
+            cur.execute(
+                "UPDATE strategy_plan SET status = 'intended', intended_at = now(), "
+                "updated_at = now() WHERE strategy_plan_id = %s",
+                (strategy_plan_id,),
+            )
+        conn.commit()
+        return True
+    except PlanRuleError:
+        _rollback(conn)
+        raise
+    except Exception as e:
+        logger.warning("intend_plan failed: %s", e)
+        _rollback(conn)
+        raise
+    finally:
+        _close(conn)
+
+
+def link_fill(
+    status_config: Optional[dict], strategy_plan_id: int, strategy_instance_id: int
+) -> bool:
+    """Say which instance an intent turned into. `filled_at` is the instance's own open."""
+    conn = _conn_from_config(status_config)
+    if conn is None:
+        return False
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                "SELECT status, account_id FROM strategy_plan "
+                "WHERE strategy_plan_id = %s FOR UPDATE",
+                (strategy_plan_id,),
+            )
+            row = cur.fetchone()
+            if row is None:
+                conn.rollback()
+                return False
+            if row["status"] != "intended":
+                raise PlanRuleError(
+                    f"This plan is {row['status']}. Only an intended plan can be linked to a fill."
+                )
+            cur.execute(
+                "SELECT account_id, opened_at FROM strategy_instance "
+                "WHERE strategy_instance_id = %s",
+                (strategy_instance_id,),
+            )
+            instance = cur.fetchone()
+            if instance is None:
+                raise PlanRuleError(f"No strategy instance {strategy_instance_id}.")
+            if str(instance["account_id"]) != str(row["account_id"]):
+                raise PlanRuleError(
+                    f"That instance belongs to account {instance['account_id']}, "
+                    f"and the plan to {row['account_id']}."
+                )
+            cur.execute(
+                "UPDATE strategy_plan SET status = 'filled', strategy_instance_id = %s, "
+                "filled_at = %s, updated_at = now() WHERE strategy_plan_id = %s",
+                (strategy_instance_id, instance["opened_at"], strategy_plan_id),
+            )
+        conn.commit()
+        return True
+    except PlanRuleError:
+        _rollback(conn)
+        raise
+    except Exception as e:
+        logger.warning("link_fill failed: %s", e)
+        _rollback(conn)
+        raise
+    finally:
+        _close(conn)
+
+
+def cancel_plan(status_config: Optional[dict], strategy_plan_id: int) -> bool:
+    """Drop a plan that will not be taken. Filled plans stay as they are."""
+    conn = _conn_from_config(status_config)
+    if conn is None:
+        return False
+    try:
+        current = _locked_status(conn, strategy_plan_id)
+        if current is None:
+            return False
+        if current not in ("draft", "intended"):
+            raise PlanRuleError(f"This plan is {current}, and cannot be cancelled.")
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE strategy_plan SET status = 'cancelled', cancelled_at = now(), "
+                "updated_at = now() WHERE strategy_plan_id = %s",
+                (strategy_plan_id,),
+            )
+        conn.commit()
+        return True
+    except PlanRuleError:
+        _rollback(conn)
+        raise
+    except Exception as e:
+        logger.warning("cancel_plan failed: %s", e)
+        _rollback(conn)
+        raise
+    finally:
+        _close(conn)
+
+
+_REQUIRED_ON_CREATE = ("account_id", "symbol", "structure_label", "qty")
+
+
+def _plan_fields(payload: Dict[str, Any], require: bool) -> Dict[str, Any]:
+    """The editable columns `payload` names, validated. On create, the four musts."""
+    fields: Dict[str, Any] = {}
+    for name in _EDITABLE_COLUMNS:
+        must = require and name in _REQUIRED_ON_CREATE
+        if name not in payload and not must:
+            continue
+        value = payload.get(name)
+        if name in ("account_id", "symbol", "structure_label"):
+            text = str(value or "").strip()
+            if not text:
+                raise PlanRuleError(f"{name.replace('_', ' ')} is required")
+            fields[name] = text.upper() if name == "symbol" else text
+        elif name == "qty":
+            if value is None:
+                raise PlanRuleError("qty is required")
+            try:
+                qty = int(value)
+            except (TypeError, ValueError):
+                raise PlanRuleError("qty must be a whole number") from None
+            if qty <= 0:
+                raise PlanRuleError("qty must be 1 or more")
+            fields[name] = qty
+        else:
+            fields[name] = value
+    if require:
+        fields.setdefault("source_kind", payload.get("source_kind") or "manual")
+    _check_pairs(fields)
+    return fields
+
+
+def _check_pairs(fields: Dict[str, Any]) -> None:
+    """A target or stop is a kind *and* a value; the table says so too."""
+    for kind, value, label in (
+        ("target_kind", "target_value", "target"),
+        ("stop_kind", "stop_value", "stop"),
+    ):
+        if kind in fields or value in fields:
+            if (fields.get(kind) is None) != (fields.get(value) is None):
+                raise PlanRuleError(f"A {label} needs both a kind and a value")
+
+
+def _locked_status(conn: Any, strategy_plan_id: int) -> Optional[str]:
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT status FROM strategy_plan WHERE strategy_plan_id = %s FOR UPDATE",
+            (strategy_plan_id,),
+        )
+        row = cur.fetchone()
+    return str(row[0]) if row else None
+
+
+def _rollback(conn: Any) -> None:
+    try:
+        conn.rollback()
+    except Exception:  # pragma: no cover - rollback failure path
+        pass
+
+
+def _close(conn: Any) -> None:
+    try:
+        conn.close()
+    except Exception:  # pragma: no cover - close failure path
+        pass

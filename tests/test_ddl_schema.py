@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import os
-
 import pytest
 
 pytestmark = pytest.mark.db
@@ -77,28 +75,3 @@ def test_ddl_does_not_create_retired_gate_safety_children(pg_conn):
             """
         )
         assert cur.fetchone() is None
-
-
-@pytest.fixture
-def pg_conn():
-    """PostgreSQL connection from env or skip."""
-    if not os.environ.get("PGHOST") and not os.environ.get("BIFROST_TEST_DB"):
-        pytest.skip("Set PGHOST or BIFROST_TEST_DB=1 for db tests")
-    import psycopg2
-    import yaml
-    from pathlib import Path
-
-    from bifrost_core.persistence.postgres.connection import _get_conn_params
-    from bifrost_core.persistence.postgres.ddl import _ensure_tables
-
-    root = Path(__file__).resolve().parents[1]
-    cfg_path = root / "config" / "config.yaml.example"
-    with open(cfg_path, encoding="utf-8") as f:
-        config = yaml.safe_load(f) or {}
-    params = _get_conn_params(config)
-    conn = psycopg2.connect(**params)
-    _ensure_tables(conn)
-    conn.commit()
-    yield conn
-    conn.rollback()
-    conn.close()

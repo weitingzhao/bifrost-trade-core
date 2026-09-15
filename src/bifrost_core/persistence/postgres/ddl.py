@@ -471,6 +471,57 @@ def _ensure_tables(conn, log=None, log_table=None) -> None:
         cur.execute(
             "CREATE INDEX IF NOT EXISTS strategy_instance_account_opened ON strategy_instance (account_id, opened_at)"
         )
+        _log_table(
+            "strategy_plan", "Structured trade plans (advisory; no execution consumer -- D10)"
+        )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS strategy_plan (
+                strategy_plan_id        bigserial PRIMARY KEY,
+                account_id              text        NOT NULL,
+                symbol                  text        NOT NULL,
+                structure_label         text        NOT NULL,
+                strategy_structure_id   bigint      REFERENCES strategy_structure(strategy_structure_id) ON DELETE SET NULL,
+                strategy_opportunity_id bigint      REFERENCES strategy_opportunity(strategy_opportunity_id) ON DELETE SET NULL,
+                legs_json               jsonb       NOT NULL DEFAULT '[]'::jsonb,
+                qty                     integer     NOT NULL CHECK (qty > 0),
+                price_effect            text        CHECK (price_effect IN ('credit', 'debit')),
+                limit_price             numeric     CHECK (limit_price >= 0),
+                target_kind             text        CHECK (target_kind IN ('credit_pct', 'option_price', 'underlying_price')),
+                target_value            numeric,
+                stop_kind               text        CHECK (stop_kind IN ('credit_multiple', 'option_price', 'underlying_price')),
+                stop_value              numeric,
+                exit_by                 date,
+                rationale               text,
+                source_kind             text        NOT NULL DEFAULT 'manual'
+                                                    CHECK (source_kind IN ('manual', 'symbol', 'hypothesis', 'inbox_draft', 'roll')),
+                source_ref              text,
+                source_json             jsonb       NOT NULL DEFAULT '[]'::jsonb,
+                status                  text        NOT NULL DEFAULT 'draft'
+                                                    CHECK (status IN ('draft', 'intended', 'filled', 'cancelled')),
+                expires_at              timestamptz,
+                intended_at             timestamptz,
+                filled_at               timestamptz,
+                cancelled_at            timestamptz,
+                strategy_instance_id    bigint      REFERENCES strategy_instance(strategy_instance_id) ON DELETE SET NULL,
+                parent_strategy_plan_id bigint      REFERENCES strategy_plan(strategy_plan_id) ON DELETE SET NULL,
+                created_at              timestamptz NOT NULL DEFAULT now(),
+                updated_at              timestamptz NOT NULL DEFAULT now(),
+                CHECK ((target_kind IS NULL) = (target_value IS NULL)),
+                CHECK ((stop_kind IS NULL) = (stop_value IS NULL))
+            )
+            """
+        )
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS strategy_plan_status_created ON strategy_plan (status, created_at DESC)"
+        )
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS strategy_plan_symbol ON strategy_plan (symbol)"
+        )
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS strategy_plan_instance ON strategy_plan (strategy_instance_id) "
+            "WHERE strategy_instance_id IS NOT NULL"
+        )
         _log_table("strategy_allocation", "Strategy allocation")
         cur.execute(
             """

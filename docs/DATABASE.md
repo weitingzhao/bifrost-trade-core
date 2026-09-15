@@ -77,7 +77,7 @@ Retired (merged into `gate_safety_strategy` in core `0.8.1`): `gate_safety_state
 
 `settings.active_gate_safety_strategy_id` points at the active set. Opportunity / allocation tables keep FK `*_gate_safety_strategy_id`.
 
-## Strategy tables (7 tables)
+## Strategy tables (8 tables)
 
 | Table | jsonb / notes |
 |-------|----------------|
@@ -86,12 +86,35 @@ Retired (merged into `gate_safety_strategy` in core `0.8.1`): `gate_safety_state
 | `strategy_opportunity` | `symbols_json`, `entry_conditions_json` |
 | `strategy_allocation` | scalar limits; N:M via `strategy_allocation_opportunity` |
 | `strategy_instance` | unchanged |
+| `strategy_plan` | `legs_json`, `source_json`; structured trade plans — **advisory, no execution consumer (D10)** |
+
+### `strategy_plan` (core **0.22.0**)
+
+What the desk intends, so that afterwards there is something to compare the
+fill against. Nothing reads it to act: the daemon and the gateway do not know
+it exists. Orders are placed in TWS.
+
+| Column | Meaning |
+|--------|---------|
+| `legs_json` | Leg array: `{side: 'buy'\|'sell', sec_type: 'OPT'\|'STK', right: 'C'\|'P'\|null, strike: number\|null, expiry: 'YYYY-MM-DD'\|null, ratio: int ≥ 1, contract_key: 'SYM\|OPT\|YYYYMMDD\|STRIKE\|R'\|null, mid_at_plan: number\|null, quote_asof: ISO\|null}`. An `OPT` leg needs right, strike and expiry |
+| `target_kind` / `target_value` | Take profit: `credit_pct` = per cent of the premium bought back (50 = 50%); `option_price` = combination price; `underlying_price` = price of the underlying |
+| `stop_kind` / `stop_value` | Stop: `credit_multiple` = multiple of the premium (2 = −2× credit); the other two as above |
+| `exit_by` | Latest planned exit date |
+| `source_kind` / `source_ref` / `source_json` | Where the plan came from, and the provenance chain as it stood: `[{kind, text, ref?, to?}]` |
+| `status` | `draft` → `intended` → `filled`, or `cancelled` from either of the first two. No delete |
+| `expires_at` | **`expired` is not a stored status**: `status='intended'` with `expires_at < now()` reads `effective_status='expired'` |
+| `strategy_instance_id` | The instance the plan turned into; `filled_at` is that instance's `opened_at` |
+| `parent_strategy_plan_id` | The plan this one rolls. An intended plan is frozen — roll it rather than edit it |
+
+State machine and reads: [`strategy_plan.py`](../src/bifrost_core/monitor/reader/strategy_plan.py).
+`intend` requires at least one leg and at least one of target / stop / `exit_by`
+— without a planned exit there is nothing to measure adherence against.
 
 Retired (Wave 9): `strategy_dim` (→ six `dim_*_t` enum types + read-only catalog), `strategy_template_leg`, `strategy_structure_leg`, `strategy_opportunity_symbol`, `strategy_opportunity_entry_condition`.
 
 **Wave 9 — strategy collapse** (core **0.17.0**): one-shot migration `migrate_wave9_strategy_collapse()` in [`wave9_migrations.py`](../src/bifrost_core/persistence/postgres/wave9_migrations.py).
 
-## §6 Schema changelog (Wave 1–10)
+## §6 Schema changelog (Wave 1–12)
 
 | Wave | Core version | Change |
 |------|--------------|--------|
@@ -105,6 +128,7 @@ Retired (Wave 9): `strategy_dim` (→ six `dim_*_t` enum types + read-only catal
 | Wave 9 | 0.17.0 | Collapse strategy child tables + gate flat cols → jsonb; `strategy_dim` → enum + catalog |
 | Wave 10 | 0.17.2 | Remove Wave 1 `_upgrade_gate_safety_strategy` DDL path; `ensure_dim_enum_types()` from catalog; CREATE uses `dim_*_t` |
 | Wave 11 | 0.18.0 | DROP `settings.ib_flex_host_token` / `ib_flex_secondary_token`; Flex Plugin Secret-only token path |
+| Wave 12 | 0.22.0 | Add `strategy_plan` (structured trade plans; advisory, no execution consumer) |
 
 
 ## Brokerage tables
