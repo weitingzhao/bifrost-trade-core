@@ -226,6 +226,9 @@ def list_plans(
         values.append(str(account_id).strip())
     where = (" WHERE " + " AND ".join(conditions)) if conditions else ""
     values.append(max(1, int(limit)))
+    # A failed read raises. Returning [] would tell the desk it has no plans,
+    # which is a statement about the account, not about the query -- and it hid a
+    # missing table behind a green `{"items": [], "count": 0}` once already.
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(
@@ -235,23 +238,17 @@ def list_plans(
             )
             rows = cur.fetchall()
         return [_row_out(dict(r)) for r in rows]
-    except Exception as e:
-        logger.warning("list_plans failed: %s", e)
-        return []
     finally:
         _close(conn)
 
 
 def get_plan(status_config: Optional[dict], strategy_plan_id: int) -> Optional[Dict[str, Any]]:
-    """One plan, or None when there is no such row."""
+    """One plan, or None when there is no such row. A failed read raises."""
     conn = _conn_from_config(status_config)
     if conn is None:
         return None
     try:
         return _get_plan_on(conn, strategy_plan_id)
-    except Exception as e:
-        logger.warning("get_plan failed: %s", e)
-        return None
     finally:
         _close(conn)
 

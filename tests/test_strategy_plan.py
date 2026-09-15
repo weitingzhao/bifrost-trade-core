@@ -322,6 +322,32 @@ def test_rows_carry_the_status_a_reader_should_see(conn) -> None:
     assert " JOIN " not in fake.cur.executed[0][0].upper()
 
 
+def test_a_broken_read_is_an_error_not_an_empty_desk(conn, monkeypatch) -> None:
+    """A read that fails must not read as "no plans".
+
+    This is not hypothetical: with the table missing in an environment, the
+    swallowed error made `{"items": [], "count": 0}` -- a green acceptance check
+    for a schema that had never been applied.
+    """
+    fake = conn([[]])
+
+    def boom(*_a: Any, **_k: Any) -> None:
+        raise RuntimeError('relation "strategy_plan" does not exist')
+
+    monkeypatch.setattr(fake.cur, "execute", boom)
+    with pytest.raises(RuntimeError):
+        strategy_plan.list_plans(CFG)
+    with pytest.raises(RuntimeError):
+        strategy_plan.get_plan(CFG, 1)
+
+
+def test_no_database_configured_is_still_an_empty_list(monkeypatch) -> None:
+    """Not configured is a different thing from broken -- the router maps it to 503."""
+    monkeypatch.setattr(strategy_plan, "_conn_from_config", lambda _cfg: None)
+    assert strategy_plan.list_plans(None) == []
+    assert strategy_plan.get_plan(None, 1) is None
+
+
 # ── D10 ──────────────────────────────────────────────────────────────────
 
 
