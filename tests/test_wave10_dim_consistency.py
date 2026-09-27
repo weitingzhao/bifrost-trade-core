@@ -8,6 +8,7 @@ from bifrost_core.monitor.reader.strategy_dim_catalog import (
     DIM_TYPE_TO_ENUM,
     dim_literals_by_type,
     is_valid_dim_code,
+    validate_dim_fields,
 )
 from bifrost_core.persistence.postgres.seed_call_spread_templates import _CALL_SPREAD_TEMPLATE_SPECS
 from bifrost_core.persistence.postgres.wave9_migrations import _DIM_TYPE_TO_ENUM, dim_enum_drift
@@ -99,3 +100,12 @@ def test_dim_enum_drift_ignores_a_missing_type():
 def test_ddl_built_types_agree_with_the_catalog(pg_conn):
     with pg_conn.cursor() as cur:
         assert dim_enum_drift(cur) == {}
+
+
+def test_validate_dim_fields_allows_blank_and_known_codes():
+    validate_dim_fields({"dim_coverage": "cash_secured", "dim_time": "", "dim_risk": None, "name": "x"})
+
+
+def test_validate_dim_fields_names_the_refused_code():
+    with pytest.raises(ValueError, match="Invalid coverage code: uncovered"):
+        validate_dim_fields({"dim_coverage": " uncovered "})

@@ -6,6 +6,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import psycopg2
 
+from bifrost_core.monitor.reader.strategy_dim_catalog import validate_dim_fields
 from bifrost_core.monitor.schemas.gate_params import GateParams
 from bifrost_core.persistence.postgres.connection import _get_conn_params
 
@@ -68,6 +69,7 @@ def _payload_to_metadata_and_params(payload: Dict[str, Any]) -> Tuple[Dict[str, 
         "dim_time": _dim("dim_time"),
         "is_active": bool(payload["is_active"]) if payload.get("is_active") is not None else True,
     }
+    validate_dim_fields(metadata)
     return metadata, params
 
 
@@ -83,12 +85,16 @@ _STRATEGY_COLUMNS = _METADATA_COLUMNS  # legacy test alias
 
 
 def create_gate_safety(status_config: Optional[dict], payload: Dict[str, Any]) -> Optional[int]:
-    """Insert a new gate_safety_strategy row. Returns id or None on error."""
+    """Insert a new gate_safety_strategy row. Returns id or None on a database error.
+
+    A payload the gate params or the dim catalog refuse raises ValueError before
+    any connection is opened; the API answers that with 400, not 500.
+    """
+    metadata, params = _payload_to_metadata_and_params(payload)
     conn = _conn_from_config(status_config)
     if conn is None:
         return None
     try:
-        metadata, params = _payload_to_metadata_and_params(payload)
         cols = ", ".join(_METADATA_COLUMNS) + ", params_json"
         placeholders = ", ".join(["%s"] * len(_METADATA_COLUMNS)) + ", %s::jsonb"
         values = tuple(metadata[c] for c in _METADATA_COLUMNS) + (json.dumps(params),)
@@ -115,12 +121,16 @@ def create_gate_safety(status_config: Optional[dict], payload: Dict[str, Any]) -
 
 
 def update_gate_safety(status_config: Optional[dict], gate_safety_strategy_id: int, payload: Dict[str, Any]) -> bool:
-    """Update an existing gate_safety_strategy row. Returns True on success."""
+    """Update an existing gate_safety_strategy row. Returns True on success.
+
+    A payload the gate params or the dim catalog refuse raises ValueError before
+    any connection is opened, as in create_gate_safety.
+    """
+    metadata, params = _payload_to_metadata_and_params(payload)
     conn = _conn_from_config(status_config)
     if conn is None:
         return False
     try:
-        metadata, params = _payload_to_metadata_and_params(payload)
         assignments = ", ".join(f"{c} = %s" for c in _METADATA_COLUMNS)
         values = tuple(metadata[c] for c in _METADATA_COLUMNS) + (
             json.dumps(params),

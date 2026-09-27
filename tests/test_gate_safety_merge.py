@@ -3,7 +3,12 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
+import psycopg2
+import pytest
+
+from bifrost_core.monitor.reader import gate_safety_write
 from bifrost_core.monitor.reader.gate_safety import _row_to_gates, build_gate_params_from_flat_row
 from bifrost_core.monitor.reader.gate_safety_write import _payload_to_row, _STRATEGY_COLUMNS
 from bifrost_core.persistence.postgres.ddl import _GATE_SAFETY_RETIRED_CHILD_TABLES
@@ -26,7 +31,7 @@ def test_payload_to_row_builds_params_json():
     payload = {
         "name": "Default",
         "version": 2,
-        "dim_direction": "long",
+        "dim_direction": "bullish",
         "is_active": True,
         "gates": {
             "strategy": {
@@ -191,3 +196,69 @@ def test_payload_roundtrip_matches_row_to_gates():
     assert gates["intent"]["hedge"]["min_hedge_shares"] == 5
     assert gates["guard"]["risk"]["paper_trade"] is False
     assert dates == ["2026-01-01"]
+
+
+_BAD_PAYLOADS = [
+    pytest.param({"name": "g", "gates": {}, "dim_volatility": "neutral"}, "Invalid volatility code: neutral", id="dim"),
+    pytest.param(
+        {"name": "g", "gates": {"state": {"delta": {"epsilon_band": "wide"}}}},
+        "epsilon_band",
+        id="gate-params",
+    ),
+]
+
+
+def _no_connection(_cfg: Any) -> Any:
+    raise AssertionError("a refused payload must not open a connection")
+
+
+@pytest.mark.parametrize("payload, message", _BAD_PAYLOADS)
+def test_create_gate_safety_raises_on_a_refused_payload(monkeypatch, payload, message):
+    # Raised, not swallowed into None: the router maps ValueError to 400 and None to 500.
+    monkeypatch.setattr(gate_safety_write, "_conn_from_config", _no_connection)
+    with pytest.raises(ValueError, match=message):
+        gate_safety_write.create_gate_safety({"sink": "postgres"}, payload)
+
+
+@pytest.mark.parametrize("payload, message", _BAD_PAYLOADS)
+def test_update_gate_safety_raises_on_a_refused_payload(monkeypatch, payload, message):
+    # Raised, not swallowed into False: the router maps False to 404 "not found".
+    monkeypatch.setattr(gate_safety_write, "_conn_from_config", _no_connection)
+    with pytest.raises(ValueError, match=message):
+        gate_safety_write.update_gate_safety({"sink": "postgres"}, 1, payload)
+
+
+class _FailingConn:
+    def __init__(self) -> None:
+        self.rolled_back = False
+
+    def cursor(self) -> Any:
+        class _Cur:
+            def __enter__(self) -> "_Cur":
+                return self
+
+            def __exit__(self, *exc: Any) -> None:
+                return None
+
+            def execute(self, *a: Any, **k: Any) -> None:
+                raise psycopg2.OperationalError("connection lost")
+
+        return _Cur()
+
+    def commit(self) -> None:
+        return None
+
+    def rollback(self) -> None:
+        self.rolled_back = True
+
+    def close(self) -> None:
+        return None
+
+
+def test_gate_safety_database_errors_still_return_none_and_false(monkeypatch):
+    conn = _FailingConn()
+    monkeypatch.setattr(gate_safety_write, "_conn_from_config", lambda _cfg: conn)
+    payload = {"name": "g", "gates": {}, "dim_volatility": "vol_neutral"}
+    assert gate_safety_write.create_gate_safety({"sink": "postgres"}, payload) is None
+    assert gate_safety_write.update_gate_safety({"sink": "postgres"}, 1, payload) is False
+    assert conn.rolled_back

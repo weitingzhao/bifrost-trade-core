@@ -15,15 +15,6 @@ from bifrost_core.persistence.postgres.connection import _get_conn_params
 
 logger = logging.getLogger(__name__)
 
-_DIM_TO_COL = {
-    "direction": "dim_direction",
-    "structure": "dim_structure",
-    "coverage": "dim_coverage",
-    "risk": "dim_risk",
-    "volatility": "dim_volatility",
-    "time": "dim_time",
-}
-
 
 def _conn_from_config(status_config: Optional[dict]) -> Any:
     if not status_config or (
@@ -53,13 +44,7 @@ def _validate_leg(leg: Dict[str, Any]) -> None:
 
 
 def _validate_dim_codes(conn: Any, payload: Dict[str, Any]) -> None:
-    for dim, col in _DIM_TO_COL.items():
-        code = payload.get(col)
-        if code is None or str(code).strip() == "":
-            continue
-        c = str(code).strip()
-        if not strategy_dim_catalog.is_valid_dim_code(dim, c):
-            raise ValueError(f"Invalid {dim} code: {c}")
+    strategy_dim_catalog.validate_dim_fields(payload)
 
 
 def create_dim(status_config: Optional[dict], dim_type: str, payload: Dict[str, Any]) -> None:

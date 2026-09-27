@@ -113,6 +113,20 @@ def is_valid_dim_code(dim_type: str, code: str) -> bool:
     return c in _ALLOWED_CODES.get(dt, set())
 
 
+def validate_dim_fields(payload: Dict[str, Any]) -> None:
+    """Raise ValueError for a dim_* field whose code the catalog (and so the enum type) lacks.
+
+    Blank and missing fields are allowed: every dim column is nullable.
+    """
+    for dim_type in DIM_TYPE_TO_ENUM:
+        code = payload.get(f"dim_{dim_type}")
+        if code is None or str(code).strip() == "":
+            continue
+        c = str(code).strip()
+        if not is_valid_dim_code(dim_type, c):
+            raise ValueError(f"Invalid {dim_type} code: {c}")
+
+
 def get_dim_by_id(strategy_dim_id: int) -> Dict[str, Any] | None:
     for items in _DIM_BY_TYPE.values():
         for item in items:
