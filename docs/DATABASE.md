@@ -181,6 +181,23 @@ Retired (core **0.10.10** / Market Data Plugin **0.7.9**): `public.preference_da
 
 Retired (core **0.15.0** / Wave 6): `public.ops_audit_log` — actuation audit routed to platform-api `POST /api/v1/audit/append`; table dropped idempotently on `_ensure_tables()`.
 
+## Feedback tables (Golden Source, trade-api owned — D-Journal-Stores 2026-09-27)
+
+`ops_feedback.*` lives in `bifrost_golden_source` (installation-keyed: one report
+stream across dev/stg/prod), written and read by **trade-api** over its
+analytics_reader connection — the `ops_jobs.*` precedent for non-Research schemas
+in Golden Source. Research never writes this schema; Trade never writes
+`journal.*` (the mirror rule, spine `D-Journal-Stores`).
+
+| Table | PK | Purpose |
+|-------|----|---------|
+| `ops_feedback.report` | `report_id` (identity; shown as `FB-%04d`) | One feedback report: `kind` bug·data·idea·howto, `title`/`body_md`, page route+label, `blocks_trading` (reporter-set at submit), `context` jsonb (shell-collected), `status` new·triaged·progress·fixed·answered·wontfix, `reply_md`/`replied_at`, `unread_reply` (a reply or status move sets it; the My-reports pane on screen clears it) |
+| `ops_feedback.report_image` | `report_image_id` | ≤4 images per report (design cap), `bytes` bytea ≤2 MB each, `ON DELETE CASCADE` |
+
+DDL is idempotent, ensured lazily by `bifrost_api.research.feedback_store`
+(trade-api has no migration job against Golden Source). Behaviour contracts:
+design `Shell Spec §20`; API under trade-api `/research/feedback/*`.
+
 ## Commands
 
 ```bash
