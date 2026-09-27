@@ -130,7 +130,6 @@ massive:
   api_key: ""
   tier: "starter"
   rest_base: "https://api.polygon.io"
-  ws_url: "wss://socket.polygon.io/options"
   features:
     trades_enabled: false
   expiration_cache:

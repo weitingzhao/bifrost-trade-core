@@ -156,17 +156,13 @@ def _dedupe_preserve(seq: List[str]) -> List[str]:
 
 
 def _socket_segment(
-    massive: Optional[Dict[str, Any]],
     ib_ingestor: Optional[Dict[str, Any]],
     ib_account_agent: Optional[Dict[str, Any]],
     quotes_redis_reader_ok: bool,
 ) -> tuple[int, List[str]]:
-    """Socket / quotes path: Polygon WS meta (legacy field ``massive``), IB ingestor, IB Account Agent, Monitor quotes Redis reader."""
+    """Socket / quotes path: IB ingestor, IB Account Agent, Monitor quotes Redis reader."""
     reasons: List[str] = []
     rank = 1
-    if massive and massive.get("configured") and massive.get("ws_connected") is False:
-        rank = max(rank, 2)
-        reasons.append("socket_massive_disconnected")
     if ib_ingestor is not None and ib_ingestor.get("connected") is False:
         rank = max(rank, 2)
         reasons.append("socket_ib_ingestor_disconnected")
@@ -185,7 +181,6 @@ def derive_health_roll_up(
     daemon_block_reasons: List[str],
     monitor_lamp: str,
     monitor_block_reasons: List[str],
-    massive: Optional[Dict[str, Any]],
     ib_ingestor: Optional[Dict[str, Any]],
     quotes_redis_reader_ok: bool,
     ib_account_agent: Optional[Dict[str, Any]] = None,
@@ -196,9 +191,7 @@ def derive_health_roll_up(
     """
     dr = _lamp_rank(daemon_lamp)
     mr = _lamp_rank(monitor_lamp)
-    sr, socket_reasons = _socket_segment(
-        massive, ib_ingestor, ib_account_agent, quotes_redis_reader_ok
-    )
+    sr, socket_reasons = _socket_segment(ib_ingestor, ib_account_agent, quotes_redis_reader_ok)
     worst = max(dr, mr, sr)
     base = _rank_to_health(worst)
 

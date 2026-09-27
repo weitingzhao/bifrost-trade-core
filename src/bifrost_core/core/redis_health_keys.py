@@ -1,13 +1,11 @@
 """Canonical Redis keys for Socket ingest health under ``bifrost:health:*``.
 
-Service **ids** in Ops YAML: official ``polygon_ws`` (YAML may still list legacy
-``massive_ws``; callers normalize once — FE/API comparison never treats it as a
-separate legal id) / ``ib_ingestor`` / ``ib_operator``. Redis **health** hashes use the
-``ws_*`` suffix names below — **string values are stable** (do not rename keys).
-Strategy Trading Daemon health + Ops lease use ``bifrost:health:daemon_strategy_trading``.
+Service **ids** in Ops YAML: ``ib_ingestor`` / ``ib_operator`` / ``ib_account_agent``.
+Redis **health** hashes use the ``ws_*`` suffix names below — **string values are stable**
+(do not rename keys). Strategy Trading Daemon health + Ops lease use
+``bifrost:health:daemon_strategy_trading``.
 
-Readers fall back to prior bifrost key names and (Polygon Options WS only)
-``massive:meta:status`` when the canonical hash is empty.
+Readers fall back to prior bifrost key names when the canonical hash is empty.
 """
 
 from __future__ import annotations
@@ -22,35 +20,19 @@ HEALTH_HASH_TTL_SEC = 180  # 3 minutes
 # on their bifrost:health:* hashes because Prod Redis writes those nodes reliably.
 BIFROST_OPS_LEASE_PREFIX = "bifrost:ops:lease:"
 
-# Lease key suffix stays ``massive_ws`` (string value unchanged). ``polygon_ws`` maps here.
-BIFROST_OPS_LEASE_MASSIVE_WS = BIFROST_OPS_LEASE_PREFIX + "massive_ws"
-BIFROST_OPS_LEASE_POLYGON_WS = BIFROST_OPS_LEASE_MASSIVE_WS
 BIFROST_OPS_LEASE_IB_INGESTOR = BIFROST_OPS_LEASE_PREFIX + "ib_ingestor"
 BIFROST_OPS_LEASE_IB_OPERATOR = BIFROST_OPS_LEASE_PREFIX + "ib_operator"
 BIFROST_OPS_LEASE_IB_ACCOUNT_AGENT = BIFROST_OPS_LEASE_PREFIX + "ib_account_agent"
 
-# Ops formal id → legacy lease suffix (Redis key string values must not change).
-_OPS_LEASE_SERVICE_ID_ALIASES: Dict[str, str] = {
-    "polygon_ws": "massive_ws",
-}
-
 
 def ops_lease_key_for_service(service_id: str) -> str:
-    """Return the legacy Ops control-lease Redis key for a service_id.
-
-    ``polygon_ws`` maps onto the historical ``…:massive_ws`` lease key (string unchanged).
-    """
-    sid = service_id.strip()
-    sid = _OPS_LEASE_SERVICE_ID_ALIASES.get(sid, sid)
-    return BIFROST_OPS_LEASE_PREFIX + sid
+    """Return the legacy Ops control-lease Redis key for a service_id."""
+    return BIFROST_OPS_LEASE_PREFIX + service_id.strip()
 
 
 # Canonical health hashes (Socket Services / GET /status ``socket`` + Ops ``redis_meta_key``).
 # IB hashes may include per-slot ``*_ib_probe_at``, ``*_ib_probe_ok``, ``*_ib_probe_interval_sec``
 # (Operator host/secondary; Account Agent host/secondary; Ingestor ``ib_probe_*``) for liveness UI.
-# String value intentionally keeps ``ws_massive_option`` (Wave B: rename function names only).
-BIFROST_HEALTH_MASSIVE_WS = "bifrost:health:ws_massive_option"
-BIFROST_HEALTH_POLYGON_WS = BIFROST_HEALTH_MASSIVE_WS
 BIFROST_HEALTH_IB_INGESTOR = "bifrost:health:ws_ib_ingestor"
 BIFROST_HEALTH_IB_OPERATOR = "bifrost:health:ws_ib_operator"
 BIFROST_HEALTH_IB_ACCOUNT_AGENT = "bifrost:health:ws_ib_account_agent"
@@ -71,7 +53,6 @@ BIFROST_OPS_TRADING_ENGINE_META = BIFROST_HEALTH_DAEMON_TRADING_ENGINE
 ENGINE_OPS_ACTIVE_REDIS_FIELD = "engine_ops_active"
 
 # Previous bifrost names (read / YAML normalization fallback).
-LEGACY_BIFROST_MASSIVE_WS = "bifrost:health:massive_ws"
 LEGACY_BIFROST_IB_INGESTOR = "bifrost:health:ib_ingestor"
 LEGACY_BIFROST_IB_OPERATOR = "bifrost:health:ib_operator"
 LEGACY_BIFROST_IB_ACCOUNT_AGENT = "bifrost:health:ib_account_agent"
@@ -79,9 +60,6 @@ LEGACY_BIFROST_IB_ACCOUNT_AGENT = "bifrost:health:ib_account_agent"
 # Older IB operator meta health key (read / YAML normalization fallback).
 LEGACY_IB_OPERATOR_META_HEALTH = "ib:operator:meta:health"
 LEGACY_IB_INGESTER_META_HEALTH = "ib:ingester:meta:health"
-
-# Older Polygon Options WS key (read fallback) — Redis prefix ``massive:`` unchanged.
-LEGACY_MASSIVE_META_STATUS = "massive:meta:status"
 
 
 def redis_hash_field_truthy(h: Dict[str, Any], field: str = "connected") -> bool:
@@ -97,36 +75,6 @@ def redis_hash_field_truthy(h: Dict[str, Any], field: str = "connected") -> bool
         return v != 0
     s = str(v).strip().lower()
     return s in ("1", "true", "yes", "on")
-
-
-def hgetall_polygon_ws_status(r: Any, r_massive: Any = None) -> Dict[str, str]:
-    """Polygon WS / options ingest health hash (Plugin redis-massive bus).
-
-    When *r_massive* is provided (Plugin redis-massive bus), try it first — the
-    Polygon WS ingestor writes to the shared ``redis-massive`` in the data NS.
-    Falls back to *r* (env-local redis-live) for backward compatibility during the
-    transition period.
-    """
-    clients = [r_massive, r] if r_massive is not None else [r]
-    for client in clients:
-        if client is None:
-            continue
-        for key in (
-            BIFROST_HEALTH_POLYGON_WS,
-            LEGACY_BIFROST_MASSIVE_WS,
-            LEGACY_MASSIVE_META_STATUS,
-        ):
-            try:
-                h = client.hgetall(key)
-            except Exception:
-                continue
-            if h:
-                return dict(h)
-    return {}
-
-
-# Deprecated alias — prefer ``hgetall_polygon_ws_status``.
-hgetall_massive_ws_status = hgetall_polygon_ws_status
 
 
 def hgetall_ib_ingestor_health(r: Any) -> Dict[str, str]:
