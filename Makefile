@@ -16,10 +16,10 @@ test-ib:
 	pytest -m ib
 
 lint:
-	ruff check src/ tests/
+	ruff check .
 
 lint-fix:
-	ruff check --fix src/ tests/
+	ruff check --fix .
 
 db-init:
 	python scripts/db/db_refresh_schema.py
