@@ -7,6 +7,7 @@ from bifrost_core.persistence.postgres.wave9_migrations import (
     migrate_wave9_strategy_collapse,
 )
 from bifrost_core.persistence.postgres.wave11_migrations import migrate_wave11_drop_flex_token_columns
+from bifrost_core.persistence.postgres.wave13_migrations import migrate_wave13_reconcile_legacy_schema
 
 # IB / brokerage tables live in bifrost_golden_source.raw_broker.* (see brokerage_ddl.py).
 # Per-env DBs expose them via postgres_fdw. Do not recreate in public.
@@ -548,6 +549,8 @@ def _ensure_tables(conn, log=None, log_table=None) -> None:
             )
             """
         )
+        # Before the index below: renames the legacy strategy_portfolio_* index it would duplicate.
+        migrate_wave13_reconcile_legacy_schema(cur)
         cur.execute(
             "CREATE INDEX IF NOT EXISTS strategy_allocation_opportunity_opportunity_id "
             "ON strategy_allocation_opportunity (strategy_opportunity_id)"

@@ -122,7 +122,7 @@ catalog entry in the same change. Until core 0.23.0 the catalog held a different
 
 **Wave 9 — strategy collapse** (core **0.17.0**): one-shot migration `migrate_wave9_strategy_collapse()` in [`wave9_migrations.py`](../src/bifrost_core/persistence/postgres/wave9_migrations.py).
 
-## §6 Schema changelog (Wave 1–12)
+## §6 Schema changelog (Wave 1–13)
 
 | Wave | Core version | Change |
 |------|--------------|--------|
@@ -138,6 +138,7 @@ catalog entry in the same change. Until core 0.23.0 the catalog held a different
 | Wave 11 | 0.18.0 | DROP `settings.ib_flex_host_token` / `ib_flex_secondary_token`; Flex Plugin Secret-only token path |
 | Wave 12 | 0.22.0 | Add `strategy_plan` (structured trade plans; advisory, no execution consumer) |
 | — | 0.23.0 | No DDL. `strategy_dim_catalog` changed to the live `dim_*_t` labels, which are the Wave 9 `strategy_dim` codes. `ensure_dim_enum_types()` now logs any drift |
+| Wave 13 | 0.24.0 | `migrate_wave13_reconcile_legacy_schema()`: pre-split leftovers `IF NOT EXISTS` can't reach — `strategy_portfolio_*` sequence / PK / FK / index names → `strategy_allocation_*`; `market_streams_symbol_order_pkey` → `preference_market_streams_symbol_order_pkey`; add FK `strategy_allocation_opportunity.strategy_opportunity_id` → `strategy_opportunity` ON DELETE CASCADE (left NOT VALID with a warning if orphans exist); `settings.flex_*_range_days` SET NOT NULL; DROP `settings.ib_primary_account_id` / `stream_primary_account_id`; DROP redundant `watchlist_contract_key`. Each step checks first and is a no-op on a converged DB |
 
 
 ## Brokerage tables
