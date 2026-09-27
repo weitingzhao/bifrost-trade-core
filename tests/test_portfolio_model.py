@@ -7,17 +7,19 @@ from bifrost_core.portfolio.model.payoff import (
     payoff_stock_at_price,
     _strip_naked_short_calls,
 )
+from bifrost_core.portfolio.model.black_scholes import (
+    _bs_delta,
+    _bs_price,
+    _implied_vol,
+    _years_to,
+)
 from bifrost_core.portfolio.model.core import (
     _compute_car,
     _annualized_return,
-    _implied_vol,
-    _bs_price,
-    _bs_delta,
     _stress_matrix,
     _compute_greeks_for_group,
     SPOT_SHOCKS,
     _group_positions,
-    _years_to,
     _aggregate_stress,
     shares_backing_short_calls,
     _forward_returns,

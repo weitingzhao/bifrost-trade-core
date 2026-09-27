@@ -27,11 +27,16 @@ def test_resolve_default_dev(project_root: Path) -> None:
     assert rest == []
 
 
-def test_resolve_prod_flag(project_root: Path) -> None:
+def test_resolve_prod_flag(tmp_path: Path) -> None:
+    # Only config.yaml.example is tracked; a clean clone (CI) has no
+    # config.prod.yaml, so lay out the profile files the flag chooses between.
     os.environ.pop("BIFROST_CONFIG", None)
     os.environ.pop("BIFROST_ENV", None)
-    p, rest = resolve_startup_config_path(str(project_root), ["--prod"])
-    assert "config.prod.yaml" in p
+    (tmp_path / "config").mkdir()
+    for name in ("config.dev.yaml", "config.prod.yaml", "config.yaml.example"):
+        (tmp_path / "config" / name).write_text("{}\n", encoding="utf-8")
+    p, rest = resolve_startup_config_path(str(tmp_path), ["--prod"])
+    assert Path(p).name == "config.prod.yaml"
     assert rest == []
 
 
