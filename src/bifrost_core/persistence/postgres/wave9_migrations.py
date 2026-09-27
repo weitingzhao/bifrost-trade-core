@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import json
+import logging
 from typing import Any
 
 from bifrost_core.monitor.reader.gate_safety import build_gate_params_from_flat_row
 from bifrost_core.monitor.reader.strategy_dim_catalog import DIM_TYPE_TO_ENUM, dim_literals_by_type
 from bifrost_core.monitor.schemas.gate_params import GateParams
+
+logger = logging.getLogger(__name__)
 
 _WAVE9_RETIRED_TABLES = (
     "strategy_template_leg",
@@ -311,7 +314,12 @@ def _migrate_gate_params(cur: Any) -> None:
 
 
 def ensure_dim_enum_types(cur: Any) -> None:
-    """Create dim_*_t enum types from strategy_dim_catalog literals (Wave 10 canonical source)."""
+    """Create dim_*_t enum types from strategy_dim_catalog literals (Wave 10 canonical source).
+
+    An existing type is never altered. If its labels differ from the catalog, the
+    drift is logged: writes validated against the catalog would then be refused by
+    the type, or the reverse (2026-09-26: every env had drifted since Wave 9).
+    """
     literals_map = dim_literals_by_type()
     for dim_type, enum_name in DIM_TYPE_TO_ENUM.items():
         literals = literals_map.get(dim_type, ())
@@ -328,6 +336,46 @@ def ensure_dim_enum_types(cur: Any) -> None:
             END $enum$;
             """
         )
+    for enum_name, diff in dim_enum_drift(cur).items():
+        logger.warning(
+            "%s labels differ from strategy_dim_catalog (catalog only: %s; database only: %s). "
+            "Add a code with ALTER TYPE ... ADD VALUE and the catalog entry in one change.",
+            enum_name,
+            ", ".join(diff["catalog_only"]) or "-",
+            ", ".join(diff["db_only"]) or "-",
+        )
+
+
+def dim_enum_drift(cur: Any) -> dict[str, dict[str, list[str]]]:
+    """Per existing dim_*_t type, the labels only the catalog has and only the database has.
+
+    Empty when every type that exists agrees with the catalog. A missing type is
+    not drift: ensure_dim_enum_types creates it from the catalog.
+    """
+    cur.execute(
+        """
+        SELECT t.typname, e.enumlabel
+        FROM pg_type t
+        JOIN pg_enum e ON e.enumtypid = t.oid
+        WHERE t.typname = ANY(%s) AND pg_type_is_visible(t.oid)
+        """,
+        (list(DIM_TYPE_TO_ENUM.values()),),
+    )
+    in_db: dict[str, set[str]] = {}
+    for typname, label in cur.fetchall():
+        in_db.setdefault(typname, set()).add(label)
+    literals_map = dim_literals_by_type()
+    drift: dict[str, dict[str, list[str]]] = {}
+    for dim_type, enum_name in DIM_TYPE_TO_ENUM.items():
+        if enum_name not in in_db:
+            continue
+        catalog = set(literals_map.get(dim_type, ()))
+        if catalog != in_db[enum_name]:
+            drift[enum_name] = {
+                "catalog_only": sorted(catalog - in_db[enum_name]),
+                "db_only": sorted(in_db[enum_name] - catalog),
+            }
+    return drift
 
 
 def _collect_dim_literals(cur: Any, dim_type: str) -> list[str]:

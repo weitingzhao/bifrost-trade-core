@@ -24,9 +24,9 @@ _CALL_SPREAD_TEMPLATE_SPECS: List[Dict[str, Any]] = [
         "dim_preferences": {
             "direction": ("bullish",),
             "structure": ("vertical",),
-            "coverage": ("uncovered", "naked", "spread"),
+            "coverage": ("naked",),
             "risk": ("defined",),
-            "volatility": ("long_vol", "neutral", "short_vol"),
+            "volatility": ("long_vol", "vol_neutral", "short_vol"),
             "time": ("monthly", "weekly"),
         },
         "explanation": "Debit vertical call spread: long lower-strike call, short higher-strike call.",
@@ -50,9 +50,9 @@ _CALL_SPREAD_TEMPLATE_SPECS: List[Dict[str, Any]] = [
         "dim_preferences": {
             "direction": ("bearish", "neutral"),
             "structure": ("vertical",),
-            "coverage": ("uncovered", "naked", "spread"),
+            "coverage": ("naked",),
             "risk": ("defined",),
-            "volatility": ("short_vol", "neutral"),
+            "volatility": ("short_vol", "vol_neutral"),
             "time": ("monthly", "weekly"),
         },
         "explanation": "Credit vertical call spread: short lower-strike call, long higher-strike call.",

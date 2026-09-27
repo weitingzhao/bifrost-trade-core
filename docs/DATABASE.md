@@ -112,6 +112,14 @@ State machine and reads: [`strategy_plan.py`](../src/bifrost_core/monitor/reader
 
 Retired (Wave 9): `strategy_dim` (→ six `dim_*_t` enum types + read-only catalog), `strategy_template_leg`, `strategy_structure_leg`, `strategy_opportunity_symbol`, `strategy_opportunity_entry_condition`.
 
+**Dimension enums.** `strategy_template.dim_*` and `gate_safety_strategy.dim_*` are typed `dim_direction_t`,
+`dim_structure_t`, `dim_coverage_t`, `dim_risk_t`, `dim_volatility_t` and `dim_time_t`. Their labels are the 25 codes the
+retired `strategy_dim` table held, and [`strategy_dim_catalog.py`](../src/bifrost_core/monitor/reader/strategy_dim_catalog.py)
+lists exactly those. The API validates against the catalog and Postgres validates against the type, so the two must hold the same set.
+`ensure_dim_enum_types()` creates a missing type from the catalog but never alters one that exists. If an existing type
+disagrees with the catalog, it logs the difference. To add a code, run `ALTER TYPE … ADD VALUE` in all three envs and add the
+catalog entry in the same change. Until core 0.23.0 the catalog held a different, never-applied set.
+
 **Wave 9 — strategy collapse** (core **0.17.0**): one-shot migration `migrate_wave9_strategy_collapse()` in [`wave9_migrations.py`](../src/bifrost_core/persistence/postgres/wave9_migrations.py).
 
 ## §6 Schema changelog (Wave 1–12)
@@ -129,6 +137,7 @@ Retired (Wave 9): `strategy_dim` (→ six `dim_*_t` enum types + read-only catal
 | Wave 10 | 0.17.2 | Remove Wave 1 `_upgrade_gate_safety_strategy` DDL path; `ensure_dim_enum_types()` from catalog; CREATE uses `dim_*_t` |
 | Wave 11 | 0.18.0 | DROP `settings.ib_flex_host_token` / `ib_flex_secondary_token`; Flex Plugin Secret-only token path |
 | Wave 12 | 0.22.0 | Add `strategy_plan` (structured trade plans; advisory, no execution consumer) |
+| — | 0.23.0 | No DDL. `strategy_dim_catalog` changed to the live `dim_*_t` labels, which are the Wave 9 `strategy_dim` codes. `ensure_dim_enum_types()` now logs any drift |
 
 
 ## Brokerage tables

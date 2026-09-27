@@ -7,44 +7,50 @@ from typing import Any, Dict, List
 from bifrost_core.monitor.reader import structure_type_config_constants as _const
 
 # Canonical dimension values (enum literals). Labels are UI-facing English strings.
+#
+# These are the labels the dim_*_t types carry in bifrost_{dev,stg,prod}: the 25
+# rows of the retired strategy_dim table (codes, labels and sort order as it held
+# them), which the Wave 9 migration turned into the enums. ensure_dim_enum_types
+# only creates a missing type and never alters one, so this list follows the
+# databases, not the other way round. Adding a code takes both halves in one
+# change: ALTER TYPE ... ADD VALUE in every env, and the entry here.
 _DIM_ENTRIES: Dict[str, List[tuple[str, str, int]]] = {
     "direction": [
         ("bullish", "Bullish", 0),
-        ("bearish", "Bearish", 10),
-        ("neutral", "Neutral", 20),
-        ("long", "Long", 30),
-        ("short", "Short", 40),
+        ("bearish", "Bearish", 1),
+        ("neutral", "Neutral", 2),
     ],
     "structure": [
-        ("vertical", "Vertical", 0),
-        ("calendar", "Calendar", 10),
-        ("diagonal", "Diagonal", 20),
-        ("covered_call", "Covered call", 30),
-        ("income", "Income", 40),
-        ("combo", "Combo", 50),
+        ("single_leg", "Single leg", 0),
+        ("vertical", "Vertical spread", 1),
+        ("calendar", "Calendar spread", 2),
+        ("diagonal", "Diagonal spread", 3),
+        ("straddle", "Straddle / strangle", 4),
+        ("condor", "Condor", 5),
+        ("butterfly", "Butterfly", 6),
+        ("ratio", "Ratio spread", 7),
+        ("custom", "Custom", 8),
     ],
     "coverage": [
-        ("uncovered", "Uncovered", 0),
-        ("naked", "Naked", 10),
-        ("spread", "Spread", 20),
-        ("covered", "Covered", 30),
-        ("partial", "Partial", 40),
+        ("covered", "Covered", 0),
+        ("naked", "Naked", 1),
+        ("cash_secured", "Cash secured", 2),
+        ("synthetic", "Synthetic", 3),
     ],
     "risk": [
         ("defined", "Defined risk", 0),
-        ("undefined", "Undefined risk", 10),
-        ("limited", "Limited risk", 20),
+        ("undefined", "Undefined risk", 1),
     ],
     "volatility": [
         ("long_vol", "Long volatility", 0),
-        ("short_vol", "Short volatility", 10),
-        ("neutral", "Neutral volatility", 20),
+        ("short_vol", "Short volatility", 1),
+        ("vol_neutral", "Volatility neutral", 2),
     ],
     "time": [
         ("weekly", "Weekly", 0),
-        ("monthly", "Monthly", 10),
-        ("quarterly", "Quarterly", 20),
-        ("leap", "LEAP", 30),
+        ("monthly", "Monthly", 1),
+        ("leaps", "LEAPS", 2),
+        ("flex", "Flex DTE", 3),
     ],
 }
 
@@ -86,11 +92,6 @@ def dim_literals_by_type() -> Dict[str, tuple[str, ...]]:
     return {
         dim_type: tuple(code for code, _, _ in entries) for dim_type, entries in _DIM_ENTRIES.items()
     }
-
-
-def dim_default_code(dim_type: str) -> str:
-    literals = dim_literals_by_type().get(dim_type, ())
-    return literals[0] if literals else ""
 
 
 def list_dims_grouped() -> Dict[str, List[Dict[str, Any]]]:
