@@ -53,24 +53,39 @@ def list_instances(
         where = (" WHERE " + " AND ".join(conditions)) if conditions else ""
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(
+                # executions_count: one pass over the executions, then a GROUP BY.
+                # It used to be a correlated subquery per instance whose
+                # `WHERE … OR EXISTS (…)` defeated every index, so each instance
+                # pulled the whole FDW table again — 4.6–7.0 s for 87 instances
+                # on DEV (2026-09-28), over the reader's 5 s statement_timeout.
+                # The timeout was swallowed below and the route answered HTTP 200
+                # with an empty list: the "intermittent empty 200" recorded since
+                # 2026-09-18. Same count (an allocation row counts only when its
+                # execution is in the read table) — verified row for row, < 0.01 s.
                 f"""
+                WITH ex AS (
+                    SELECT e.account_executions_id, e.strategy_instance_id FROM {_EXEC_READ_TABLE} e
+                ),
+                linked AS (
+                    SELECT account_executions_id, strategy_instance_id AS sid
+                    FROM ex WHERE strategy_instance_id IS NOT NULL
+                    UNION
+                    SELECT a.account_executions_id, a.strategy_instance_id
+                    FROM {_ALLOC_TABLE} a
+                    JOIN ex ON ex.account_executions_id = a.account_executions_id
+                ),
+                counts AS (
+                    SELECT sid, COUNT(DISTINCT account_executions_id) AS n FROM linked GROUP BY sid
+                )
                 SELECT si.strategy_instance_id, si.strategy_opportunity_id, si.account_id,
                        si.opened_at, si.label, si.notes, si.created_at, si.updated_at,
                        so.name AS strategy_opportunity_name,
                        ss.strategy_structure_id, ss.name AS strategy_structure_name,
-                       (
-                           SELECT COUNT(DISTINCT e.account_executions_id)
-                           FROM {_EXEC_READ_TABLE} e
-                           WHERE e.strategy_instance_id = si.strategy_instance_id
-                              OR EXISTS (
-                                  SELECT 1 FROM {_ALLOC_TABLE} a
-                                  WHERE a.account_executions_id = e.account_executions_id
-                                    AND a.strategy_instance_id = si.strategy_instance_id
-                              )
-                       ) AS executions_count
+                       COALESCE(c.n, 0) AS executions_count
                 FROM strategy_instance si
                 LEFT JOIN strategy_opportunity so ON si.strategy_opportunity_id = so.strategy_opportunity_id
                 LEFT JOIN strategy_structure ss ON so.strategy_structure_id = ss.strategy_structure_id
+                LEFT JOIN counts c ON c.sid = si.strategy_instance_id
                 {where}
                 ORDER BY si.opened_at DESC
                 """,
@@ -89,7 +104,9 @@ def list_instances(
             out.append(d)
         return out
     except Exception as e:
-        logger.debug("list_instances failed: %s", e)
+        # Warning, not debug: an empty list here reaches the page as "no
+        # instances" — the failure must at least be visible in the log.
+        logger.warning("list_instances failed: %s", e)
         return []
 
 
