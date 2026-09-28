@@ -406,7 +406,7 @@ def get_executions(
                     LEFT JOIN strategy_opportunity so ON e.strategy_opportunity_id = so.strategy_opportunity_id
                     LEFT JOIN strategy_instance si ON e.strategy_instance_id = si.strategy_instance_id
                     {where}
-                    ORDER BY e.trade_date DESC NULLS LAST, e.exec_time DESC NULLS LAST{limit_clause}
+                    ORDER BY e.trade_date DESC NULLS LAST, e.exec_time DESC NULLS LAST, e.account_executions_id DESC{limit_clause}
                     """,
                     values,
                 )
@@ -424,7 +424,7 @@ def get_executions(
                             FROM {from_table} e
                             LEFT JOIN {COMMISSIONS} c ON e.exec_id = c.exec_id
                             {where}
-                            ORDER BY e.trade_date DESC NULLS LAST, e.exec_time DESC NULLS LAST{limit_clause}
+                            ORDER BY e.trade_date DESC NULLS LAST, e.exec_time DESC NULLS LAST, e.account_executions_id DESC{limit_clause}
                             """,
                             values,
                         )
@@ -440,7 +440,7 @@ def get_executions(
                                            e.trade_date, e.raw_extra, {_CREATED_AT_E}
                                     FROM {from_table} e
                                     {where}
-                            ORDER BY e.trade_date DESC NULLS LAST, e.exec_time DESC NULLS LAST{limit_clause}
+                            ORDER BY e.trade_date DESC NULLS LAST, e.exec_time DESC NULLS LAST, e.account_executions_id DESC{limit_clause}
                             """,
                             values,
                         )
@@ -527,7 +527,7 @@ def get_executions_by_contract_keys(
                     FROM {_EXEC_READ_TABLE} e
                     LEFT JOIN {COMMISSIONS} c ON e.exec_id = c.exec_id AND e.exec_id IS NOT NULL
                     WHERE {where}
-                    ORDER BY e.trade_date ASC NULLS LAST, e.exec_time ASC NULLS LAST
+                    ORDER BY e.trade_date ASC NULLS LAST, e.exec_time ASC NULLS LAST, e.account_executions_id ASC
                     LIMIT %s
                     """
     try:
@@ -548,7 +548,7 @@ def get_executions_by_contract_keys(
                             FROM {_EXEC_READ_TABLE} e
                             LEFT JOIN {COMMISSIONS} c ON e.exec_id = c.exec_id
                             WHERE {where}
-                            ORDER BY e.trade_date ASC NULLS LAST, e.exec_time ASC NULLS LAST
+                            ORDER BY e.trade_date ASC NULLS LAST, e.exec_time ASC NULLS LAST, e.account_executions_id ASC
                             LIMIT %s
                             """,
                             values,
@@ -567,7 +567,7 @@ def get_executions_by_contract_keys(
                             FROM {_EXEC_READ_TABLE}
                             WHERE (symbol, expiry, COALESCE(strike::text,''), account_id) IN ({placeholders})
                               AND upper(trim(COALESCE(sec_type,''))) = 'OPT'
-                            ORDER BY trade_date ASC NULLS LAST, exec_time ASC NULLS LAST
+                            ORDER BY trade_date ASC NULLS LAST, exec_time ASC NULLS LAST, account_executions_id ASC
                             LIMIT %s
                             """,
                             vals_no_acc,
