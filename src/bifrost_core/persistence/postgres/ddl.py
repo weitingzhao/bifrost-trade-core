@@ -523,6 +523,24 @@ def _ensure_tables(conn, log=None, log_table=None) -> None:
             "CREATE INDEX IF NOT EXISTS strategy_plan_instance ON strategy_plan (strategy_instance_id) "
             "WHERE strategy_instance_id IS NOT NULL"
         )
+        _log_table(
+            "trade_review", "One review record per strategy instance (Review › Queue and Single trade)"
+        )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS trade_review (
+                trade_review_id      bigserial   PRIMARY KEY,
+                strategy_instance_id bigint      NOT NULL UNIQUE
+                                                 REFERENCES strategy_instance(strategy_instance_id) ON DELETE CASCADE,
+                tags_added           jsonb       NOT NULL DEFAULT '[]'::jsonb,
+                tags_dropped         jsonb       NOT NULL DEFAULT '[]'::jsonb,
+                note                 text,
+                reviewed_at          timestamptz,
+                created_at           timestamptz NOT NULL DEFAULT now(),
+                updated_at           timestamptz NOT NULL DEFAULT now()
+            )
+            """
+        )
         _log_table("strategy_allocation", "Strategy allocation")
         cur.execute(
             """

@@ -77,7 +77,7 @@ Retired (merged into `gate_safety_strategy` in core `0.8.1`): `gate_safety_state
 
 `settings.active_gate_safety_strategy_id` points at the active set. Opportunity / allocation tables keep FK `*_gate_safety_strategy_id`.
 
-## Strategy tables (8 tables)
+## Strategy tables (9 tables)
 
 | Table | jsonb / notes |
 |-------|----------------|
@@ -110,6 +110,25 @@ State machine and reads: [`strategy_plan.py`](../src/bifrost_core/monitor/reader
 `intend` requires at least one leg and at least one of target / stop / `exit_by`
 — without a planned exit there is nothing to measure adherence against.
 
+### `trade_review` (core **0.26.0**)
+
+The trader's own verdict on one instance, read by Review › Queue and Review ›
+Single trade (design Rev .110). One row per instance; an instance is *awaiting*
+until `reviewed_at` is stamped, and the Review menu badge counts closed
+instances without one. Whether an instance is closed is the fills' to say — the
+caller decides when a review may be confirmed. No delete: reopening clears the
+stamp and keeps the tags.
+
+| Column | Meaning |
+|--------|---------|
+| `strategy_instance_id` | UNIQUE, FK → `strategy_instance` ON DELETE CASCADE |
+| `tags_added` | Tags the rules missed, as the trader wrote them (jsonb string array) |
+| `tags_dropped` | Keys of derived tags the trader says do not apply (jsonb string array) |
+| `note` | Free text |
+| `reviewed_at` | Stamped on confirm (a second confirm keeps the first stamp); NULL = awaiting |
+
+Reads and the upsert: [`trade_review.py`](../src/bifrost_core/monitor/reader/trade_review.py).
+
 Retired (Wave 9): `strategy_dim` (→ six `dim_*_t` enum types + read-only catalog), `strategy_template_leg`, `strategy_structure_leg`, `strategy_opportunity_symbol`, `strategy_opportunity_entry_condition`.
 
 **Dimension enums.** `strategy_template.dim_*` and `gate_safety_strategy.dim_*` are typed `dim_direction_t`,
@@ -139,6 +158,7 @@ catalog entry in the same change. Until core 0.23.0 the catalog held a different
 | Wave 12 | 0.22.0 | Add `strategy_plan` (structured trade plans; advisory, no execution consumer) |
 | — | 0.23.0 | No DDL. `strategy_dim_catalog` changed to the live `dim_*_t` labels, which are the Wave 9 `strategy_dim` codes. `ensure_dim_enum_types()` now logs any drift |
 | Wave 13 | 0.24.0 | `migrate_wave13_reconcile_legacy_schema()`: pre-split leftovers `IF NOT EXISTS` can't reach — `strategy_portfolio_*` sequence / PK / FK / index names → `strategy_allocation_*`; `market_streams_symbol_order_pkey` → `preference_market_streams_symbol_order_pkey`; add FK `strategy_allocation_opportunity.strategy_opportunity_id` → `strategy_opportunity` ON DELETE CASCADE (left NOT VALID with a warning if orphans exist); `settings.flex_*_range_days` SET NOT NULL; DROP `settings.ib_primary_account_id` / `stream_primary_account_id`; DROP redundant `watchlist_contract_key`. Each step checks first and is a no-op on a converged DB |
+| — | 0.26.0 | Add `trade_review` (one review record per strategy instance: tags added / dropped, `reviewed_at`) |
 
 
 ## Brokerage tables
