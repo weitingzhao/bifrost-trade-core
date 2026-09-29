@@ -1084,12 +1084,21 @@ def get_transactions(
     account_id: Optional[str] = None,
     limit: int = 500,
 ) -> List[Dict[str, Any]]:
+    """Cash transactions (Flex), newest first.
+
+    ``symbol`` / ``conid`` are the security a row is about — a dividend, its
+    withholding, a fee on a position — and are null for deposits and
+    withdrawals. The Flex ingest has written both columns since 0.13; the reader
+    dropped them until 0.25.3, so P&L Explain printed "no symbol" beside rows
+    that had one.
+    """
     if conn is None:
         return []
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             q = f"""
-                SELECT account_transactions_id, account_id, extract(epoch from ts) AS ts, amount, type, currency, description, created_at
+                SELECT account_transactions_id, account_id, extract(epoch from ts) AS ts, amount, type, currency, description, created_at,
+                       symbol, conid
                 FROM {TRANSACTIONS} WHERE 1=1
             """
             args: List[Any] = []
