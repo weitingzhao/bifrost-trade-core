@@ -232,6 +232,18 @@ def get_accounts_from_tables(
             acc_rows = cur.fetchall()
         if not acc_rows:
             return []
+        # The instrument class joins only where its table exists (0.27.0): an env
+        # served by this core before the DDL reached its database reads every
+        # position unclassified instead of failing the whole positions read.
+        with conn.cursor() as cur:
+            cur.execute("SELECT to_regclass('preference_instrument_class') IS NOT NULL")
+            has_instrument_class = bool(cur.fetchone()[0])
+        ic_col = "ic.instrument_class" if has_instrument_class else "NULL::text AS instrument_class"
+        ic_join = (
+            "LEFT JOIN preference_instrument_class ic ON ic.contract_key = ap.contract_key"
+            if has_instrument_class
+            else ""
+        )
         out: List[Dict[str, Any]] = []
         for row in acc_rows:
             acc_id = row.get("account_id") or ""
@@ -329,6 +341,7 @@ def get_accounts_from_tables(
                         ip.updated_at AS price_updated_at,
                         pct.category_id AS position_category_id,
                         pc.name AS position_category_name,
+                        {ic_col},
                         w.optionable AS watchlist_optionable
                     FROM {POSITIONS} ap
                     LEFT JOIN {CONTRACT_QUOTE_LIVE} ip
@@ -337,6 +350,7 @@ def get_accounts_from_tables(
                         ON ap.account_id = pct.account_id AND ap.contract_key = pct.contract_key
                     LEFT JOIN preference_position_categories pc
                         ON pct.category_id = pc.id
+                    {ic_join}
                     LEFT JOIN watchlist w
                         ON w.contract_key = ap.contract_key
                     WHERE ap.account_id = %s
@@ -373,6 +387,11 @@ def get_accounts_from_tables(
                 cat_name = p.get("position_category_name")
                 if cat_name is not None and str(cat_name).strip():
                     pos_dict["category"] = str(cat_name).strip()
+
+                # The Owner's registration (0.27.0); absent = unregistered, which callers read as a stock.
+                inst_cls = p.get("instrument_class")
+                if inst_cls:
+                    pos_dict["instrument_class"] = str(inst_cls)
 
                 wl_opt = p.get("watchlist_optionable")
                 if wl_opt is not None:

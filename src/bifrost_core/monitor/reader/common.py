@@ -21,6 +21,7 @@ from bifrost_core.monitor.reader import strategy_instance as strategy_instance_m
 from bifrost_core.monitor.reader import strategy_win_rate as strategy_win_rate_module
 from bifrost_core.monitor.reader import template_config as template_config_module
 from bifrost_core.portfolio.reader import position_categories as position_categories_module
+from bifrost_core.portfolio.reader import instrument_class as instrument_class_module
 from bifrost_core.monitor.reader import settings as settings_module
 from bifrost_core.monitor.reader import status as status_module
 from bifrost_core.monitor.reader import watchlist as watchlist_module
@@ -917,6 +918,31 @@ class StatusReader:
         if not self._connect():
             return False
         return position_categories_module.set_position_category_tag(self._conn, account_id=account_id, contract_key=contract_key, category_id=category_id)
+
+    # --- Instrument class (delegate to instrument_class module, core 0.27.0) ---
+    def list_instrument_classes(self) -> List[Dict[str, Any]]:
+        if not self._connect():
+            return []
+        result = instrument_class_module.list_instrument_classes(self._conn)
+        self._end_read_txn()
+        return result
+
+    def set_instrument_class(
+        self,
+        contract_key: str,
+        instrument_class: str,
+        note: Optional[str] = None,
+    ) -> Tuple[bool, Optional[str]]:
+        if not self._connect():
+            return False, "Database connection failed."
+        return instrument_class_module.set_instrument_class(
+            self._conn, contract_key=contract_key, instrument_class=instrument_class, note=note
+        )
+
+    def delete_instrument_class(self, contract_key: str) -> bool:
+        if not self._connect():
+            return False
+        return instrument_class_module.delete_instrument_class(self._conn, contract_key)
 
     def batch_update_execution_strategy(
         self,

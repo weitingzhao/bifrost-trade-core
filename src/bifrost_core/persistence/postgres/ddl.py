@@ -336,6 +336,23 @@ def _ensure_tables(conn, log=None, log_table=None) -> None:
         cur.execute(
             "CREATE INDEX IF NOT EXISTS preference_position_category_tags_category_id ON preference_position_category_tags (category_id)"
         )
+        _log_table(
+            "preference_instrument_class",
+            "Instrument class per stock-like instrument: stock / fixed_income / cash_like (preference)",
+        )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS preference_instrument_class (
+                preference_instrument_class_id bigserial PRIMARY KEY,
+                contract_key     text        NOT NULL UNIQUE,
+                instrument_class text        NOT NULL
+                                 CHECK (instrument_class IN ('stock', 'fixed_income', 'cash_like')),
+                note             text,
+                created_at       timestamptz NOT NULL DEFAULT now(),
+                updated_at       timestamptz NOT NULL DEFAULT now()
+            )
+            """
+        )
         _log("preference_market_streams_symbol_order")
         _log_table(
             "preference_market_streams_symbol_order",

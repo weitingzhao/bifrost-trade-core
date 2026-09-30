@@ -141,6 +141,35 @@ catalog entry in the same change. Until core 0.23.0 the catalog held a different
 
 **Wave 9 — strategy collapse** (core **0.17.0**): one-shot migration `migrate_wave9_strategy_collapse()` in [`wave9_migrations.py`](../src/bifrost_core/persistence/postgres/wave9_migrations.py).
 
+## Preference: instrument class (core **0.27.0**)
+
+### `preference_instrument_class`
+
+What kind of security a stock-like holding is — `stock`, `fixed_income` or
+`cash_like`. IB books a bond or T-bill ETF as STK and no vendor field says which
+funds are fixed income, so the Owner registers it once per instrument (trade
+design Rev .119, Owner-approved 2026-09-30). It is a property of the security,
+not of an account, unlike the category tags. Positions → Shares types by it, and
+the book's Δ (stocks + options) leaves fixed-income and cash-like shares out.
+
+| Column | Meaning |
+|--------|---------|
+| `preference_instrument_class_id` | PK |
+| `contract_key` | UNIQUE — the key positions, watchlist and category tags use (STK: `SYMBOL|STK|||`, e.g. `SGOV|STK|||`). No FK: a registration outlives the holding |
+| `instrument_class` | `stock` · `fixed_income` · `cash_like` (CHECK; text rather than an enum type, so a fourth class is one constraint change) |
+| `note` | Optional: why it is registered so |
+
+An instrument with no row is **unregistered** and reads as a stock; nothing
+infers a class from the category. The positions read (`get_accounts_from_tables`)
+LEFT JOINs it and adds `instrument_class` to each position that has one.
+
+**Order of release:** the positions read joins this table only where it exists
+(`to_regclass`, checked per read), so an api on core ≥ 0.27.0 ahead of the DDL
+reads every position unclassified rather than failing. Classes appear once the
+table is created — create it before the frontend that reads them ships.
+
+Reads and writes: [`instrument_class.py`](../src/bifrost_core/portfolio/reader/instrument_class.py).
+
 ## §6 Schema changelog (Wave 1–13)
 
 | Wave | Core version | Change |
@@ -159,6 +188,7 @@ catalog entry in the same change. Until core 0.23.0 the catalog held a different
 | — | 0.23.0 | No DDL. `strategy_dim_catalog` changed to the live `dim_*_t` labels, which are the Wave 9 `strategy_dim` codes. `ensure_dim_enum_types()` now logs any drift |
 | Wave 13 | 0.24.0 | `migrate_wave13_reconcile_legacy_schema()`: pre-split leftovers `IF NOT EXISTS` can't reach — `strategy_portfolio_*` sequence / PK / FK / index names → `strategy_allocation_*`; `market_streams_symbol_order_pkey` → `preference_market_streams_symbol_order_pkey`; add FK `strategy_allocation_opportunity.strategy_opportunity_id` → `strategy_opportunity` ON DELETE CASCADE (left NOT VALID with a warning if orphans exist); `settings.flex_*_range_days` SET NOT NULL; DROP `settings.ib_primary_account_id` / `stream_primary_account_id`; DROP redundant `watchlist_contract_key`. Each step checks first and is a no-op on a converged DB |
 | — | 0.26.0 | Add `trade_review` (one review record per strategy instance: tags added / dropped, `reviewed_at`) |
+| — | 0.27.0 | Add `preference_instrument_class` (stock / fixed_income / cash_like per `contract_key`); the positions read LEFT JOINs it where the table exists (unclassified otherwise) |
 
 
 ## Brokerage tables
