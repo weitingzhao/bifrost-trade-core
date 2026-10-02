@@ -81,6 +81,13 @@ Safety-boundary config uses metadata scalars + **`params_json`**. Logical groupi
 
 Retired (Wave 9, core **0.17.0**): flat parameter columns on `gate_safety_strategy`, `gate_safety_strategy_earnings_dates`.
 
+**Earnings dates** are stored in `params_json` at `strategy.earnings.dates`, where the daemon's `config['gates']`
+(`get_gates_by_id()`) reads them. Over the API they travel in one place, the gate row's top-level `earnings_dates`:
+`get_gate_safety_full_by_id()` returns `gates` without `strategy.earnings.dates`, and the writer
+(`gate_safety_write`) takes dates only from top-level `earnings_dates`, refusing a non-empty nested
+`gates.strategy.earnings.dates` with `ValueError` (HTTP 400). `gate_params.default_gates()` returns the default
+`GateParams` in that same `gates` shape, for the API to serve (core **0.32.0**).
+
 Retired (merged into `gate_safety_strategy` in core `0.8.1`): `gate_safety_state`, `gate_safety_intent`, `gate_safety_guard`.
 
 `settings.active_gate_safety_strategy_id` points at the active set. Opportunity / allocation tables keep FK `*_gate_safety_strategy_id`.
@@ -250,6 +257,7 @@ Reads and writes: [`saved_search.py`](../src/bifrost_core/monitor/reader/saved_s
 | — | 0.27.0 | Add `preference_instrument_class` (stock / fixed_income / cash_like per `contract_key`); the positions read LEFT JOINs it where the table exists (unclassified otherwise) |
 | — | 0.28.0 | Add `preference_saved_search` (a page's scope under a name, one operator); no DDL for the new deletes — `delete_plan` (drafts) and `strategy_rules_delete` (opportunity · allocation · gate set, refused while in use) |
 | — | docs only (2026-10-01) | No DDL. DATABASE.md corrected against the live DEV schema (debt TD-35): the Flex token columns are recorded as dropped (Wave 11), not pending; `jobs` removed from the per-env table list (retired Wave 5); "Strategy tables" lists the 7 `strategy_*` tables that exist (adds `strategy_allocation_opportunity`) and documents `strategy_instance`; `market.us_market_holiday` and `market.ticker_related` documented; `connect_golden_source()` (deleted by TD-59) no longer cited; per-table column appendix added. BROKERAGE_GOLDEN_SOURCE.md documents the `raw_broker` non-vendor columns |
+| — | 0.32.0 | No DDL. Wave 9 leftovers deleted (TD-58): `structure_type_config` / `structure_type_config_write` (they read and wrote `strategy_structure_type*` tables no DDL creates); `structure_type_schema` keeps only `build_schema_from_legs` + `validate_legs` (schema now required); the `to_regclass('public.strategy_dim')` probe — dims come from `strategy_dim_catalog` only; the `strategy_template_leg` fallback in `get_template_legs`; `gate_safety._load_earnings_dates`; `template_config_write.create_dim/update_dim/delete_dim`. `legacy_account_executions_id` documented as a historical map column. Gate earnings dates travel only as top-level `earnings_dates` (TD-72, see Gate safety); new `gate_params.default_gates()`. Affected downstreams: **api** (delete the `/strategies/dims` POST/PUT/DELETE routes that call the removed `*_dim` writers; serve `default_gates()`), **worker** (no code change: `get_gates_by_id()` shape unchanged) |
 
 
 ## Brokerage tables
@@ -257,6 +265,11 @@ Reads and writes: [`saved_search.py`](../src/bifrost_core/monitor/reader/saved_s
 Per-env FDW name; the physical table is the same name under Golden Source `raw_broker.*`. Columns and the
 non-vendor columns (`strategy_*`, `legacy_account_executions_id`, `id` PKs) are in
 [BROKERAGE_GOLDEN_SOURCE.md](BROKERAGE_GOLDEN_SOURCE.md).
+
+`legacy_account_executions_id` on the three `executions_raw_*` tables is a **historical map column**: it holds, for
+rows that predate the split, their id in the single pre-split `account_executions` table. Nothing writes it (new rows
+take the NULL default; the explicit NULL in the manual-execution insert was dropped in core 0.32.0) and nothing reads
+it. It is kept, not dropped, because the values are the only map back to the old ids.
 
 | Per-env FDW (`raw_broker.*` in Golden Source) | Legacy public name |
 |-----------------------------------------------|--------------------|

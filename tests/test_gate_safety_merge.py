@@ -36,7 +36,7 @@ def test_payload_to_row_builds_params_json():
         "gates": {
             "strategy": {
                 "structure": {"min_dte": 21, "max_dte": 35, "atm_band_pct": 0.03},
-                "earnings": {"blackout_days_before": 3, "blackout_days_after": 1, "dates": ["2026-04-15"]},
+                "earnings": {"blackout_days_before": 3, "blackout_days_after": 1},
                 "trading_hours_only": True,
             },
             "state": {
@@ -75,9 +75,12 @@ def test_payload_to_row_builds_params_json():
     assert params["guard"]["risk"]["max_daily_hedge_count"] == 50
     assert params["guard"]["risk"]["paper_trade"] is True
     assert dates == ["2026-04-15", "2026-07-20"]
+    # Stored where the daemon's config['gates'] reads them.
+    assert params["strategy"]["earnings"]["dates"] == ["2026-04-15", "2026-07-20"]
 
 
-def test_row_to_gates_from_flat_row_preserves_config_shape():
+def test_flat_row_builds_config_shape():
+    # build_gate_params_from_flat_row is the Wave 9 migration's (wave9_migrations); readers use params_json.
     row = {
         "min_dte": 21,
         "max_dte": 35,
@@ -104,7 +107,7 @@ def test_row_to_gates_from_flat_row_preserves_config_shape():
         "max_spread_pct": 0.05,
         "paper_trade": True,
     }
-    gates = _row_to_gates(row, ["2026-04-15"])
+    gates = build_gate_params_from_flat_row(row, ["2026-04-15"])
     assert set(gates.keys()) == {"strategy", "state", "intent", "guard"}
     assert gates["strategy"]["structure"]["min_dte"] == 21
     assert gates["strategy"]["earnings"]["dates"] == ["2026-04-15"]
@@ -200,6 +203,21 @@ def test_payload_roundtrip_matches_row_to_gates():
 
 _BAD_PAYLOADS = [
     pytest.param({"name": "g", "gates": {}, "dim_volatility": "neutral"}, "Invalid volatility code: neutral", id="dim"),
+    pytest.param(
+        {"name": "g", "gates": {"strategy": {"earnings": {"dates": ["2030-01-02"]}}}},
+        "top-level earnings_dates",
+        id="nested-dates",
+    ),
+    pytest.param(
+        {
+            "name": "g",
+            "gates": {"strategy": {"earnings": {"dates": ["2030-01-02"]}}},
+            "earnings_dates": ["2030-01-02"],
+        },
+        "top-level earnings_dates",
+        id="nested-dates-beside-top-level",
+    ),
+    pytest.param({"name": "g", "gates": {}, "earnings_dates": "2030-01-02"}, "must be an array", id="dates-not-a-list"),
     pytest.param(
         {"name": "g", "gates": {"state": {"delta": {"epsilon_band": "wide"}}}},
         "epsilon_band",

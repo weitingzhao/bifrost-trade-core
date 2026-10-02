@@ -1,8 +1,15 @@
-"""Pydantic models for gate_safety_strategy.params_json (Wave 9)."""
+"""Pydantic models for gate_safety_strategy.params_json (Wave 9).
+
+params_json stores a gate's earnings dates at strategy.earnings.dates, which is where
+the daemon's config['gates'] reads them. Over the API they travel once, as the gate
+row's top-level `earnings_dates`: the `gates` object a gate row carries, and the one
+default_gates() returns, has no `dates` key (split_earnings_dates).
+"""
 
 from __future__ import annotations
 
-from typing import List, Optional
+import copy
+from typing import Any, Dict, List, Optional, Tuple
 
 from pydantic import BaseModel, Field
 
@@ -83,6 +90,25 @@ class GateParams(BaseModel):
     state: GateStateParams = Field(default_factory=GateStateParams)
     intent: GateIntentParams = Field(default_factory=GateIntentParams)
     guard: GateGuardParams = Field(default_factory=GateGuardParams)
+
+
+def split_earnings_dates(gates: Dict[str, Any]) -> Tuple[Dict[str, Any], List[str]]:
+    """Return (a copy of gates without strategy.earnings.dates, those dates as strings)."""
+    out = copy.deepcopy(gates)
+    earnings = (out.get("strategy") or {}).get("earnings")
+    raw = earnings.pop("dates", None) if isinstance(earnings, dict) else None
+    dates = [str(d) for d in (raw or []) if d]
+    return out, dates
+
+
+def default_gates() -> Dict[str, Any]:
+    """Default GateParams in the shape of a gate row's `gates` object, without earnings dates.
+
+    JSON-serializable. Served by the API so a new gate starts from these values
+    rather than a copy the frontend keeps.
+    """
+    gates, _ = split_earnings_dates(GateParams().model_dump(mode="json"))
+    return gates
 
 
 class TemplateLeg(BaseModel):

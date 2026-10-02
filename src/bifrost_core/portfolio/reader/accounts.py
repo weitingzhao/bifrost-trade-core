@@ -1156,8 +1156,8 @@ def insert_one_execution(status_config: dict, body: Dict[str, Any]) -> Optional[
                 if source == "journal_closed":
                     cur.execute(
                         f"""
-                        INSERT INTO {GOLDEN_EXECUTIONS_RAW_JOURNAL} ({cols}, legacy_account_executions_id)
-                        VALUES ({placeholders}, NULL)
+                        INSERT INTO {GOLDEN_EXECUTIONS_RAW_JOURNAL} ({cols})
+                        VALUES ({placeholders})
                         RETURNING executions_raw_journal_id
                         """,
                         vals,
@@ -1169,8 +1169,8 @@ def insert_one_execution(status_config: dict, body: Dict[str, Any]) -> Optional[
                 else:
                     cur.execute(
                         f"""
-                        INSERT INTO {GOLDEN_EXECUTIONS_RAW_TWS} ({cols}, legacy_account_executions_id)
-                        VALUES ({placeholders}, NULL)
+                        INSERT INTO {GOLDEN_EXECUTIONS_RAW_TWS} ({cols})
+                        VALUES ({placeholders})
                         RETURNING executions_raw_tws_id
                         """,
                         vals,

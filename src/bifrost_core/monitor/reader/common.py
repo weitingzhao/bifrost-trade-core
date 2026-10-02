@@ -17,6 +17,7 @@ from bifrost_core.portfolio.reader import option_stock_link as option_stock_link
 from bifrost_core.monitor.reader import gate_safety as gate_safety_module
 from bifrost_core.monitor.reader import market as market_module
 from bifrost_core.monitor.reader import strategy as strategy_module
+from bifrost_core.monitor.reader import strategy_dim_catalog
 from bifrost_core.monitor.reader import strategy_instance as strategy_instance_module
 from bifrost_core.monitor.reader import strategy_win_rate as strategy_win_rate_module
 from bifrost_core.monitor.reader import template_config as template_config_module
@@ -406,18 +407,11 @@ class StatusReader:
         return result
 
     def list_dims_grouped(self) -> Dict[str, List[Dict[str, Any]]]:
-        if not self._connect():
-            return {}
-        result = template_config_module.list_dims_grouped(self._conn)
-        self._end_read_txn()
-        return result
+        """Strategy dims from the in-code catalog (the dim_*_t enums); no database read."""
+        return strategy_dim_catalog.list_dims_grouped()
 
     def list_dims_for_type(self, dim_type: str) -> List[Dict[str, Any]]:
-        if not self._connect():
-            return []
-        result = template_config_module.list_dims_by_type(self._conn, dim_type)
-        self._end_read_txn()
-        return result
+        return strategy_dim_catalog.list_dims_by_type(dim_type)
 
     def list_templates(self, active_only: bool = True) -> List[Dict[str, Any]]:
         if not self._connect():

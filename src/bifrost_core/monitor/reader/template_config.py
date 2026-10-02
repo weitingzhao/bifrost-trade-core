@@ -1,55 +1,12 @@
-"""Read strategy dimensions (catalog) and strategy_template (+ legs_json, params, characteristics)."""
+"""Read strategy_template (+ legs_json, params, characteristics).
+
+Strategy dimensions are not read here: they come from strategy_dim_catalog.
+"""
 
 import json
 from typing import Any, Dict, List, Optional
 
 from psycopg2.extras import RealDictCursor
-
-from bifrost_core.monitor.reader import strategy_dim_catalog
-
-
-def list_dims_grouped(conn: Any) -> Dict[str, List[Dict[str, Any]]]:
-    try:
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute("SELECT to_regclass('public.strategy_dim')")
-            if cur.fetchone()[0] is not None:
-                out: Dict[str, List[Dict[str, Any]]] = {}
-                cur.execute(
-                    """
-                    SELECT dim_type, code, display_label, sort_order, strategy_dim_id
-                    FROM strategy_dim
-                    ORDER BY dim_type, sort_order, code
-                    """
-                )
-                for r in cur.fetchall():
-                    dt = r["dim_type"]
-                    out.setdefault(dt, []).append(dict(r))
-                return out
-    except Exception:
-        pass
-    return strategy_dim_catalog.list_dims_grouped()
-
-
-def list_dims_by_type(conn: Any, dim_type: str) -> List[Dict[str, Any]]:
-    key = (dim_type or "").strip()
-    if not key:
-        return []
-    try:
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute("SELECT to_regclass('public.strategy_dim')")
-            if cur.fetchone()[0] is not None:
-                cur.execute(
-                    """
-                    SELECT strategy_dim_id, dim_type, code, display_label, sort_order
-                    FROM strategy_dim WHERE dim_type = %s
-                    ORDER BY sort_order, code
-                    """,
-                    (key,),
-                )
-                return [dict(r) for r in cur.fetchall()]
-    except Exception:
-        pass
-    return strategy_dim_catalog.list_dims_by_type(key)
 
 
 def _parse_json_field(raw: Any, default: Any) -> Any:
@@ -124,6 +81,7 @@ def get_template_by_code(conn: Any, template_code: str) -> Optional[Dict[str, An
 
 
 def get_template_legs(conn: Any, strategy_template_id: int) -> List[Dict[str, Any]]:
+    """The template's legs from strategy_template.legs_json (NOT NULL, default '[]')."""
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(
@@ -131,29 +89,7 @@ def get_template_legs(conn: Any, strategy_template_id: int) -> List[Dict[str, An
                 (strategy_template_id,),
             )
             row = cur.fetchone()
-        if row and row.get("legs_json") is not None:
-            return _legs_from_json(row["legs_json"])
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute(
-                """
-                SELECT role, direction, option_right, quantity_default, sort_order
-                FROM strategy_template_leg
-                WHERE strategy_template_id = %s ORDER BY sort_order
-                """,
-                (strategy_template_id,),
-            )
-            rows = cur.fetchall()
-        return _legs_from_json(
-            [
-                {
-                    "role": r.get("role"),
-                    "direction": r.get("direction"),
-                    "option_right": r.get("option_right"),
-                    "quantity_default": r.get("quantity_default"),
-                }
-                for r in rows
-            ]
-        )
+        return _legs_from_json(row["legs_json"]) if row else []
     except Exception:
         return []
 

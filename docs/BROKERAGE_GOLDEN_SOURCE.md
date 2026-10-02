@@ -76,7 +76,7 @@ All three `executions_raw_*` tables carry:
 |--------|------|---------|
 | `strategy_opportunity_id` | bigint | Whole-execution attribution to a per-env `strategy_opportunity`. Exposed by all three views |
 | `strategy_instance_id` | bigint | Whole-execution attribution to a per-env `strategy_instance`. Exposed by all three views |
-| `legacy_account_executions_id` | bigint | Provenance: the row's id in the single pre-split `account_executions` table. Every current insert writes NULL; no code reads it, and the views do not expose it |
+| `legacy_account_executions_id` | bigint | Historical map: the row's id in the single pre-split `account_executions` table. Rows from before the split keep it; no code writes it (new rows get NULL by default since core 0.32.0) or reads it, and the views do not expose it |
 
 The two `strategy_*` columns are the older of two attribution paths; the other is the per-env
 `account_execution_instance_allocation` (quantity splits). How they are written:

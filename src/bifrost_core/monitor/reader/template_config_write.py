@@ -1,4 +1,7 @@
-"""Write strategy_dim and strategy_template (+ legs, params, characteristics)."""
+"""Write strategy_template (+ legs, params, characteristics).
+
+Strategy dimensions are catalog-defined (strategy_dim_catalog, the dim_*_t enums) and are not written here.
+"""
 
 import json
 import logging
@@ -45,18 +48,6 @@ def _validate_leg(leg: Dict[str, Any]) -> None:
 
 def _validate_dim_codes(conn: Any, payload: Dict[str, Any]) -> None:
     strategy_dim_catalog.validate_dim_fields(payload)
-
-
-def create_dim(status_config: Optional[dict], dim_type: str, payload: Dict[str, Any]) -> None:
-    raise ValueError("Strategy dimensions are catalog-defined (Wave 9); create not supported")
-
-
-def update_dim(status_config: Optional[dict], strategy_dim_id: int, payload: Dict[str, Any]) -> bool:
-    raise ValueError("Strategy dimensions are catalog-defined (Wave 9); update not supported")
-
-
-def delete_dim(status_config: Optional[dict], strategy_dim_id: int) -> None:
-    raise ValueError("Strategy dimensions are catalog-defined (Wave 9); delete not supported")
 
 
 def create_template(status_config: Optional[dict], payload: Dict[str, Any]) -> int:

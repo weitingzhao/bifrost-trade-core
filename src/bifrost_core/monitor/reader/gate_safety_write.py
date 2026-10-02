@@ -38,14 +38,27 @@ def _conn_from_config(status_config: Optional[dict]) -> Any:
 
 
 def _payload_to_metadata_and_params(payload: Dict[str, Any]) -> Tuple[Dict[str, Any], Dict[str, Any]]:
-    """Extract metadata row + validated params_json from API payload."""
+    """Extract metadata row + validated params_json from API payload.
+
+    Earnings dates come only from the top-level `earnings_dates`. A non-empty
+    gates.strategy.earnings.dates raises ValueError (the API answers 400) rather than
+    being merged or silently dropped. params_json still stores the dates at
+    strategy.earnings.dates, where the daemon's config['gates'] reads them.
+    """
     gates = dict(payload.get("gates") or {})
     strategy = dict(gates.get("strategy") or {})
     earnings = dict(strategy.get("earnings") or {})
 
+    if earnings.pop("dates", None):
+        raise ValueError(
+            "earnings dates belong in the top-level earnings_dates field, "
+            "not in gates.strategy.earnings.dates"
+        )
     earnings_dates = payload.get("earnings_dates")
     if earnings_dates is None:
-        earnings_dates = earnings.get("dates") or []
+        earnings_dates = []
+    if not isinstance(earnings_dates, list):
+        raise ValueError("earnings_dates must be an array of YYYY-MM-DD strings")
     earnings_dates = [str(d).strip()[:10] for d in earnings_dates if d]
 
     strategy["earnings"] = {**earnings, "dates": earnings_dates}

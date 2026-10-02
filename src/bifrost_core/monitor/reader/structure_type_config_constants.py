@@ -1,6 +1,7 @@
-"""Single source of truth for structure type config allowlists (param_kind, meta_key, meta_value_text).
+"""Single source of truth for strategy template allowlists (dims, param_kind, meta_key, meta_value_text, legs).
 
-Used by structure_type_config_write validation and by options API for Type Config UI.
+Used by template_config_write and strategy_dim_catalog validation and by the
+GET /strategies/templates/options/* payloads (services.option_strategy_templates).
 Adding new allowed values requires changing this module and redeploying.
 
 Display labels: stored value (DB/API) vs human-readable label (UI). Labels are optional;
@@ -69,7 +70,7 @@ META_VALUE_LABELS_BY_TYPE_AND_KEY: Dict[Tuple[str, str], Dict[str, str]] = {
     },
 }
 
-# Default legs (strategy_structure_type_leg): role, direction, option_right allowlists for Type Config.
+# Template legs (strategy_template.legs_json): role, direction, option_right allowlists.
 LEG_ROLE_ALLOWED: Tuple[str, ...] = ("underlying", "call", "put")
 LEG_ROLE_LABELS: Dict[str, str] = {
     "underlying": "Underlying (stock)",

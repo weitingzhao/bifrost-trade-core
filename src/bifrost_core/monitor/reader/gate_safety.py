@@ -5,7 +5,7 @@ from typing import Any, Dict, List, Optional
 
 from psycopg2.extras import RealDictCursor
 
-from bifrost_core.monitor.schemas.gate_params import GateParams
+from bifrost_core.monitor.schemas.gate_params import GateParams, split_earnings_dates
 from bifrost_core.monitor.reader.errors import ReadFailed
 
 _GATE_SAFETY_SELECT = """
@@ -18,7 +18,11 @@ _GATE_SAFETY_SELECT = """
 
 
 def build_gate_params_from_flat_row(row: Dict[str, Any], earnings_dates: List[str]) -> Dict[str, Any]:
-    """Assemble nested config['gates'] dict from legacy flattened columns (Wave 9 migration)."""
+    """Assemble nested config['gates'] dict from legacy flattened columns.
+
+    Only the Wave 9 migration calls this (wave9_migrations), on rows that still have
+    the flat columns; the readers below read params_json.
+    """
     strategy = {
         "structure": {
             "min_dte": int(row["min_dte"]),
@@ -87,55 +91,19 @@ def _parse_params_json(raw: Any) -> Dict[str, Any]:
 
 
 def _row_to_gates(row: Dict[str, Any], earnings_dates: Optional[List[str]] = None) -> Dict[str, Any]:
-    """Return config['gates'] dict from params_json or legacy flat columns."""
-    if row.get("params_json") is not None:
-        gates = _parse_params_json(row["params_json"])
-        if earnings_dates is not None:
-            strategy = gates.setdefault("strategy", {})
-            earnings = strategy.setdefault("earnings", {})
-            earnings["dates"] = earnings_dates
-        return gates
-    return build_gate_params_from_flat_row(row, earnings_dates or [])
-
-
-def _load_earnings_dates(conn: Any, gate_safety_strategy_id: int) -> List[str]:
-    try:
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute(
-                """
-                SELECT holiday_date FROM gate_safety_strategy_earnings_dates
-                WHERE gate_safety_strategy_id = %s ORDER BY holiday_date
-                """,
-                (gate_safety_strategy_id,),
-            )
-            dates_rows = cur.fetchall()
-        return [str(r["holiday_date"]) for r in dates_rows] if dates_rows else []
-    except Exception:
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute(
-                "SELECT params_json FROM gate_safety_strategy WHERE gate_safety_strategy_id = %s",
-                (gate_safety_strategy_id,),
-            )
-            row = cur.fetchone()
-        if not row:
-            return []
-        gates = _parse_params_json(row.get("params_json"))
-        dates = gates.get("strategy", {}).get("earnings", {}).get("dates") or []
-        return [str(d) for d in dates if d]
-
-
-def _extract_earnings_dates(row_dict: Dict[str, Any]) -> List[str]:
-    """Earnings dates from params_json when collapsed; legacy rows use child table via conn."""
-    if row_dict.get("params_json") is not None:
-        gates = _parse_params_json(row_dict["params_json"])
-        dates = gates.get("strategy", {}).get("earnings", {}).get("dates") or []
-        return [str(d) for d in dates if d]
-    return []
+    """Return config['gates'] dict from params_json (NOT NULL since Wave 9)."""
+    gates = _parse_params_json(row.get("params_json"))
+    if earnings_dates is not None:
+        strategy = gates.setdefault("strategy", {})
+        earnings = strategy.setdefault("earnings", {})
+        earnings["dates"] = earnings_dates
+    return gates
 
 
 def get_gates_by_id(conn: Any, gate_safety_strategy_id: int) -> Optional[Dict[str, Any]]:
     """Load gates from gate_safety_strategy and return a dict in the shape of config['gates'].
     So the caller can set config['gates'] = get_gates_by_id(conn, id) and get_hedge_config(config) will work.
+    Earnings dates stay nested at strategy.earnings.dates, where get_hedge_config reads them.
     Returns None if the boundary set is missing.
     """
     try:
@@ -144,11 +112,7 @@ def get_gates_by_id(conn: Any, gate_safety_strategy_id: int) -> Optional[Dict[st
             row = cur.fetchone()
         if row is None:
             return None
-        row_dict = dict(row)
-        earnings_dates = _extract_earnings_dates(row_dict)
-        if not earnings_dates and row_dict.get("params_json") is None:
-            earnings_dates = _load_earnings_dates(conn, gate_safety_strategy_id)
-        return _row_to_gates(row_dict, earnings_dates)
+        return _row_to_gates(dict(row))
     except Exception:
         return None
 
@@ -206,7 +170,11 @@ def get_gate_safety_name(conn: Any, gate_safety_strategy_id: int) -> Optional[st
 
 
 def get_gate_safety_full_by_id(conn: Any, gate_safety_strategy_id: int) -> Optional[Dict[str, Any]]:
-    """Return full gate set for UI edit: metadata + gates (config shape) + earnings_dates array.
+    """Return full gate set for UI edit: metadata + gates + earnings_dates array.
+
+    The earnings dates are only in the top-level `earnings_dates`: `gates` has no
+    strategy.earnings.dates (the shape of gate_params.default_gates()), so a client
+    that sends the object back unchanged does not send them twice.
     Returns None if not found.
     """
     try:
@@ -215,11 +183,7 @@ def get_gate_safety_full_by_id(conn: Any, gate_safety_strategy_id: int) -> Optio
             row = cur.fetchone()
         if row is None:
             return None
-        row_dict = dict(row)
-        earnings_dates = _extract_earnings_dates(row_dict)
-        if not earnings_dates and row_dict.get("params_json") is None:
-            earnings_dates = _load_earnings_dates(conn, gate_safety_strategy_id)
-        gates = _row_to_gates(row_dict, earnings_dates)
+        gates, earnings_dates = split_earnings_dates(_row_to_gates(dict(row)))
         return {
             "gate_safety_strategy_id": int(row["gate_safety_strategy_id"]),
             "name": str(row["name"]) if row.get("name") is not None else "",
