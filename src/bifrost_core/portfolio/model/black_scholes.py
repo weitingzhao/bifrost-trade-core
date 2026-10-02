@@ -2,48 +2,37 @@
 
 Pure functions, no DB / IO. ``core`` uses them for per-leg Greeks and the
 spot x IV stress grid.
+
+The math is ``bifrost_core.pricing.black_scholes`` (TD-42); these wrappers pin the model's
+conventions so its numbers stay bit-identical to the copy it used to carry: the guarded
+(non-strict) formulas, the ``IV_POSITIONS_MODEL`` solver, and ``right == "C"`` meaning a call
+(anything else, ``"c"`` and ``"CALL"`` included, is a put). The model's rate is
+``RATE_POSITIONS_MODEL`` (0.04), passed in by ``core``.
 """
 
 from __future__ import annotations
 
-import math
 from datetime import date
 from typing import Optional
 
+from bifrost_core.pricing.black_scholes import (
+    IV_POSITIONS_MODEL,
+    erf_delta,
+    implied_vol,
+    price,
+)
 
-def _bs_d1(S: float, K: float, T: float, r: float, sigma: float) -> float:
-    if T <= 0 or sigma <= 0 or S <= 0 or K <= 0:
-        return 0.0
-    return (math.log(S / K) + (r + 0.5 * sigma * sigma) * T) / (sigma * math.sqrt(T))
 
-
-def _norm_cdf(x: float) -> float:
-    return 0.5 * (1.0 + math.erf(x / math.sqrt(2.0)))
+def _right(right: str) -> str:
+    return "C" if right == "C" else "P"
 
 
 def _bs_price(S: float, K: float, T: float, r: float, sigma: float, right: str) -> float:
-    if T <= 0:
-        intr = max(S - K, 0.0) if right == "C" else max(K - S, 0.0)
-        return intr
-    d1 = _bs_d1(S, K, T, r, sigma)
-    d2 = d1 - sigma * math.sqrt(T)
-    if right == "C":
-        return S * _norm_cdf(d1) - K * math.exp(-r * T) * _norm_cdf(d2)
-    else:
-        return K * math.exp(-r * T) * _norm_cdf(-d2) - S * _norm_cdf(-d1)
+    return price(S, K, T, r, sigma, _right(right))
 
 
 def _bs_delta(S: float, K: float, T: float, r: float, sigma: float, right: str) -> float:
-    if T <= 0 or sigma <= 0:
-        if right == "C":
-            return 1.0 if S > K else (0.5 if S == K else 0.0)
-        else:
-            return -1.0 if S < K else (-0.5 if S == K else 0.0)
-    d1 = _bs_d1(S, K, T, r, sigma)
-    if right == "C":
-        return _norm_cdf(d1)
-    else:
-        return _norm_cdf(d1) - 1.0
+    return erf_delta(S, K, T, r, sigma, _right(right))
 
 
 def _implied_vol(
@@ -51,27 +40,10 @@ def _implied_vol(
     tol: float = 1e-6, max_iter: int = 100,
 ) -> Optional[float]:
     """Newton-Raphson IV solve. Returns None on failure."""
-    if T <= 0 or market_price <= 0 or S <= 0 or K <= 0:
-        return None
-    intrinsic = max(S - K, 0.0) if right == "C" else max(K - S, 0.0)
-    if market_price < intrinsic - tol:
-        return None
-    sigma = 0.3
-    for _ in range(max_iter):
-        price = _bs_price(S, K, T, r, sigma, right)
-        d1 = _bs_d1(S, K, T, r, sigma)
-        vega = S * math.sqrt(T) * math.exp(-0.5 * d1 * d1) / math.sqrt(2 * math.pi)
-        if vega < 1e-12:
-            break
-        diff = price - market_price
-        if abs(diff) < tol:
-            return sigma
-        sigma -= diff / vega
-        if sigma <= 0.001:
-            sigma = 0.001
-        if sigma > 5.0:
-            return None
-    return sigma if abs(_bs_price(S, K, T, r, sigma, right) - market_price) < 0.05 else None
+    return implied_vol(
+        market_price, S, K, T, r, _right(right),
+        convention=IV_POSITIONS_MODEL, tol=tol, max_iter=max_iter,
+    )
 
 
 def _years_to(expiry: Optional[date]) -> float:

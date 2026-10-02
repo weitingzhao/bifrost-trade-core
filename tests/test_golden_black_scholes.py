@@ -313,6 +313,123 @@ def test_core_model_is_bit_identical_to_its_pre_td42_copy() -> None:
     _exact(pairs)
 
 
+# --- core's public functions reproduce the api copies (TD-42) --------------------------------
+#
+# How the api calls core when it switches: its own right rule mapped to "C"/"P", strict=True
+# (the raw formula raises where the api copy raised), IV_RESEARCH, RATE_RESEARCH.
+
+
+def _api_right(right: str) -> str:
+    return "C" if right.upper() == "C" else "P"
+
+
+def core_as_api_price(S_: float, K: float, T: float, r: float, sigma: float, right: str) -> float:
+    return pricing.price(S_, K, T, r, sigma, _api_right(right), strict=True)
+
+
+def core_as_api_greeks(S_: float, K: float, T: float, r: float, sigma: float, right: str) -> Dict[str, float]:
+    g = pricing.greeks(S_, K, T, r, sigma, _api_right(right), strict=True)
+    return {k: round(v, 6) for k, v in g.items()}
+
+
+def core_as_api_iv(p: float, S_: float, K: float, T: float, r: float, right: str) -> Any:
+    return pricing.implied_vol(p, S_, K, T, r, _api_right(right), convention=pricing.IV_RESEARCH)
+
+
+def core_as_screener(spot: float, strike: float, dte: int, iv: float) -> float:
+    return pricing.prob_itm(spot, strike, dte / 365.0, pricing.RATE_RESEARCH, iv, "P")
+
+
+def test_core_reproduces_the_api_research_greeks_bit_for_bit(monkeypatch: pytest.MonkeyPatch) -> None:
+    pairs: List[tuple] = []
+    for K, T, sigma, r, right in grid_points():
+        args = (S, K, T, r, sigma, right)
+        ap = _safe(api._bs_price, *args)
+        pairs.append((("price",) + args, _safe(core_as_api_price, *args), ap))
+        pairs.append((("greeks",) + args, _safe(core_as_api_greeks, *args), _safe(api.compute_greeks, *args)))
+        pairs.append((("vega",) + args, _safe(lambda *a: pricing.vega(*a, strict=True), S, K, T, r, sigma),
+                      _safe(api._bs_vega, S, K, T, r, sigma)))
+        pairs.append((("d1d2",) + args,
+                      _safe(lambda *a: (pricing.d1(*a, strict=True), pricing.d2(*a, strict=True)), S, K, T, r, sigma),
+                      _safe(api._bs_d1d2, S, K, T, r, sigma)))
+        if _num(ap):
+            iv_args = (ap, S, K, T, r, right)
+            pairs.append((("iv",) + iv_args, _safe(core_as_api_iv, *iv_args), _safe(api.implied_vol, *iv_args)))
+    for p, K, T, r, right in iv_points():
+        iv_args = (p, S, K, T, r, right)
+        pairs.append((("iv",) + iv_args, _safe(core_as_api_iv, *iv_args), _safe(api.implied_vol, *iv_args)))
+    for right in RIGHT_STRINGS:
+        s, k, t, r, sig = RIGHT_POINT
+        pairs.append((("price", right), _safe(core_as_api_price, s, k, t, r, sig, right), _safe(api._bs_price, s, k, t, r, sig, right)))
+        pairs.append((("greeks", right), _safe(core_as_api_greeks, s, k, t, r, sig, right), _safe(api.compute_greeks, s, k, t, r, sig, right)))
+        pairs.append((("iv", right), _safe(core_as_api_iv, 3.0, s, k, t, r, right), _safe(api.implied_vol, 3.0, s, k, t, r, right)))
+    # Unrounded too: shadow round() in the oracle's module so compute_greeks returns raw floats.
+    monkeypatch.setattr(api, "round", lambda x, _n: x, raising=False)
+    for K, T, sigma, r, right in grid_points():
+        args = (S, K, T, r, sigma, right)
+        raw = _safe(lambda *a: pricing.greeks(*a[:5], _api_right(a[5]), strict=True), *args)
+        pairs.append((("raw greeks",) + args, raw, _safe(api.compute_greeks, *args)))
+    _exact(pairs)
+
+
+def test_core_reproduces_the_screener_bit_for_bit() -> None:
+    pairs = [
+        (pt, _safe(core_as_screener, S, *pt), _safe(screener._prob_itm_put, S, *pt))
+        for pt in screener_points()
+    ]
+    _exact(pairs)
+
+
+def test_core_public_model_conventions_match_the_model_copy() -> None:
+    """The model's wrappers aside: the public functions with right "C"/"P" are the model."""
+    pairs: List[tuple] = []
+    for K, T, sigma, r, right in grid_points():
+        args = (S, K, T, r, sigma, right)
+        pairs.append((args, _safe(pricing.price, *args), _safe(model_oracle._bs_price, *args)))
+        pairs.append((args, _safe(pricing.erf_delta, *args), _safe(model_oracle._bs_delta, *args)))
+    for p, K, T, r, right in iv_points():
+        iv_args = (p, S, K, T, r, right)
+        pairs.append((iv_args, _safe(lambda *a: pricing.implied_vol(*a, convention=pricing.IV_POSITIONS_MODEL), *iv_args),
+                      _safe(model_oracle._implied_vol, *iv_args)))
+    _exact(pairs)
+
+
+def test_calculate_greeks_is_the_daemon_delta_gamma_plus_erf_theta_vega(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(api, "round", lambda x, _n: x, raising=False)
+    pairs: List[tuple] = []
+    for K, T, sigma, r, right in grid_points():
+        got = pricing.calculate_greeks(S, K, T, r, sigma, right)
+        pairs.append((("delta", K, T, sigma, r, right), got["delta"], pricing.delta(S, K, T, r, sigma, right)))
+        pairs.append((("gamma", K, T, sigma, r, right), got["gamma"], pricing.gamma(S, K, T, r, sigma, right)))
+        if T <= 0 or sigma <= 0:
+            want = {"theta": 0.0, "vega": 0.0}
+        else:
+            want = api.compute_greeks(S, K, T, r, sigma, right)
+        pairs.append((("theta", K, T, sigma, r, right), got["theta"], want["theta"]))
+        pairs.append((("vega", K, T, sigma, r, right), got["vega"], want["vega"]))
+    _exact(pairs)
+
+
+def test_each_surface_keeps_its_own_rate() -> None:
+    """Named, not unified: changing one of these moves that surface's numbers."""
+    import inspect
+
+    from bifrost_core.portfolio.model import core as model_core
+
+    assert pricing.RATE_RESEARCH_GEX == 0.0
+    assert pricing.RATE_POSITIONS_MODEL == 0.04
+    assert pricing.RATE_SYMBOL_CHAIN_UI == 0.043
+    assert pricing.RATE_RESEARCH == 0.045 == api.DEFAULT_RISK_FREE_RATE == screener.RISK_FREE_RATE
+    assert pricing.RATE_DAEMON_DEFAULT == 0.05
+    for fn in (model_core._compute_greeks_for_group, model_core._stress_matrix):
+        assert inspect.signature(fn).parameters["r"].default == 0.04
+
+
+def test_implied_vol_needs_a_known_convention() -> None:
+    with pytest.raises(ValueError):
+        pricing.implied_vol(2.0, 100.0, 100.0, 0.1, 0.04, "C", convention="unified")
+
+
 if __name__ == "__main__":
     FIXTURE.parent.mkdir(parents=True, exist_ok=True)
     data = build()

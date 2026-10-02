@@ -342,8 +342,9 @@ _NAMES: dict[str, tuple[str, ...]] = {
     "bifrost_core.portfolio.services.portfolio": (
         "run_model_analysis_for_account",
     ),
-    # trade-worker
+    # trade-worker (PY_VOLLIB_AVAILABLE: its tests/test_black_scholes.py)
     "bifrost_core.pricing.black_scholes": (
+        "PY_VOLLIB_AVAILABLE",
         "calculate_greeks",
         "delta",
         "gamma",

@@ -23,6 +23,7 @@ from bifrost_core.portfolio.model.black_scholes import (
     _implied_vol,
     _years_to,
 )
+from bifrost_core.pricing.black_scholes import RATE_POSITIONS_MODEL
 from bifrost_core.portfolio.model.payoff import (
     RiskPosition,
     ScenarioBreakdown,
@@ -378,7 +379,7 @@ def _compute_greeks_for_group(
     spot: Optional[float],
     farthest_expiry: Optional[date],
     opt_mid_prices: Dict[Tuple[float, str, Optional[date]], float],
-    r: float = 0.04,
+    r: float = RATE_POSITIONS_MODEL,
 ) -> Dict[str, Any]:
     """Compute portfolio delta for one underlying group. Returns delta info dict."""
     if spot is None or spot <= 0:
@@ -440,7 +441,7 @@ def _stress_matrix(
     spot: Optional[float],
     farthest_expiry: Optional[date],
     opt_mid_prices: Dict[Tuple[float, str, Optional[date]], float],
-    r: float = 0.04,
+    r: float = RATE_POSITIONS_MODEL,
 ) -> Dict[str, Any]:
     """Compute P&L matrix for spot shocks x IV shocks."""
     if spot is None or spot <= 0:
