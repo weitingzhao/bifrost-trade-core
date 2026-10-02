@@ -5,7 +5,6 @@ from __future__ import annotations
 from bifrost_core.persistence.redis_daemon_state import (
     _decode_hash,
     _encode_mapping,
-    account_sync_heartbeat_from_state,
     trading_heartbeat_from_state,
     trading_status_current_from_state,
 )
@@ -54,7 +53,7 @@ def test_trading_heartbeat_shape() -> None:
     assert trading_heartbeat_from_state(None) is None
 
 
-def test_trading_status_and_account_sync_shapes() -> None:
+def test_trading_status_shape() -> None:
     status = trading_status_current_from_state(
         {"daemon_state": "running", "symbol": "SPY", "ts": 1.0, "spot": 500.0}
     )
@@ -63,43 +62,4 @@ def test_trading_status_and_account_sync_shapes() -> None:
     assert status["symbol"] == "SPY"
     assert trading_status_current_from_state({}) is None
 
-    ash = account_sync_heartbeat_from_state(
-        {
-            "last_ts": 50.0,
-            "last_sync_version": 3,
-            "accounts_synced": 1,
-            "alive": True,
-            "heartbeat_interval_sec": 5.0,
-        }
-    )
-    assert ash is not None
-    assert ash["last_sync_version"] == 3
-    assert ash["alive"] is True
 
-
-def test_account_sync_heartbeat_reports_why_it_is_not_alive() -> None:
-    """`alive` alone read healthy through ~2000 consecutive failures (2026-09-07)."""
-    failing = account_sync_heartbeat_from_state(
-        {
-            "last_ts": 90.0,
-            "last_sync_version": 0,
-            "alive": False,
-            "sync_failures": 2000,
-            "last_error": 'UndefinedTable: relation "brokerage.positions" does not exist',
-            "last_ok_ts": 12.0,
-        }
-    )
-    assert failing is not None
-    assert failing["alive"] is False
-    assert failing["sync_failures"] == 2000
-    assert "brokerage.positions" in failing["last_error"]
-    assert failing["last_ok_ts"] == 12.0
-
-
-def test_account_sync_heartbeat_defaults_when_the_daemon_never_reported_failures() -> None:
-    """Older daemons write no failure fields; the reader must not invent any."""
-    healthy = account_sync_heartbeat_from_state({"last_ts": 1.0, "alive": True})
-    assert healthy is not None
-    assert healthy["sync_failures"] == 0
-    assert healthy["last_error"] == ""
-    assert healthy["last_ok_ts"] is None

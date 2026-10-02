@@ -2,12 +2,12 @@
 
 import logging
 import math
-import os
 import time
 from typing import Any, Dict, List, Optional
 
 import psycopg2
 
+from bifrost_core.core.daemon_flags import daemon_broker_writes_off
 from bifrost_core.persistence.status_sink import (
     ACCOUNTS_SNAPSHOT_KEY,
     SNAPSHOT_KEYS,
@@ -178,19 +178,15 @@ class PostgreSQLSink(StatusSink):
             if ACCOUNTS_SNAPSHOT_KEY in snapshot
             else None
         )
-        # Accounts sync still needs PG (when ACCOUNT_SYNC_DAEMON_ENABLED is off)
-        if not (
-            isinstance(raw_accounts, list)
-            and raw_accounts
-            and os.environ.get("ACCOUNT_SYNC_DAEMON_ENABLED", "").strip().lower()
-            not in ("1", "true", "yes")
-        ):
+        # The shared Golden Source accounts tables are written unless this daemon's
+        # broker writes are off (DEV; core.daemon_flags).
+        if not (isinstance(raw_accounts, list) and raw_accounts and not daemon_broker_writes_off()):
             return
         if not self._ensure_conn():
             return
         try:
             if isinstance(raw_accounts, list) and raw_accounts:
-                if os.environ.get("ACCOUNT_SYNC_DAEMON_ENABLED", "").strip().lower() not in ("1", "true", "yes"):
+                if not daemon_broker_writes_off():
                     if self._ensure_golden_conn():
                         sync_accounts_snapshot_to_tables(self._golden_conn, raw_accounts)
                         self._golden_conn.commit()

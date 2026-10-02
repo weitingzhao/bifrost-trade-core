@@ -131,11 +131,6 @@ class StatusReader:
     def get_daemon_heartbeat(self) -> Optional[Dict[str, Any]]:
         return status_module.get_daemon_heartbeat(redis_client=self._ensure_redis(), status_config=self._config)
 
-    def get_account_sync_heartbeat(self) -> Optional[Dict[str, Any]]:
-        return status_module.get_account_sync_heartbeat(
-            redis_client=self._ensure_redis(), status_config=self._config
-        )
-
     def get_operations(
         self,
         since_ts: Optional[float] = None,

@@ -4,12 +4,12 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 from typing import Any, Dict, List, Optional
+
+from bifrost_core.core.daemon_flags import daemon_broker_writes_off
 
 logger = logging.getLogger(__name__)
 
-_ACCOUNT_SYNC_DAEMON_ENABLED = os.environ.get("ACCOUNT_SYNC_DAEMON_ENABLED", "").strip().lower() in ("1", "true", "yes")
 
 
 def _redis_sync_client(cfg: dict):
@@ -105,7 +105,7 @@ async def refresh_accounts_from_redis_edge(app: Any) -> None:
         app._set_active_symbol(app._infer_active_symbol(flat))
 
     oo = data.get("open_orders") or []
-    if not _ACCOUNT_SYNC_DAEMON_ENABLED:
+    if not daemon_broker_writes_off():
         if app._status_sink and hasattr(app._status_sink, "write_open_orders"):
             try:
                 app._status_sink.write_open_orders(oo)
@@ -119,7 +119,7 @@ async def refresh_accounts_from_redis_edge(app: Any) -> None:
             except Exception as e:
                 logger.debug("[ib_edge] write_account_executions: %s", e)
     else:
-        logger.debug("[ib_edge] ACCOUNT_SYNC_DAEMON_ENABLED — skipping PG writes (Account Sync Daemon handles persistence)")
+        logger.debug("[ib_edge] broker writes off (DEV) — open orders and executions not written to the shared Golden Source")
 
     logger.info(
         "[ib_edge] snapshot applied accounts=%s open_orders=%s",

@@ -1,10 +1,8 @@
-"""Daemon IPC state in per-env Redis (replaces PG daemon_* / account_sync_* IPC tables).
+"""Daemon IPC state in per-env Redis (replaces the PG daemon_* IPC tables; the account_sync keys went with the daemon, TD-22).
 
 Keys (per-env redis from config ``redis`` block):
   bifrost:daemon:trading:state       HASH  TTL 180s
   bifrost:daemon:trading:control     STREAM MAXLEN ~500
-  bifrost:daemon:account_sync:state  HASH  TTL 180s
-  bifrost:daemon:account_sync:control STREAM MAXLEN ~100
 """
 
 from __future__ import annotations
@@ -24,11 +22,6 @@ TRADING_CONTROL_GROUP = "trading_daemon"
 TRADING_CONTROL_CONSUMER = "daemon_0"
 TRADING_CONTROL_MAXLEN = 500
 
-ACCOUNT_SYNC_STATE_KEY = "bifrost:daemon:account_sync:state"
-ACCOUNT_SYNC_CONTROL_STREAM = "bifrost:daemon:account_sync:control"
-ACCOUNT_SYNC_CONTROL_GROUP = "account_sync_daemon"
-ACCOUNT_SYNC_CONTROL_CONSUMER = "daemon_0"
-ACCOUNT_SYNC_CONTROL_MAXLEN = 100
 
 # Fields treated as bool when reading HASH
 _BOOL_FIELDS = frozenset(
@@ -173,36 +166,6 @@ def read_trading_daemon_state(r: Any) -> Optional[Dict[str, Any]]:
         return None
 
 
-def write_account_sync_state(r: Any, fields: Dict[str, Any]) -> bool:
-    if r is None or not fields:
-        return False
-    try:
-        mapping = _encode_mapping(fields)
-        if not mapping:
-            return False
-        pipe = r.pipeline()
-        pipe.hset(ACCOUNT_SYNC_STATE_KEY, mapping=mapping)
-        pipe.expire(ACCOUNT_SYNC_STATE_KEY, STATE_TTL_SEC)
-        pipe.execute()
-        return True
-    except Exception as e:
-        logger.warning("write_account_sync_state failed: %s", e)
-        return False
-
-
-def read_account_sync_state(r: Any) -> Optional[Dict[str, Any]]:
-    if r is None:
-        return None
-    try:
-        raw = r.hgetall(ACCOUNT_SYNC_STATE_KEY)
-        if not raw:
-            return None
-        return _decode_hash(raw)
-    except Exception as e:
-        logger.debug("read_account_sync_state failed: %s", e)
-        return None
-
-
 def publish_control(
     r: Any,
     stream_key: str,
@@ -237,16 +200,6 @@ def publish_control(
 def publish_trading_control(r: Any, command: str, *, source: str = "api") -> bool:
     return publish_control(
         r, TRADING_CONTROL_STREAM, command, source=source, maxlen=TRADING_CONTROL_MAXLEN
-    )
-
-
-def publish_account_sync_control(r: Any, command: str, *, source: str = "api") -> bool:
-    return publish_control(
-        r,
-        ACCOUNT_SYNC_CONTROL_STREAM,
-        command,
-        source=source,
-        maxlen=ACCOUNT_SYNC_CONTROL_MAXLEN,
     )
 
 
@@ -324,16 +277,6 @@ def consume_trading_control(r: Any, *, block_ms: int = 0) -> Optional[str]:
     )
 
 
-def consume_account_sync_control(r: Any, *, block_ms: int = 0) -> Optional[str]:
-    return consume_control(
-        r,
-        ACCOUNT_SYNC_CONTROL_STREAM,
-        ACCOUNT_SYNC_CONTROL_GROUP,
-        ACCOUNT_SYNC_CONTROL_CONSUMER,
-        block_ms=block_ms,
-    )
-
-
 def set_trading_run_status(
     r: Any, *, suspended: Optional[bool] = None, heartbeat_interval_sec: Optional[float] = None
 ) -> bool:
@@ -343,17 +286,6 @@ def set_trading_run_status(
     if heartbeat_interval_sec is not None:
         fields["heartbeat_interval_sec"] = max(5, min(120, int(heartbeat_interval_sec)))
     return write_trading_daemon_state(r, fields)
-
-
-def set_account_sync_run_status(
-    r: Any, *, suspended: Optional[bool] = None, heartbeat_interval_sec: Optional[float] = None
-) -> bool:
-    fields: Dict[str, Any] = {}
-    if suspended is not None:
-        fields["suspended"] = suspended
-    if heartbeat_interval_sec is not None:
-        fields["heartbeat_interval_sec"] = max(2.0, min(60.0, float(heartbeat_interval_sec)))
-    return write_account_sync_state(r, fields)
 
 
 def trading_heartbeat_from_state(state: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
@@ -401,27 +333,3 @@ def trading_status_current_from_state(state: Optional[Dict[str, Any]]) -> Option
         "ts": state.get("ts"),
     }
 
-
-def account_sync_heartbeat_from_state(state: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
-    if not state:
-        return None
-    if state.get("last_ts") is None and state.get("alive") is None:
-        return None
-    hi = state.get("heartbeat_interval_sec")
-    return {
-        "last_ts": state.get("last_ts"),
-        "last_sync_version": state.get("last_sync_version") or 0,
-        "accounts_synced": state.get("accounts_synced") or 0,
-        "positions_synced": state.get("positions_synced") or 0,
-        "executions_synced": state.get("executions_synced") or 0,
-        "open_orders_synced": state.get("open_orders_synced") or 0,
-        "stream_lag": state.get("stream_lag") or 0,
-        "heartbeat_interval_sec": float(hi) if hi is not None else 5.0,
-        "suspended": bool(state.get("suspended", False)),
-        "alive": bool(state.get("alive", True)),
-        # `alive` alone could not distinguish "loop turning, sync working" from
-        # "loop turning, every sync failing". These say which.
-        "sync_failures": state.get("sync_failures") or 0,
-        "last_error": state.get("last_error") or "",
-        "last_ok_ts": state.get("last_ok_ts"),
-    }

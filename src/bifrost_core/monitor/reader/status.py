@@ -112,42 +112,6 @@ def write_heartbeat_interval(status_config: dict, heartbeat_interval_sec: int) -
     return rds.set_trading_run_status(r, heartbeat_interval_sec=float(heartbeat_interval_sec))
 
 
-def get_account_sync_heartbeat(
-    conn: Any = None, *, redis_client: Any = None, status_config: Optional[dict] = None
-) -> Optional[Dict[str, Any]]:
-    """Return account sync heartbeat from Redis."""
-    r = redis_client
-    if r is None and status_config is not None:
-        r = _redis_from_config(status_config)
-    if r is None:
-        return None
-    return rds.account_sync_heartbeat_from_state(rds.read_account_sync_state(r))
-
-
-def write_account_sync_control(status_config: dict, command: str) -> bool:
-    """Publish account-sync control command to Redis STREAM."""
-    r = _redis_from_config(status_config)
-    if r is None:
-        return False
-    return rds.publish_account_sync_control(r, command, source="api")
-
-
-def write_account_sync_run_status(status_config: dict, *, suspended: bool) -> bool:
-    """Set account-sync suspended flag on Redis state HASH."""
-    r = _redis_from_config(status_config)
-    if r is None:
-        return False
-    return rds.set_account_sync_run_status(r, suspended=suspended)
-
-
-def write_account_sync_heartbeat_interval(status_config: dict, interval_sec: float) -> bool:
-    """Set account-sync heartbeat_interval_sec on Redis (clamped 2-60)."""
-    r = _redis_from_config(status_config)
-    if r is None:
-        return False
-    return rds.set_account_sync_run_status(r, heartbeat_interval_sec=float(interval_sec))
-
-
 def get_risk_summary(conn: Any = None, *, status_config: Optional[dict] = None) -> Dict[str, Any]:
     """Return risk/post-mortem summary from Redis trading status."""
     out: Dict[str, Any] = {

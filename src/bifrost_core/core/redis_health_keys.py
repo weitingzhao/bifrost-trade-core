@@ -39,8 +39,6 @@ BIFROST_HEALTH_IB_ACCOUNT_AGENT = "bifrost:health:ws_ib_account_agent"
 
 # Account Sync Daemon: independent process that consumes ib:account:stream:v1 and
 # persists Account / Position / Execution data to PostgreSQL.
-BIFROST_HEALTH_ACCOUNT_SYNC_DAEMON = "bifrost:health:daemon_account_sync"
-LEGACY_BIFROST_HEALTH_ACCOUNT_SYNC_DAEMON = "bifrost:health:account_sync_daemon"
 
 # Strategy Trading Daemon: health hash + Ops Dev/Prod lease fields (``bifrost_ops_control_*``,
 # ``engine_ops_active``) on the same key — NOT migrated to separate lease key (different lifecycle).
@@ -100,11 +98,3 @@ def hgetall_ib_operator_health(r: Any) -> Dict[str, str]:
         h = r.hgetall(LEGACY_BIFROST_IB_OPERATOR)
     return dict(h or {})
 
-
-def hgetall_account_sync_daemon_health(r: Any) -> Dict[str, str]:
-    """Account Sync Daemon health hash (canonical key, then legacy migration key)."""
-    for key in (BIFROST_HEALTH_ACCOUNT_SYNC_DAEMON, LEGACY_BIFROST_HEALTH_ACCOUNT_SYNC_DAEMON):
-        h = r.hgetall(key)
-        if h:
-            return dict(h)
-    return {}
