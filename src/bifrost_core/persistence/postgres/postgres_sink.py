@@ -33,6 +33,12 @@ from bifrost_core.persistence.postgres.brokerage_tables import (
     GOLDEN_OPEN_ORDERS,
 )
 from bifrost_core.persistence import redis_daemon_state as rds
+from bifrost_core.portfolio.contract_key import (
+    TWS_SOURCES,
+    execution_opt_fields,
+    opt_key,
+    tws_execution_opt_key,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -350,57 +356,18 @@ class PostgreSQLSink(StatusSink):
 
                     sec_type_norm = (sec_type or "").strip().upper()
                     if sec_type_norm == "OPT":
-                        sym_key = (symbol or "").strip()
-                        exp_val = expiry
-                        if isinstance(exp_val, (int, float)) and math.isfinite(exp_val):
-                            exp_key = str(int(exp_val))
-                        else:
-                            exp_key = (exp_val or "").strip().replace("-", "")
-                        strike_raw = strike
-                        try:
-                            strike_key = float(strike_raw) if strike_raw not in ("", None) else None
-                        except (TypeError, ValueError):
-                            strike_key = None
-                        right_key = (option_right or "").strip().upper()
-                        if len(right_key) > 1:
-                            right_key = "C" if right_key.startswith("C") else "P" if right_key.startswith("P") else right_key[:1]
-
-                        source_norm = (source or "").strip()
-                        if (
-                            source_norm in ("tws_event", "tws_client")
-                            and sym_key
-                            and exp_key
-                            and strike_key is not None
-                            and right_key
-                        ):
-                            exp_digits = "".join(ch for ch in exp_key if ch.isdigit())
-                            yymmdd = exp_digits[2:8] if len(exp_digits) >= 8 else exp_digits[-6:]
-                            try:
-                                strike_int = int(round(strike_key * 1000.0))
-                            except (TypeError, ValueError, OverflowError):
-                                strike_int = None
-                            if yymmdd and strike_int is not None:
-                                strike_8 = f"{strike_int:08d}"
-                                local_symbol = f"{sym_key}  {yymmdd}{right_key}{strike_8}"
-                                contract_key = "|".join(
-                                    [
-                                        local_symbol,
-                                        "OPT",
-                                        exp_key,
-                                        str(strike_key),
-                                        right_key,
-                                    ]
-                                )
-                        if not contract_key and sym_key:
-                            contract_key = "|".join(
-                                [
-                                    sym_key,
-                                    "OPT",
-                                    exp_key,
-                                    str(strike_key) if strike_key is not None else "",
-                                    right_key,
-                                ]
+                        # TWS sources: rebuild from the legacy local symbol; otherwise keep the
+                        # row's key, or build the plain one (portfolio.contract_key, TD-25).
+                        sym_key, exp_key, strike_key, right_key = execution_opt_fields(
+                            symbol, expiry, strike, option_right
+                        )
+                        if (source or "").strip() in TWS_SOURCES:
+                            contract_key = (
+                                tws_execution_opt_key(symbol, expiry, strike, option_right)
+                                or contract_key
                             )
+                        if not contract_key and sym_key:
+                            contract_key = opt_key(sym_key, exp_key, strike_key, right_key)
                     if exec_time is not None:
                         try:
                             from datetime import datetime, timezone

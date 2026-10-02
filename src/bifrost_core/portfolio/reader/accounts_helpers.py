@@ -7,35 +7,20 @@ from datetime import date, datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
 from bifrost_core.persistence.postgres.brokerage_tables import ACCOUNT
+from bifrost_core.portfolio.contract_key import read_fallback_opt_key
 from bifrost_core.portfolio.quote_freshness import LIVE_QUOTE_MAX_AGE_SEC
 
 logger = logging.getLogger(__name__)
 
 
 def _fill_contract_key_for_opt(d: Dict[str, Any]) -> None:
-    """In-place: for OPT rows with missing contract_key, set contract_key from symbol|OPT|expiry|strike|option_right."""
-    if (d.get("sec_type") or "").strip().upper() != "OPT":
-        return
-    ck = (d.get("contract_key") or "").strip()
-    if ck:
-        return
-    sym = (d.get("symbol") or "").strip()
-    exp = (d.get("expiry") or "")
-    if isinstance(exp, (int, float)) and math.isfinite(exp):
-        exp = str(int(exp))
-    else:
-        exp = (exp or "").strip().replace("-", "")
-    strike = d.get("strike")
-    if strike is not None and not isinstance(strike, str):
-        strike = str(int(strike)) if strike is not None and math.isfinite(strike) else ""
-    else:
-        strike = (strike or "").strip()
-    right = (d.get("option_right") or "").strip().upper()
-    if len(right) > 1:
-        right = "C" if right.startswith("C") else "P" if right.startswith("P") else right[:1]
-    if not right and "right" in d:
-        right = (d.get("right") or "").strip().upper()[:1] or ""
-    d["contract_key"] = f"{sym}|OPT|{exp}|{strike}|{right}"
+    """In-place: for OPT rows with missing contract_key, set contract_key from symbol|OPT|expiry|strike|option_right.
+
+    Read time only (portfolio.contract_key.read_fallback_opt_key); the key is never written back.
+    """
+    key = read_fallback_opt_key(d)
+    if key is not None:
+        d["contract_key"] = key
 
 
 def _has_meaningful_commission(v: Any, is_numeric: bool = True) -> bool:

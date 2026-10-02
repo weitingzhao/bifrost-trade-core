@@ -9,7 +9,8 @@ output over the matrix below.
 Checks:
 
 1. the oracles still produce the fixture (frozen copies, so this guards the copy);
-2. core's functions, called directly, return the same strings as the oracles;
+2. core's functions, called directly, return the same strings as the oracles -- except the
+   read-time fallback for a fractional strike, which TD-25 fixes on purpose (82.5 was "82");
 3. the three write paths, driven through a fake connection, write the same contract_key
    into the INSERT as the oracle computes -- byte for byte, per source.
 
@@ -19,6 +20,7 @@ Regenerate the fixture only on purpose:  PYTHONPATH=src python tests/test_golden
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -29,6 +31,7 @@ from write_fakes import FakeConn
 
 from bifrost_core.persistence.postgres import accounts_sync
 from bifrost_core.persistence.postgres.postgres_sink import PostgreSQLSink
+from bifrost_core.portfolio import contract_key
 from bifrost_core.portfolio.reader import accounts, accounts_helpers, executions
 
 FIXTURE = Path(__file__).parent / "fixtures" / "golden_contract_key.json"
@@ -199,16 +202,69 @@ def test_occ_local_symbol_and_variants_match_the_oracle() -> None:
         assert executions._contract_key_variants_position_vs_executions(ck) == legacy.contract_key_variants(ck)
 
 
-def test_read_fallback_matches_the_oracle() -> None:
+def _fallback_expected(row: Dict[str, Any]) -> Optional[str]:
+    """The legacy read-time key, with the one intended change (TD-25 step C): a fractional
+    numeric strike prints in full instead of being cut by int(). Integral strikes keep the
+    legacy "80" (not "80.0"), so no key that could already have been seen changes."""
+    key = _fill(legacy.fill_contract_key_for_opt, row)
+    k = row.get("strike")
+    if (
+        key is not None
+        and not row.get("contract_key")
+        and isinstance(k, (int, float))
+        and math.isfinite(k)
+        and k != int(k)
+    ):
+        parts = key.split("|")
+        parts[3] = str(float(k))
+        key = "|".join(parts)
+    return key
+
+
+def test_read_fallback_matches_the_oracle_except_the_truncation() -> None:
+    changed = 0
     for sym, exp, k, rt in matrix():
         row = _fill_row(sym, exp, k, rt)
-        assert _fill(accounts_helpers._fill_contract_key_for_opt, row) == _fill(
-            legacy.fill_contract_key_for_opt, row
-        ), row
+        got = _fill(accounts_helpers._fill_contract_key_for_opt, row)
+        assert got == _fallback_expected(row), row
+        changed += got != _fill(legacy.fill_contract_key_for_opt, row)
     for row in FILL_EXTRA:
-        assert _fill(accounts_helpers._fill_contract_key_for_opt, row) == _fill(
-            legacy.fill_contract_key_for_opt, row
-        ), row
+        assert _fill(accounts_helpers._fill_contract_key_for_opt, row) == _fallback_expected(row), row
+    # 82.5, 0.5, 1234.125 and 7.75: 4 of 8 strikes x 3 expiries x 5 rights x 6 symbols.
+    assert changed == 4 * 3 * 5 * 6
+
+
+def test_read_fallback_spells_fractional_strikes_in_full() -> None:
+    def key(strike: Any) -> Optional[str]:
+        return contract_key.read_fallback_opt_key(_fill_row("RKLB", "2026-03-20", strike, "CALL"))
+
+    assert key(82.5) == "RKLB|OPT|20260320|82.5|C"  # was RKLB|OPT|20260320|82|C
+    assert key(82) == "RKLB|OPT|20260320|82|C"  # ... which is the 82 strike
+    assert key(80) == key(80.0) == "RKLB|OPT|20260320|80|C"  # unchanged
+    assert key(None) == "RKLB|OPT|20260320||C"  # unchanged (the 2 rows that use it today)
+    assert key("82.5") == "RKLB|OPT|20260320|82.5|C"  # unchanged
+    assert contract_key.read_fallback_opt_key({"sec_type": "OPT", "contract_key": "X"}) is None
+    assert contract_key.read_fallback_opt_key({"sec_type": "STK", "symbol": "RKLB"}) is None
+
+
+def test_builders_match_the_oracle() -> None:
+    for sym, exp, k, rt in matrix():
+        assert _safe(contract_key.osi_local_symbol, sym, str(exp), k, rt) == _safe(
+            legacy.occ_local_symbol, sym, str(exp), k, rt
+        )
+        for s in SOURCES:
+            want = legacy.accounts_execution_key(sym, "OPT", s, exp, k, rt, None)
+            if s in contract_key.TWS_SOURCES:
+                assert contract_key.tws_execution_opt_key(sym, exp, k, rt) == want
+            else:
+                assert want is None
+        p = _position(sym, exp, k, rt)
+        sf = None if k is None else float(k)
+        assert contract_key.opt_key(sym, exp, sf, rt, none_text="None") == legacy.positions_key(p)
+    assert contract_key.stk_key("RKLB") == legacy.positions_key(POSITION_EXTRA[0]) == "RKLB|STK|||"
+    assert contract_key.stk_key("ES", "FUT") == legacy.positions_key(POSITION_EXTRA[1])
+    assert contract_key.legacy_tws_local_symbol("F", "20260320", 7.75, "P") == "F  260320P00007750"
+    assert contract_key.osi_local_symbol("F", "20260320", 7.75, "P") == "F     260320P00007750"
 
 
 # --- the write paths, through a fake connection -----------------------------------------

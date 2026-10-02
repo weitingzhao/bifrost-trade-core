@@ -12,6 +12,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from psycopg2.extras import Json
 
 from bifrost_core.persistence.postgres.brokerage_tables import GOLDEN_ACCOUNT, GOLDEN_POSITIONS
+from bifrost_core.portfolio.contract_key import opt_key, stk_key
 
 logger = logging.getLogger(__name__)
 
@@ -165,9 +166,9 @@ def sync_accounts_snapshot_to_tables(
                         strike_f = None
                     rt = p.get("right") or ""
                     if sec == "OPT":
-                        contract_key = f"{sym}|{sec}|{exp}|{strike_f}|{rt}"
+                        contract_key = opt_key(sym, exp, strike_f, rt, none_text="None")
                     else:
-                        contract_key = f"{sym}|{sec}|||"
+                        contract_key = stk_key(sym, sec)
                     cur.execute(
                         f"""
                         INSERT INTO {GOLDEN_POSITIONS} (account_id, symbol, sec_type, exchange, currency, position, avg_cost, expiry, strike, option_right, contract_key, updated_at)

@@ -9,6 +9,7 @@ from zoneinfo import ZoneInfo
 
 from psycopg2.extras import RealDictCursor
 
+from bifrost_core.portfolio.contract_key import opt_key, osi_local_symbol
 from bifrost_core.portfolio.quote_freshness import fresh_quote_sql
 
 from bifrost_core.portfolio.units import option_cost_per_share, position_value
@@ -583,22 +584,8 @@ def get_executions_by_contract_keys(
         return []
 
 
-def _occ_local_symbol(symbol: str, expiry_yyyymmdd: str, strike: float, right: str) -> str:
-    """IB/OCC-style local symbol root: 6-char root (space-pad) + YYMMDD + C/P + strike*1000 (8 digits)."""
-    exp = re.sub(r"\D", "", expiry_yyyymmdd or "")
-    if len(exp) >= 8:
-        yymmdd = exp[2:8]
-    elif len(exp) == 6:
-        yymmdd = exp
-    else:
-        yymmdd = (exp + "010101")[:6]
-    root = (symbol or "").strip().upper()[:6].ljust(6)
-    r = (right or "C").strip().upper()[:1]
-    if r not in ("C", "P"):
-        r = "C"
-    strike_milli = int(round(float(strike) * 1000))
-    strike_milli = max(0, min(strike_milli, 99999999))
-    return f"{root}{yymmdd}{r}{strike_milli:08d}"
+# Moved to portfolio.contract_key (TD-25); the private name stays for importers.
+_occ_local_symbol = osi_local_symbol
 
 
 def _contract_key_variants_position_vs_executions(contract_key: str) -> List[str]:
@@ -625,7 +612,7 @@ def _contract_key_variants_position_vs_executions(contract_key: str) -> List[str
     exp_digits = re.sub(r"\D", "", exp_raw)
     exp8 = exp_digits[:8] if len(exp_digits) >= 8 else exp_digits.ljust(8, "0")[:8]
     sym = re.split(r"\s+", sym_seg.strip())[0].upper()[:6]
-    occ = _occ_local_symbol(sym, exp8, strike_f, r)
+    occ = osi_local_symbol(sym, exp8, strike_f, r)
     tails = list(
         dict.fromkeys(
             [
@@ -636,9 +623,9 @@ def _contract_key_variants_position_vs_executions(contract_key: str) -> List[str
             ]
         )
     )
-    keys: List[str] = [ck, f"{occ}|OPT|{exp8}|{strike_raw.strip()}|{r}"]
+    keys: List[str] = [ck, opt_key(occ, exp8, strike_raw.strip(), r)]
     for t in tails:
-        keys.append(f"{occ}|OPT|{exp8}|{t}|{r}")
+        keys.append(opt_key(occ, exp8, t, r))
     return list(dict.fromkeys(keys))
 
 
