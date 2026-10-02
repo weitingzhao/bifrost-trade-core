@@ -477,6 +477,35 @@ def cancel_plan(status_config: Optional[dict], strategy_plan_id: int) -> bool:
         _close(conn)
 
 
+def delete_plan(status_config: Optional[dict], strategy_plan_id: int) -> bool:
+    """Remove a draft. Only a draft goes: an intent, a fill or a cancellation is
+    a record, so those are refused with the state that says no. The UI deletes
+    without asking and offers Undo by holding the call until its toast closes
+    (design Rev .138), so this is the last step, not a soft one."""
+    conn = _conn_from_config(status_config)
+    if conn is None:
+        return False
+    try:
+        current = _locked_status(conn, strategy_plan_id)
+        if current is None:
+            return False
+        if current != "draft":
+            raise PlanRuleError(f"This plan is {current}; only a draft can be deleted.")
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM strategy_plan WHERE strategy_plan_id = %s", (strategy_plan_id,))
+        conn.commit()
+        return True
+    except PlanRuleError:
+        _rollback(conn)
+        raise
+    except Exception as e:
+        logger.warning("delete_plan failed: %s", e)
+        _rollback(conn)
+        raise
+    finally:
+        _close(conn)
+
+
 _REQUIRED_ON_CREATE = ("account_id", "symbol", "structure_label", "qty")
 
 

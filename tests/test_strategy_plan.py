@@ -356,3 +356,26 @@ def test_a_plan_is_never_an_order() -> None:
     source = inspect.getsource(strategy_plan)
     for forbidden in ("order_intent", "place_order", "ib:operator"):
         assert forbidden not in source, forbidden
+
+
+# ── delete (Rev .138: the UI holds the call until its Undo toast closes) ──
+
+def test_only_a_draft_can_be_deleted(conn) -> None:
+    for status in ("intended", "filled", "cancelled"):
+        fake = conn([(status,)])
+        with pytest.raises(PlanRuleError, match="only a draft can be deleted"):
+            strategy_plan.delete_plan(CFG, 1)
+        assert fake.commits == 0
+        assert not any(sql.startswith("DELETE") for sql, _ in fake.cur.executed)
+
+
+def test_a_draft_is_deleted(conn) -> None:
+    fake = conn([("draft",)])
+    assert strategy_plan.delete_plan(CFG, 7) is True
+    assert fake.commits == 1
+    assert fake.cur.executed[-1] == ("DELETE FROM strategy_plan WHERE strategy_plan_id = %s", (7,))
+
+
+def test_deleting_a_missing_plan_is_not_a_rule_error(conn) -> None:
+    conn([])
+    assert strategy_plan.delete_plan(CFG, 404) is False
