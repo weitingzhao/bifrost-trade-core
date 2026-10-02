@@ -1,7 +1,7 @@
 """Settings: IB config. Conn-based and status_config-based APIs."""
 
 import logging
-from typing import Any, Dict, Optional
+from typing import Iterable, Any, Dict, Optional
 
 import psycopg2
 from psycopg2.extras import RealDictCursor
@@ -129,13 +129,36 @@ def write_ib_config(
         return False
 
 
+_ACTIVE_COLUMNS = (
+    "active_strategy_structure_id",
+    "active_gate_safety_strategy_id",
+    "active_strategy_allocation_id",
+)
+
+
 def write_active_strategy_and_gates(
     status_config: dict,
     active_strategy_structure_id: Optional[int] = None,
     active_gate_safety_strategy_id: Optional[int] = None,
     active_strategy_allocation_id: Optional[int] = None,
+    *,
+    only: Optional[Iterable[str]] = None,
 ) -> bool:
-    """Update settings (id=1): active_strategy_structure_id, active_gate_safety_strategy_id, active_strategy_allocation_id. Returns True on success."""
+    """Update settings (id=1): the three ids the daemon loads on its next start.
+
+    ``only`` names the columns to write; the others keep their value. Without it all
+    three are written, None clearing a column. The API passes the body's set fields,
+    so a caller sending only the allocation no longer clears the structure and gate
+    the daemon would load (debt TD-38). Returns True on success.
+    """
+    values = {
+        "active_strategy_structure_id": active_strategy_structure_id,
+        "active_gate_safety_strategy_id": active_gate_safety_strategy_id,
+        "active_strategy_allocation_id": active_strategy_allocation_id,
+    }
+    columns = list(_ACTIVE_COLUMNS) if only is None else [c for c in _ACTIVE_COLUMNS if c in set(only)]
+    if not columns:
+        return True
     if not status_config or (status_config.get("sink") != "postgres" and not status_config.get("postgres")):
         return False
     try:
@@ -143,28 +166,16 @@ def write_active_strategy_and_gates(
         conn = psycopg2.connect(**params)
         try:
             with conn.cursor() as cur:
-                validate_settings_active_refs(
-                    cur,
-                    {
-                        "active_strategy_structure_id": active_strategy_structure_id,
-                        "active_gate_safety_strategy_id": active_gate_safety_strategy_id,
-                        "active_strategy_allocation_id": active_strategy_allocation_id,
-                    },
-                )
+                validate_settings_active_refs(cur, {c: values[c] for c in columns})
+                assignments = ", ".join(f"{c} = %s" for c in columns)
                 cur.execute(
-                    """
-                    UPDATE settings SET
-                        active_strategy_structure_id = %s,
-                        active_gate_safety_strategy_id = %s,
-                        active_strategy_allocation_id = %s
-                    WHERE id = 1
-                    """,
-                    (active_strategy_structure_id, active_gate_safety_strategy_id, active_strategy_allocation_id),
+                    f"UPDATE settings SET {assignments} WHERE id = 1",
+                    tuple(values[c] for c in columns),
                 )
             conn.commit()
             logger.info(
-                "write_active_strategy_and_gates: active_strategy_structure_id=%s active_gate_safety_strategy_id=%s active_strategy_allocation_id=%s",
-                active_strategy_structure_id, active_gate_safety_strategy_id, active_strategy_allocation_id,
+                "write_active_strategy_and_gates: %s",
+                ", ".join(f"{c}={values[c]}" for c in columns),
             )
             return True
         finally:
