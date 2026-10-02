@@ -2,7 +2,7 @@
 
 Reads: ``ReadFailed`` (TD-08). Writes (TD-15): a writer either returns what it
 wrote or raises one of the four ``Write*`` outcomes below, so the API can answer
-404 / 409 / 422 / 503 with the writer's own reason instead of guessing from a
+404 / 409 / 400 / 503 with the writer's own reason instead of guessing from a
 ``False``. Every outcome carries ``reason``, a sentence the UI can show as it is.
 
     WriteError                    base; ``reason``
@@ -10,7 +10,7 @@ wrote or raises one of the four ``Write*`` outcomes below, so the API can answer
     ├── WriteConflict             in use, or the row's state says no      -> 409
     │   ├── RuleInUseError        (strategy_rules_delete)
     │   └── PlanRuleError         (strategy_plan)
-    ├── WriteInvalid              the input is wrong                      -> 422
+    ├── WriteInvalid              the input is wrong                      -> 400
     └── WriteFailed               database not configured / unreachable /
                                   the statement failed                    -> 503 / 500
                                   (``unavailable`` True = the first two)
