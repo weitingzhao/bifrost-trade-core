@@ -70,7 +70,7 @@ def open_conn(status_config: Dict[str, Any], *, golden: bool = False) -> Any:
     The per-env database, or with ``golden=True`` the Golden Source. Every reader and
     writer that opens its own connection from a status config goes through here, so a
     host that does not answer fails after ``_CONNECT_TIMEOUT_S`` instead of hanging
-    (TD-46, 0.33.1). The caller owns the connection: commit / rollback / close as before.
+    (TD-46, 0.33.2). The caller owns the connection: commit / rollback / close as before.
     """
     params = (_get_golden_source_conn_params if golden else _get_conn_params)(status_config)
     return connect({**params, "connect_timeout": _CONNECT_TIMEOUT_S}, golden=golden)

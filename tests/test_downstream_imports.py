@@ -358,6 +358,12 @@ _NAMES: dict[str, tuple[str, ...]] = {
 
 @pytest.mark.parametrize("module", sorted(_NAMES))
 def test_downstream_names_resolve(module: str) -> None:
+    try:
+        importlib.import_module(module)
+    except ModuleNotFoundError as exc:
+        if not (exc.name or "").startswith("bifrost_core"):
+            pytest.skip(f"{module} needs {exc.name}, which core does not declare")
+        raise
     missing = []
     for name in _NAMES[module]:
         try:
@@ -383,6 +389,12 @@ for module, names in json.loads(sys.argv[1]):
         del sys.modules[key]
     try:
         exec(f"from {module} import {', '.join(names)}", {})
+    except ModuleNotFoundError as exc:
+        # Third-party packages core does not declare (fastapi for the api's
+        # observability.prometheus) are the downstream's own dependency.
+        if not (exc.name or "").startswith("bifrost_core"):
+            continue
+        failed.append(f"{module}: {exc!r}")
     except Exception as exc:
         failed.append(f"{module}: {exc!r}")
 print("\\n".join(failed))

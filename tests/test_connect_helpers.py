@@ -1,6 +1,6 @@
 """TD-46: one connect helper for every reader / writer that opens its own connection.
 
-Before 0.33.1 nine modules carried their own `_conn_from_config`, and accounts.py,
+Before 0.33.2 nine modules carried their own `_conn_from_config`, and accounts.py,
 market.py, settings.py and option_stock_link.py called psycopg2.connect inline. The
 per-env connects set no connect_timeout, so a host that did not answer hung the
 caller. They now all go through `write_support.open_conn` (connect_timeout=10s, the
