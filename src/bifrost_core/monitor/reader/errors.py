@@ -13,6 +13,7 @@ wrote or raises one of the four ``Write*`` outcomes below, so the API can answer
     ├── WriteInvalid              the input is wrong                      -> 422
     └── WriteFailed               database not configured / unreachable /
                                   the statement failed                    -> 503 / 500
+                                  (``unavailable`` True = the first two)
 
 ``WriteNotFound`` is also a ``LookupError``, ``WriteInvalid`` a ``ValueError``
 and ``WriteFailed`` a ``RuntimeError``, so a broad ``except`` that predates them
@@ -66,9 +67,18 @@ class WriteInvalid(WriteError, ValueError):
 
 
 class WriteFailed(WriteError, RuntimeError):
-    """The database could not be written: not configured, unreachable, or the statement failed."""
+    """The database could not be written: not configured, unreachable, or the statement failed.
+
+    ``unavailable`` is True when the database was not configured or could not be
+    reached (nothing was tried: the API answers 503), False when a statement or
+    read-back failed (500).
+    """
 
     default_reason = "The database write failed."
+
+    def __init__(self, reason: Optional[str] = None, *, unavailable: bool = False) -> None:
+        super().__init__(reason)
+        self.unavailable = bool(unavailable)
 
 
 __all__ = [

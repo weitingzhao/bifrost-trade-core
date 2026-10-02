@@ -73,19 +73,19 @@ def write_connection(conn_or_config: Any, what: str, *, golden: bool = False) ->
     else is a live connection the caller owns and keeps open.
     """
     if conn_or_config is None:
-        raise WriteFailed(f"Cannot write {what}: Postgres is not configured.")
+        raise WriteFailed(f"Cannot write {what}: Postgres is not configured.", unavailable=True)
     if not isinstance(conn_or_config, dict):
         yield conn_or_config
         return
     if not is_postgres_config(conn_or_config):
-        raise WriteFailed(f"Cannot write {what}: Postgres is not configured.")
+        raise WriteFailed(f"Cannot write {what}: Postgres is not configured.", unavailable=True)
     store = "the Golden Source" if golden else "the database"
     try:
         params = (_get_golden_source_conn_params if golden else _get_conn_params)(conn_or_config)
         conn = connect({**params, "connect_timeout": _CONNECT_TIMEOUT_S}, golden=golden)
     except Exception as e:
         logger.warning("write %s: connect to %s failed: %s", what, store, e)
-        raise WriteFailed(f"Cannot write {what}: {store} is unreachable.") from e
+        raise WriteFailed(f"Cannot write {what}: {store} is unreachable.", unavailable=True) from e
     try:
         yield conn
     finally:

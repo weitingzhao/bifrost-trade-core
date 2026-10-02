@@ -116,12 +116,14 @@ def test_list_value_refuses_null() -> None:
 
 
 def test_write_connection_without_postgres_is_write_failed() -> None:
-    with pytest.raises(WriteFailed, match="not configured"):
+    with pytest.raises(WriteFailed, match="not configured") as e1:
         with ws.write_connection(None, "thing"):
             pass
-    with pytest.raises(WriteFailed, match="not configured"):
+    assert e1.value.unavailable is True
+    with pytest.raises(WriteFailed, match="not configured") as e2:
         with ws.write_connection({"sink": "redis"}, "thing"):
             pass
+    assert e2.value.unavailable is True
 
 
 def test_write_connection_unreachable_is_write_failed(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -129,12 +131,19 @@ def test_write_connection_unreachable_is_write_failed(monkeypatch: pytest.Monkey
         raise psycopg2.OperationalError("connection refused")
 
     monkeypatch.setattr(ws, "connect", refuse)
-    with pytest.raises(WriteFailed, match="unreachable"):
+    with pytest.raises(WriteFailed, match="unreachable") as e1:
         with ws.write_connection({"sink": "postgres"}, "thing"):
             pass
-    with pytest.raises(WriteFailed, match="Golden Source is unreachable"):
+    assert e1.value.unavailable is True
+    with pytest.raises(WriteFailed, match="Golden Source is unreachable") as e2:
         with ws.write_connection({"sink": "postgres"}, "thing", golden=True):
             pass
+    assert e2.value.unavailable is True
+
+
+def test_a_failed_statement_is_not_unavailable() -> None:
+    assert WriteFailed("x").unavailable is False
+    assert ws.as_write_error(RuntimeError("boom"), "thing").unavailable is False
 
 
 def test_write_connection_closes_what_it_opened_and_leaves_a_live_one_open(monkeypatch: pytest.MonkeyPatch) -> None:
