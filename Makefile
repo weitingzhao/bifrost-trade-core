@@ -1,4 +1,4 @@
-.PHONY: install install-dev test test-all lint clean db-init db-init-brokerage seed-call-spread-templates
+.PHONY: install install-dev test test-all test-db lint clean db-init db-init-brokerage seed-call-spread-templates
 
 install:
 	pip install -e .
@@ -11,6 +11,11 @@ test:
 
 test-all:
 	pytest
+
+# db-marked tests against a throwaway postgres:16-alpine container (needs docker; removed on exit).
+# PYTEST_ARGS='-k ...' narrows the run; TEST_DB_IMAGE=postgres:17 picks another image.
+test-db:
+	bash scripts/test_db.sh
 
 test-ib:
 	pytest -m ib

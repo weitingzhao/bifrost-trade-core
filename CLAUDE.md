@@ -43,6 +43,7 @@ parity-ids: core-versioning-v3
 make install-dev    # pip install -e ".[dev]"
 make test           # pytest，跳过 ib/db 依赖测试
 make test-all       # 所有测试（需要 IB 和 PostgreSQL）
+make test-db        # db 标记的测试，跑在一次性 postgres:16-alpine 容器里（需要 docker；结束即删）
 make lint           # ruff check
 make db-init        # 初始化/刷新 PostgreSQL schema
 ```
@@ -114,4 +115,8 @@ make db-init        # 初始化/刷新 PostgreSQL schema
 
 - `@pytest.mark.ib` — 需要 IB 实时连接
 - `@pytest.mark.db` — 需要 PostgreSQL 连接
-- 默认 CI 跑：`pytest -m 'not ib and not db'`
+- 默认 CI 跑：`pytest -m 'not ib and not db'`（infra Tekton `pipeline-ci-python.yaml`；本 repo 没有自己的 CI）
+- db 测试本地跑：`make test-db`（`scripts/test_db.sh`）起一个只听 127.0.0.1 随机端口的一次性容器，
+  设 `PGHOST/PGPORT/PGUSER/PGDATABASE` 后跑 `pytest -m db`，退出（含失败、Ctrl-C）即删容器。
+  每个测试在 `pg_conn` 的事务里跑、结束回滚；只有 `_ensure_tables` 提交进这个一次性库。
+  `PYTEST_ARGS='-k …'` 缩小范围，`TEST_DB_IMAGE=postgres:17` 换镜像。不要指向共享库。
