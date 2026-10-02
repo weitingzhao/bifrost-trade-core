@@ -11,6 +11,7 @@ from psycopg2.extras import RealDictCursor
 
 from bifrost_core.portfolio.contract_key import opt_key, osi_local_symbol
 from bifrost_core.portfolio.quote_freshness import fresh_quote_sql
+from bifrost_core.portfolio.signed_qty import signed_qty_sql
 
 from bifrost_core.portfolio.units import option_cost_per_share, position_value
 from bifrost_core.persistence.postgres.brokerage_tables import (
@@ -107,18 +108,11 @@ _EXEC_EPOCH = "extract(epoch from exec_time)"
 _CREATED_AT_E = "extract(epoch from e.created_at) AS created_at"
 _CREATED_AT = "extract(epoch from created_at) AS created_at"
 
-# Normalize quantity so Sell = negative across sources. tws_client already stores Sell as negative;
-# other sources (e.g. flex) store positive for Sell → negate in query for consistent display/aggregation.
-_QTY_NORM_E = (
-    "CASE WHEN lower(trim(COALESCE(e.source, ''))) = 'tws_client' THEN e.quantity "
-    "WHEN upper(trim(COALESCE(e.side, ''))) IN ('SELL', 'SLD', 'S') THEN -e.quantity "
-    "ELSE e.quantity END AS quantity"
-)
-_QTY_NORM = (
-    "CASE WHEN lower(trim(COALESCE(source, ''))) = 'tws_client' THEN quantity "
-    "WHEN upper(trim(COALESCE(side, ''))) IN ('SELL', 'SLD', 'S') THEN -quantity "
-    "ELSE quantity END AS quantity"
-)
+# Signed quantity (TD-30, core 0.35.0): SELL / SLD / S -> -|q|, anything else -> +|q|, whatever the
+# source or the stored sign (portfolio.signed_qty). Before 0.35.0 this negated the stored value for
+# non-tws_client rows, and Flex / journal store a sell negative, so their sells read back positive.
+_QTY_NORM_E = f"{signed_qty_sql('e')} AS quantity"
+_QTY_NORM = f"{signed_qty_sql(None)} AS quantity"
 
 # Normalize commission so "cost" convention is consistent. tws_client stores commission as cost (positive);
 # other sources (e.g. flex) may use opposite sign → negate in query when not tws_client.
@@ -337,8 +331,8 @@ def _add_realized_splits_to_opp_and_inst(
 def _qty_expr_e_for_scope(source_scope: Optional[str]) -> str:
     """Quantity column for get_executions FROM clause alias `e`.
 
-    executions_raw_tws stores quantity as unsigned (positive); direction is in `side`.
-    Do not apply Flex-style Sell→negative normalization for source_scope=tws_raw.
+    source_scope=tws_raw shows the stored TWS value as received (unsigned; direction is in
+    `side`), so it is not signed. Every other scope uses the one signed rule (TD-30).
     """
     if (source_scope or "").strip().lower() == "tws_raw":
         return "e.quantity AS quantity"
@@ -1632,18 +1626,9 @@ _POS_EXEC_JOIN_PE = """(
   )
 )"""
 
-# Per-row signed qty for account_executions_final (flex/journal; same convention as net aggregation elsewhere).
-_SIGNED_QTY_FINAL_ROW_E = (
-    "CASE WHEN lower(trim(COALESCE(e.source, ''))) = 'tws_client' THEN e.quantity "
-    "WHEN upper(trim(COALESCE(e.side, ''))) IN ('SELL', 'SLD', 'S') THEN -abs(e.quantity) "
-    "ELSE abs(e.quantity) END"
-)
-
-# executions_raw_tws: quantity stored unsigned; sign from side only.
-_SIGNED_QTY_TWS_RAW_ROW_E = (
-    "CASE WHEN upper(trim(COALESCE(e.side, ''))) IN ('SELL', 'SLD', 'S') THEN -abs(e.quantity) "
-    "ELSE abs(e.quantity) END"
-)
+# Per-row signed qty for the attribution sum: the one rule (TD-30). The final book
+# (Flex + journal) used it already; the raw TWS rows used it too (stored unsigned).
+_SIGNED_QTY_ROW_E = signed_qty_sql("e")
 
 
 def get_position_instance_attribution(
@@ -1694,7 +1679,7 @@ def get_position_instance_attribution(
             SELECT p.account_id, p.contract_key AS pos_contract_key,
                    e.strategy_instance_id,
                    COALESCE(e.strategy_opportunity_id, si2.strategy_opportunity_id) AS strategy_opportunity_id,
-                   {_SIGNED_QTY_FINAL_ROW_E} AS signed_qty
+                   {_SIGNED_QTY_ROW_E} AS signed_qty
             FROM pos p
             INNER JOIN {_EXEC_FINAL_TABLE} e ON p.account_id = e.account_id AND {_POS_EXEC_JOIN_PE}
             INNER JOIN pos_has_final hf ON hf.account_id = p.account_id AND hf.contract_key = p.contract_key
@@ -1719,7 +1704,7 @@ def get_position_instance_attribution(
             SELECT p.account_id, p.contract_key AS pos_contract_key,
                    e.strategy_instance_id,
                    COALESCE(e.strategy_opportunity_id, si2.strategy_opportunity_id) AS strategy_opportunity_id,
-                   {_SIGNED_QTY_TWS_RAW_ROW_E} AS signed_qty
+                   {_SIGNED_QTY_ROW_E} AS signed_qty
             FROM pos p
             INNER JOIN {EXECUTIONS_RAW_TWS} e ON p.account_id = e.account_id AND {_POS_EXEC_JOIN_PE}
             LEFT JOIN strategy_instance si2 ON e.strategy_instance_id = si2.strategy_instance_id

@@ -11,33 +11,21 @@ from typing import Any, Dict, List, Optional, Tuple
 from psycopg2.extras import RealDictCursor
 
 from bifrost_core.persistence.postgres.brokerage_tables import EXECUTIONS_FINAL, OPTION_STOCK_LINK
+from bifrost_core.portfolio.signed_qty import signed_qty, signed_qty_sql
 
 logger = logging.getLogger(__name__)
 
 _EXEC_FINAL = EXECUTIONS_FINAL
 _LINK_TABLE = OPTION_STOCK_LINK
 
-# Match portfolio reader executions._QTY_NORM_E (alias e) for consistent signed qty.
-_QTY_NORM_E = (
-    "CASE WHEN lower(trim(COALESCE(e.source, ''))) = 'tws_client' THEN e.quantity "
-    "WHEN upper(trim(COALESCE(e.side, ''))) IN ('SELL', 'SLD', 'S') THEN -e.quantity "
-    "ELSE e.quantity END"
-)
+# Signed stock quantity on the link rows (TD-30): the one rule in portfolio.signed_qty.
+_QTY_NORM_E = signed_qty_sql("e")
 
 
 def _normalized_signed_qty(source: Any, side: Any, quantity: Any) -> float:
-    """Python mirror of flex/journal quantity normalization (non-tws_client: Sell → negative)."""
-    try:
-        q = float(quantity)
-    except (TypeError, ValueError):
-        return 0.0
-    src = (str(source or "")).strip().lower()
-    sd = (str(side or "")).strip().upper()
-    if src == "tws_client":
-        return q
-    if sd in ("SELL", "SLD", "S"):
-        return -abs(q)
-    return q
+    """portfolio.signed_qty, with 0.0 for a missing quantity (callers sum it)."""
+    q = signed_qty(source, side, quantity)
+    return 0.0 if q is None else q
 
 
 def underlying_symbol_from_row(row: Dict[str, Any]) -> str:
@@ -52,7 +40,10 @@ def underlying_symbol_from_row(row: Dict[str, Any]) -> str:
 
 
 def slippage_amount_vs_close(signed_qty: float, price: Any, close_price: Any) -> Optional[float]:
-    """Cash slippage vs reference close: signed_qty * (price - close_price). None if inputs missing."""
+    """Cash slippage vs reference close: signed_qty * (price - close_price). None if inputs missing.
+
+    The link readers pass ``abs(quantity)`` (see ``_slippage_qty``), not the signed value.
+    """
     if price is None:
         return None
     try:
@@ -67,6 +58,23 @@ def slippage_amount_vs_close(signed_qty: float, price: Any, close_price: Any) ->
     if signed_qty != signed_qty:  # NaN
         return None
     return float(signed_qty) * (p - cp)
+
+
+def _slippage_qty(quantity: Any) -> float:
+    """The quantity slippage is computed on: its magnitude, whatever the side.
+
+    Until core 0.35.0 the link rows' quantity came from a rule that turned every stored
+    Flex / journal value positive (sells are stored negative), so ``slippage_vs_close``
+    was ``|q| x (price - close)`` for buys and sells alike, and Instance net P&L adds it.
+    TD-30 signs the quantity column; the amount stays as it was (Owner: money does not
+    move with the sign fix). Whether a sell's slippage should change sign is a separate
+    question for the Owner, not decided here.
+    """
+    try:
+        q = float(quantity) if quantity is not None else 0.0
+    except (TypeError, ValueError):
+        return 0.0
+    return abs(q)
 
 
 def _connect(status_config: dict):
@@ -348,12 +356,9 @@ def get_option_stock_links(
     any_slip = False
     for r in rows:
         d = dict(r)
-        sq = d.get("stock_quantity")
-        try:
-            sqf = float(sq) if sq is not None else 0.0
-        except (TypeError, ValueError):
-            sqf = 0.0
-        slip = slippage_amount_vs_close(sqf, d.get("stock_price"), d.get("stock_close_price"))
+        slip = slippage_amount_vs_close(
+            _slippage_qty(d.get("stock_quantity")), d.get("stock_price"), d.get("stock_close_price")
+        )
         if slip is not None:
             any_slip = True
             total += slip
@@ -434,12 +439,9 @@ def get_option_stock_links_bulk(
                 oid_i = int(oid)
             except (TypeError, ValueError):
                 continue
-            sq = d.get("stock_quantity")
-            try:
-                sqf = float(sq) if sq is not None else 0.0
-            except (TypeError, ValueError):
-                sqf = 0.0
-            slip = slippage_amount_vs_close(sqf, d.get("stock_price"), d.get("stock_close_price"))
+            slip = slippage_amount_vs_close(
+                _slippage_qty(d.get("stock_quantity")), d.get("stock_price"), d.get("stock_close_price")
+            )
             d["slippage_vs_close"] = slip
             by_oid[oid_i].append(d)
 
@@ -559,12 +561,7 @@ def get_stock_link_candidates(
                 d["time"] = float(t)
             except (TypeError, ValueError):
                 pass
-        sq = d.get("quantity")
-        try:
-            sqf = float(sq) if sq is not None else 0.0
-        except (TypeError, ValueError):
-            sqf = 0.0
-        slip = slippage_amount_vs_close(sqf, d.get("price"), d.get("close_price"))
+        slip = slippage_amount_vs_close(_slippage_qty(d.get("quantity")), d.get("price"), d.get("close_price"))
         d["slippage_vs_close"] = slip
         execs.append(d)
 

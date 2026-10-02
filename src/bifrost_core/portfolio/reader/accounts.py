@@ -34,6 +34,7 @@ from bifrost_core.monitor.reader import market as market_module
 from bifrost_core.monitor.reader import write_support as ws
 from bifrost_core.monitor.reader.errors import WriteConflict, WriteFailed, WriteInvalid, WriteNotFound
 from bifrost_core.portfolio.contract_key import TWS_SOURCES, tws_execution_opt_key
+from bifrost_core.portfolio.signed_qty import signed_qty
 from bifrost_core.portfolio.reader.accounts_helpers import (
     _exec_time_to_dt,
     _has_meaningful_commission,
@@ -49,18 +50,11 @@ _EXEC_READ_TABLE = EXECUTIONS
 
 
 def _normalized_signed_qty_from_raw(source: Any, side: Any, quantity: Any) -> float:
-    """Match servers/reader/executions _QTY_NORM for flex/journal (not tws_raw scope)."""
-    try:
-        q = float(quantity)
-    except (TypeError, ValueError):
-        return 0.0
-    src = (str(source or "")).strip().lower()
-    sd = (str(side or "")).strip().upper()
-    if src == "tws_client":
-        return q
-    if sd in ("SELL", "SLD", "S"):
-        return -abs(q)
-    return q
+    """The execution quantity split allocations must sum to: portfolio.signed_qty (TD-30),
+    0.0 when the row has none. A sell's splits sum to a negative number, which is what the
+    execution form sends; TWS sells (stored positive) used to expect a positive sum."""
+    q = signed_qty(source, side, quantity)
+    return 0.0 if q is None else q
 
 
 def _apply_instance_allocations_on_cursor(
