@@ -82,7 +82,11 @@ The two `strategy_*` columns are the older of two attribution paths; the other i
 `account_execution_instance_allocation` (quantity splits). How they are written:
 
 - `POST /executions` (manual or journal row) inserts them on the new raw row; `PUT /executions/{id}` updates
-  them (`update_one_execution`).
+  them (`update_one_execution`). `patch_execution` (core 0.33.0) writes only the attribution -- these two ids or
+  the allocation splits, never both -- and refuses a direct id on a split execution unless the same patch clears
+  the splits.
+- `delete_instance_strict` (core 0.33.0) reads these columns on Golden Source before deleting an instance and
+  refuses while any raw row names it; with no FK, nothing else stops the delete.
 - `PATCH /executions/strategy-attribution` (`batch_update_execution_strategy`) sets them on a list of
   executions or on every raw row of one `contract_key`, through the per-env `brokerage.executions_raw_*`
   foreign tables. It refuses (returns -1) when any of those executions already has allocation rows.
