@@ -248,6 +248,7 @@ _NAMES: dict[str, tuple[str, ...]] = {
     "bifrost_core.monitor.self_check": (
         "derive_daemon_self_check",
         "derive_health_roll_up",
+        "is_daemon_alive",  # api 0.3.3 (TD-76)
     ),
     # trade-api
     "bifrost_core.monitor.services": (

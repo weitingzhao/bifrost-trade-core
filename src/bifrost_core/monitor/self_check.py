@@ -1,9 +1,46 @@
 """Derive self_check and lamps for GET /status: daemon (heartbeat + auto-trading row), then health roll-up."""
 
+import math
 from typing import Any, Dict, List, Optional
 
 # Default data lag threshold (ms) when not in config
 _DEFAULT_DATA_LAG_THRESHOLD_MS = 5000.0
+
+# Daemon liveness (TD-76, core 0.35.0). The daemon's heartbeat interval is configurable
+# (5-120 s, Redis ``heartbeat_interval_sec``; config default 10 s), so a fixed 35 s window
+# called a healthy daemon dead whenever the interval was set above ~35 s.
+DAEMON_ALIVE_FLOOR_SEC = 35.0
+DAEMON_ALIVE_INTERVALS = 3
+DEFAULT_HEARTBEAT_INTERVAL_SEC = 10.0
+HEARTBEAT_INTERVAL_MIN_SEC = 5.0
+HEARTBEAT_INTERVAL_MAX_SEC = 120.0
+
+
+def daemon_alive_threshold_sec(heartbeat_interval_sec: Any) -> float:
+    """Seconds a heartbeat may be old and the daemon still counts as alive:
+    ``max(35, 3 x interval)``. The interval is clamped to 5-120 s as the daemon clamps it;
+    missing or not a positive number -> 10 s (so 35 s, the old fixed value)."""
+    try:
+        interval = float(heartbeat_interval_sec)
+    except (TypeError, ValueError):
+        interval = DEFAULT_HEARTBEAT_INTERVAL_SEC
+    if not math.isfinite(interval) or interval <= 0:
+        interval = DEFAULT_HEARTBEAT_INTERVAL_SEC
+    interval = max(HEARTBEAT_INTERVAL_MIN_SEC, min(HEARTBEAT_INTERVAL_MAX_SEC, interval))
+    return max(DAEMON_ALIVE_FLOOR_SEC, DAEMON_ALIVE_INTERVALS * interval)
+
+
+def is_daemon_alive(last_ts: Any, heartbeat_interval_sec: Any, now_ts: float) -> bool:
+    """True when the last heartbeat (Unix seconds) is younger than ``daemon_alive_threshold_sec``."""
+    if last_ts is None:
+        return False
+    try:
+        age = float(now_ts) - float(last_ts)
+    except (TypeError, ValueError):
+        return False
+    if not math.isfinite(age):
+        return False
+    return age < daemon_alive_threshold_sec(heartbeat_interval_sec)
 
 
 def _auto_trading_self_check_from_row(
