@@ -8,12 +8,18 @@ same key positions, watchlist and category tags use (STK: `SYMBOL|STK|||`).
 
 An instrument with no row is read as a stock by the callers; nothing here
 infers a class from the Owner's category.
+
+``patch_instrument_class`` / ``delete_instrument_class_strict`` (core 0.33.0, TD-15)
+raise ``Write*``; ``set_instrument_class`` stays the upsert.
 """
 
 import logging
 from typing import Any, Dict, List, Optional, Tuple
 
 from psycopg2.extras import RealDictCursor
+
+from bifrost_core.monitor.reader import write_support as ws
+from bifrost_core.monitor.reader.errors import WriteInvalid, WriteNotFound
 
 logger = logging.getLogger(__name__)
 
@@ -101,3 +107,62 @@ def delete_instrument_class(conn: Any, contract_key: str) -> bool:
         except Exception:
             pass
         return False
+
+
+# --- TD-15 writers (core 0.33.0): return the row / raise Write* ---------------------
+
+INSTRUMENT_CLASS_PATCHABLE = ("instrument_class", "note")
+_CLASS_COLUMNS = "contract_key, instrument_class, note, created_at, updated_at"
+
+
+def _contract_key(contract_key: Any) -> str:
+    ck = str(contract_key or "").strip()
+    if not ck:
+        raise WriteInvalid("contract_key is required.")
+    return ck
+
+
+def patch_instrument_class(conn_or_config: Any, contract_key: str, fields: Dict[str, Any]) -> Dict[str, Any]:
+    """Change a registered instrument's class or note; return the row in ``list_instrument_classes``' shape.
+
+    Does not insert: an unregistered ``contract_key`` is WriteNotFound (``set_instrument_class``
+    registers). ``instrument_class`` NOT NULL, one of stock / fixed_income / cash_like
+    (spelling normalised as ``normalize_instrument_class`` does) · ``note`` nullable text
+    (null clears -- the upsert cannot). Raises WriteInvalid, WriteNotFound, WriteFailed.
+    """
+    ck = _contract_key(contract_key)
+    what = f"the instrument class of {ck}"
+    fields = ws.check_fields(fields, INSTRUMENT_CLASS_PATCHABLE, "instrument class")
+    columns: Dict[str, Any] = {}
+    if "instrument_class" in fields:
+        raw = ws.text(fields["instrument_class"], "instrument_class", nullable=False)
+        cls = normalize_instrument_class(raw)
+        if cls is None:
+            raise WriteInvalid(f"instrument_class must be one of {', '.join(INSTRUMENT_CLASSES)}.")
+        columns["instrument_class"] = cls
+    if "note" in fields:
+        columns["note"] = ws.text(fields["note"], "note", nullable=True)
+    assignments, values = ws.set_clause(columns)
+    with ws.write_connection(conn_or_config, what) as conn, ws.write_transaction(conn, what):
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                f"UPDATE preference_instrument_class SET {assignments} WHERE contract_key = %s RETURNING {_CLASS_COLUMNS}",
+                [*values, ck],
+            )
+            row = cur.fetchone()
+        if row is None:
+            raise WriteNotFound(f"{ck} has no instrument class registered.")
+    return dict(row)
+
+
+def delete_instrument_class_strict(conn_or_config: Any, contract_key: str) -> Dict[str, Any]:
+    """Drop the registration. Returns ``{"deleted": "hard", "contract_key"}``; WriteNotFound when
+    none was registered (``delete_instrument_class`` answered True), WriteFailed on a DB failure."""
+    ck = _contract_key(contract_key)
+    what = f"the instrument class of {ck}"
+    with ws.write_connection(conn_or_config, what) as conn, ws.write_transaction(conn, what):
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM preference_instrument_class WHERE contract_key = %s", (ck,))
+            if cur.rowcount == 0:
+                raise WriteNotFound(f"{ck} has no instrument class registered.")
+    return {"deleted": "hard", "contract_key": ck}

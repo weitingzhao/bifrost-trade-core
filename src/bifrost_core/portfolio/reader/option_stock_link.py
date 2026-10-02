@@ -274,6 +274,32 @@ def delete_option_stock_link(status_config: dict, link_id: int, account_id: str)
             pass
 
 
+def delete_option_stock_link_strict(conn_or_config: Any, link_id: int, account_id: str) -> Dict[str, Any]:
+    """``delete_option_stock_link`` with outcomes (core 0.33.0, TD-15), instead of a message the
+    API sorted by substring: ``{"deleted": "hard", "account_execution_option_stock_link_id"}``, or
+    WriteInvalid (no account_id / a non-numeric id), WriteNotFound (no such link on that
+    account), WriteFailed."""
+    # Imported here: importing the monitor.reader package at module level would close
+    # an import cycle (monitor.reader -> strategy_win_rate -> instance_exec_net_pnl -> here).
+    from bifrost_core.monitor.reader import write_support as ws
+    from bifrost_core.monitor.reader.errors import WriteInvalid, WriteNotFound
+
+    acc = (account_id or "").strip()
+    if not acc:
+        raise WriteInvalid("account_id is required.")
+    lid = ws.row_id(link_id, "link id", nullable=False)
+    what = f"option/stock link {lid}"
+    with ws.write_connection(conn_or_config, what) as conn, ws.write_transaction(conn, what):
+        with conn.cursor() as cur:
+            cur.execute(
+                f"DELETE FROM {_LINK_TABLE} WHERE account_execution_option_stock_link_id = %s AND account_id = %s",
+                (lid, acc),
+            )
+            if cur.rowcount == 0:
+                raise WriteNotFound(f"No option/stock link {lid} on account {acc}.")
+    return {"deleted": "hard", "account_execution_option_stock_link_id": lid}
+
+
 def get_option_stock_links(
     conn: Any,
     account_id: str,

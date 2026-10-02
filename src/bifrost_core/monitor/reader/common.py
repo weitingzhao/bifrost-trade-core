@@ -3,7 +3,7 @@
 import logging
 import threading
 from datetime import date
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import psycopg2
 
@@ -167,14 +167,29 @@ class StatusReader:
         strike: Optional[float] = None,
         option_right: Optional[str] = None,
         display_label: Optional[str] = None,
-        source: str = "manual",
+        source: Optional[str] = None,
         category_id: Optional[int] = None,
         optionable: Optional[bool] = None,
+        *,
+        clear: Iterable[str] = (),
     ) -> bool:
+        """Upsert by contract_key; on update a None keeps the stored value, ``clear`` names
+        columns to set NULL (core 0.33.0 -- see ``watchlist.add_watchlist``)."""
         if not self._connect():
             return False
         return watchlist_module.add_watchlist(
-            self._conn, contract_key, symbol, sec_type, expiry, strike, option_right, display_label, source, category_id, optionable
+            self._conn,
+            contract_key,
+            symbol,
+            sec_type,
+            expiry,
+            strike,
+            option_right,
+            display_label,
+            source,
+            category_id,
+            optionable,
+            clear=clear,
         )
 
     def delete_watchlist(self, contract_key: Optional[str] = None) -> bool:

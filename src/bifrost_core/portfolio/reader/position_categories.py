@@ -1,10 +1,17 @@
-"""Position categories CRUD: read and write preference_position_categories / preference_position_category_tags."""
+"""Position categories CRUD: read and write preference_position_categories / preference_position_category_tags.
+
+``patch_position_category`` and ``delete_position_category_strict`` (core 0.33.0,
+TD-15) check the row exists and raise ``Write*``; the older writers answer a bool
+(and ``True`` for a missing id) for one release."""
 
 import logging
 from typing import Any, Dict, List, Optional, Tuple
 
 import psycopg2
 from psycopg2.extras import RealDictCursor
+
+from bifrost_core.monitor.reader import write_support as ws
+from bifrost_core.monitor.reader.errors import WriteNotFound
 
 logger = logging.getLogger(__name__)
 
@@ -230,3 +237,61 @@ def set_market_streams_symbol_order(
         except Exception:
             pass
         return False
+
+
+# --- TD-15 writers (core 0.33.0): return the row / raise Write* ---------------------
+
+POSITION_CATEGORY_PATCHABLE = ("name", "description", "sort_order")
+_CATEGORY_COLUMNS = "id, name, description, sort_order, created_at, updated_at"
+
+
+def patch_position_category(conn_or_config: Any, category_id: int, fields: Dict[str, Any]) -> Dict[str, Any]:
+    """Change the fields the client sent; return the row in ``get_position_categories``' shape.
+
+    ``name`` NOT NULL text · ``description`` nullable text (null clears; blank is refused,
+    where ``update_position_category`` stored it as NULL) · ``sort_order`` nullable whole
+    number. Raises WriteInvalid, WriteNotFound, WriteFailed.
+    """
+    what = f"position category {category_id}"
+    fields = ws.check_fields(fields, POSITION_CATEGORY_PATCHABLE, "position category")
+    columns: Dict[str, Any] = {}
+    if "name" in fields:
+        columns["name"] = ws.text(fields["name"], "name", nullable=False)
+    if "description" in fields:
+        columns["description"] = ws.text(fields["description"], "description", nullable=True)
+    if "sort_order" in fields:
+        columns["sort_order"] = ws.integer(fields["sort_order"], "sort_order", nullable=True)
+    assignments, values = ws.set_clause(columns)
+    with ws.write_connection(conn_or_config, what) as conn, ws.write_transaction(conn, what):
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                f"UPDATE preference_position_categories SET {assignments} WHERE id = %s RETURNING {_CATEGORY_COLUMNS}",
+                [*values, category_id],
+            )
+            row = cur.fetchone()
+        if row is None:
+            raise WriteNotFound(f"No position category {category_id}.")
+    return dict(row)
+
+
+def delete_position_category_strict(conn_or_config: Any, category_id: int) -> Dict[str, Any]:
+    """Hard-delete a category. Returns ``{"deleted": "hard", "id", "tags_removed", "watchlist_uncategorized"}``.
+
+    Nothing refuses it: its position tags go with it (CASCADE) and watchlist rows in
+    it fall back to no category (SET NULL); the counts say how many. Raises
+    WriteNotFound, WriteFailed.
+    """
+    what = f"position category {category_id}"
+    with ws.write_connection(conn_or_config, what) as conn, ws.write_transaction(conn, what, on_fk="conflict"):
+        with conn.cursor() as cur:
+            cur.execute("SELECT 1 FROM preference_position_categories WHERE id = %s FOR UPDATE", (category_id,))
+            if cur.fetchone() is None:
+                raise WriteNotFound(f"No position category {category_id}.")
+            cur.execute("SELECT count(*) FROM preference_position_category_tags WHERE category_id = %s", (category_id,))
+            tags = int((cur.fetchone() or [0])[0] or 0)
+            cur.execute("SELECT count(*) FROM watchlist WHERE category_id = %s", (category_id,))
+            watched = int((cur.fetchone() or [0])[0] or 0)
+            cur.execute("DELETE FROM preference_position_categories WHERE id = %s", (category_id,))
+            if cur.rowcount == 0:
+                raise WriteNotFound(f"No position category {category_id}.")
+    return {"deleted": "hard", "id": category_id, "tags_removed": tags, "watchlist_uncategorized": watched}
