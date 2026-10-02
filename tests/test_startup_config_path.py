@@ -51,6 +51,7 @@ def test_resolve_explicit_path(project_root: Path) -> None:
 def test_config_profile_from_resolved_path() -> None:
     assert config_profile_from_resolved_path("/x/config/config.dev.yaml") == "dev"
     assert config_profile_from_resolved_path("/x/config/config.prod.yaml") == "prod"
+    assert config_profile_from_resolved_path("/x/config/config.stg.yaml") == "stg"
     assert config_profile_from_resolved_path("/x/config/config.yaml") is None
     assert config_profile_from_resolved_path("/custom/other.yaml") is None
 

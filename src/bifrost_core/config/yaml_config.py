@@ -8,6 +8,7 @@ import yaml
 
 from bifrost_core.core.dict_merge import deep_merge
 from bifrost_core.config.connection_policy import merge_ib_policy_into_effective_ib
+from bifrost_core.config.profile import profile_from_config_path
 
 IB_PORT_MAP = {"tws_live": 7496, "tws_paper": 7497, "gateway": 4002}
 
@@ -215,15 +216,11 @@ def resolve_startup_config_path(project_root: str, argv: List[str]) -> Tuple[str
 
 
 def config_profile_from_resolved_path(resolved_path: str) -> Optional[str]:
-    """Return ``dev`` or ``prod`` when the loaded file is ``config.dev.yaml`` / ``config.prod.yaml``.
+    """``dev`` / ``stg`` / ``prod`` when the loaded file is ``config.<env>.yaml``, else None.
 
-    Used for UI (e.g. browser tab title). Custom paths or ``config.yaml`` alone return ``None``."""
-    name = Path(resolved_path).name
-    if name == "config.dev.yaml":
-        return "dev"
-    if name == "config.prod.yaml":
-        return "prod"
-    return None
+    A file name is the weakest signal; ask ``config.profile.deployment_profile`` for the
+    environment a process serves (debt TD-52). Custom paths and ``config.yaml`` return None."""
+    return profile_from_config_path(resolved_path)
 
 
 def ops_api_console_stream_key(profile: Optional[str]) -> str:

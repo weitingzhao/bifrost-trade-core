@@ -12,10 +12,11 @@ all Socket Services now write directly to their ``bifrost:health:*`` hash.
 from __future__ import annotations
 
 import logging
-import os
 import socket
 import time
 from typing import Any, Optional
+
+from bifrost_core.config.profile import deployment_profile
 
 logger = logging.getLogger(__name__)
 
@@ -25,25 +26,13 @@ _BIFROST_OPS_CONTROL_UPDATED_AT_FIELD = "bifrost_ops_control_updated_at"
 
 
 def ops_profile_from_config(config: dict) -> Optional[str]:
-    """Return ``'dev'`` or ``'prod'`` for this service process.
+    """Return ``'dev'``, ``'stg'`` or ``'prod'`` for this service process.
 
-    Priority:
-    1. ``ops.control_profile`` key in the loaded YAML config.
-    2. ``BIFROST_OPS_CONTROL_PROFILE`` environment variable.
-    3. ``BIFROST_ENV`` environment variable (the variable that selects which
-       config file is loaded, so it is strongly correlated with the profile).
+    ``ops.control_profile``, then ``BIFROST_OPS_CONTROL_PROFILE``, then ``BIFROST_ENV``
+    (``config.profile.deployment_profile``). STG used to map to None here, so the STG
+    daemon could not restore a lost HOST field (debt TD-52).
     """
-    ops = config.get("ops") if isinstance(config.get("ops"), dict) else {}
-    raw = ops.get("control_profile") if isinstance(ops, dict) else None
-    if isinstance(raw, str):
-        s = raw.strip().lower()
-        if s in ("dev", "prod"):
-            return s
-    for env_key in ("BIFROST_OPS_CONTROL_PROFILE", "BIFROST_ENV"):
-        val = os.environ.get(env_key, "").strip().lower()
-        if val in ("dev", "prod"):
-            return val
-    return None
+    return deployment_profile(config)
 
 
 def _current_hostname() -> str:
