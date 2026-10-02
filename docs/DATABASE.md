@@ -170,6 +170,28 @@ table is created — create it before the frontend that reads them ships.
 
 Reads and writes: [`instrument_class.py`](../src/bifrost_core/portfolio/reader/instrument_class.py).
 
+## Preference: saved searches (core **0.28.0**)
+
+### `preference_saved_search`
+
+A page's filters kept under a name — the Finder's smart folders (trade design
+Rev .139, Owner-approved 2026-10-01). Plans' **Save as list** writes one; the
+sidebar lists them on every page and a click opens the page with that scope.
+Stored server-side so they follow the operator to another machine.
+
+| Column | Meaning |
+|--------|---------|
+| `preference_saved_search_id` | PK |
+| `owner` | `'operator'` today — Trade has no sign-in, so there is one operator (Owner 2026-10-01); the column a future sign-in keys on |
+| `route` | The app path the scope belongs to, e.g. `/trade/plans` |
+| `label` | The name in the sidebar (auto-named by the page, e.g. `AMD · all`) |
+| `state_json` | The page's own scope (status, accounts, symbol, tokens …); opaque to core |
+
+`UNIQUE (owner, route, label)`: saving a label again on the same page replaces
+its scope. Reads guard on `to_regclass`, so an api ahead of the DDL lists none.
+
+Reads and writes: [`saved_search.py`](../src/bifrost_core/monitor/reader/saved_search.py).
+
 ## §6 Schema changelog (Wave 1–13)
 
 | Wave | Core version | Change |
@@ -189,6 +211,7 @@ Reads and writes: [`instrument_class.py`](../src/bifrost_core/portfolio/reader/i
 | Wave 13 | 0.24.0 | `migrate_wave13_reconcile_legacy_schema()`: pre-split leftovers `IF NOT EXISTS` can't reach — `strategy_portfolio_*` sequence / PK / FK / index names → `strategy_allocation_*`; `market_streams_symbol_order_pkey` → `preference_market_streams_symbol_order_pkey`; add FK `strategy_allocation_opportunity.strategy_opportunity_id` → `strategy_opportunity` ON DELETE CASCADE (left NOT VALID with a warning if orphans exist); `settings.flex_*_range_days` SET NOT NULL; DROP `settings.ib_primary_account_id` / `stream_primary_account_id`; DROP redundant `watchlist_contract_key`. Each step checks first and is a no-op on a converged DB |
 | — | 0.26.0 | Add `trade_review` (one review record per strategy instance: tags added / dropped, `reviewed_at`) |
 | — | 0.27.0 | Add `preference_instrument_class` (stock / fixed_income / cash_like per `contract_key`); the positions read LEFT JOINs it where the table exists (unclassified otherwise) |
+| — | 0.28.0 | Add `preference_saved_search` (a page's scope under a name, one operator); no DDL for the new deletes — `delete_plan` (drafts) and `strategy_rules_delete` (opportunity · allocation · gate set, refused while in use) |
 
 
 ## Brokerage tables

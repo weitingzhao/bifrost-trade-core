@@ -353,6 +353,24 @@ def _ensure_tables(conn, log=None, log_table=None) -> None:
             )
             """
         )
+        _log_table(
+            "preference_saved_search",
+            "Saved searches: a page's filters under a name, listed in the sidebar (preference)",
+        )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS preference_saved_search (
+                preference_saved_search_id bigserial PRIMARY KEY,
+                owner      text        NOT NULL DEFAULT 'operator',
+                route      text        NOT NULL,
+                label      text        NOT NULL,
+                state_json jsonb       NOT NULL DEFAULT '{}'::jsonb,
+                created_at timestamptz NOT NULL DEFAULT now(),
+                updated_at timestamptz NOT NULL DEFAULT now(),
+                UNIQUE (owner, route, label)
+            )
+            """
+        )
         _log("preference_market_streams_symbol_order")
         _log_table(
             "preference_market_streams_symbol_order",
