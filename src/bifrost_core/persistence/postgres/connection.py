@@ -143,9 +143,3 @@ def _get_golden_source_conn_params(config: dict) -> dict:
         ),
     }
 
-
-def connect_golden_source(config: dict, *, connect_timeout: int = 10):
-    """Open a psycopg2 connection to bifrost_golden_source."""
-    params = _get_golden_source_conn_params(config)
-    params = {**params, "connect_timeout": connect_timeout}
-    return psycopg2.connect(**params)

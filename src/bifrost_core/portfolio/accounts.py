@@ -13,11 +13,6 @@ async def refresh_accounts_data(app: Any) -> None:
     await refresh_accounts_from_redis_edge(app)
 
 
-async def refresh_secondary_accounts_and_sync(_app: Any) -> None:
-    """No-op: secondary accounts are included in IB Account Agent snapshot when configured."""
-    return
-
-
 async def refresh_executions_only(app: Any) -> None:
     """R-A2: refresh snapshot from Redis (includes last_execution_rows)."""
     from bifrost_core.portfolio.ib_edge import refresh_accounts_from_redis_edge

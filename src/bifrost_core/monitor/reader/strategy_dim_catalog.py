@@ -126,10 +126,3 @@ def validate_dim_fields(payload: Dict[str, Any]) -> None:
         if not is_valid_dim_code(dim_type, c):
             raise ValueError(f"Invalid {dim_type} code: {c}")
 
-
-def get_dim_by_id(strategy_dim_id: int) -> Dict[str, Any] | None:
-    for items in _DIM_BY_TYPE.values():
-        for item in items:
-            if item["strategy_dim_id"] == strategy_dim_id:
-                return dict(item)
-    return None

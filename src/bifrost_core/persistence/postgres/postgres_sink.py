@@ -4,7 +4,6 @@ import logging
 import math
 import os
 import time
-from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 import psycopg2
@@ -32,7 +31,6 @@ from bifrost_core.persistence.postgres.brokerage_tables import (
     GOLDEN_CONTRACT_QUOTE_LIVE,
     GOLDEN_EXECUTIONS_RAW_TWS,
     GOLDEN_OPEN_ORDERS,
-    POSITIONS,
 )
 from bifrost_core.persistence import redis_daemon_state as rds
 
@@ -205,20 +203,6 @@ class PostgreSQLSink(StatusSink):
                 except Exception:
                     pass
             logger.warning("PostgreSQL write_snapshot (accounts) failed: %s", e, exc_info=True)
-
-    def sync_accounts_only(self, accounts_list: Optional[List[Dict[str, Any]]]) -> None:
-        """R-A1 / Secondary: write only the given accounts to brokerage.account + brokerage.positions.
-        Used by Secondary position callback to push listener_connector_2 data without full snapshot."""
-        if not accounts_list or not isinstance(accounts_list, list):
-            return
-        if not self._ensure_golden_conn():
-            return
-        try:
-            sync_accounts_snapshot_to_tables(self._golden_conn, accounts_list)
-            self._golden_conn.commit()
-        except Exception as e:
-            self._golden_conn.rollback()
-            logger.warning("PostgreSQL sync_accounts_only failed: %s", e, exc_info=True)
 
     def write_operation(self, record: Dict[str, Any]) -> None:
         """No-op: daemon_auto_operations retired (Wave 1)."""
@@ -685,59 +669,6 @@ class PostgreSQLSink(StatusSink):
             self._golden_conn.rollback()
             logger.warning("write_open_orders failed: %s", e, exc_info=True)
 
-    def write_ohlc_bars(self, rows: Any) -> None:
-        """Write stock OHLC bars via Plugin Market Data API (POST /stocks/bars/ingest).
-
-        Delegates to the same HTTP client used by monitor/reader/market.py.
-        StatusSink's PG connection is preserved for settings / brokerage writes; daemon IPC is Redis.
-        Failure logs a warning but does not crash the daemon.
-        """
-        if not rows:
-            return
-        from bifrost_core.monitor.market_write_client import post_bars_ingest
-
-        payload = []
-        for r in rows:
-            symbol = (r.get("symbol") or "").strip()
-            period = (r.get("period") or "1 D").strip()
-            bar_time = r.get("bar_time")
-            if bar_time is None or not symbol:
-                continue
-            if isinstance(bar_time, (int, float)):
-                bar_dt = datetime.fromtimestamp(float(bar_time), tz=timezone.utc)
-            else:
-                bar_dt = bar_time
-            if period.upper() == "1 D":
-                bar_date_str = r.get("bar_date")
-                if bar_date_str:
-                    bt_iso = str(bar_date_str)[:10]
-                elif isinstance(bar_dt, datetime):
-                    bt_iso = bar_dt.strftime("%Y-%m-%d")
-                else:
-                    bt_iso = str(bar_dt)
-            else:
-                bt_iso = bar_dt.isoformat() if isinstance(bar_dt, datetime) else str(bar_dt)
-            payload.append({
-                "symbol": symbol,
-                "period": period,
-                "bar_time": bt_iso,
-                "open": r.get("open"),
-                "high": r.get("high"),
-                "low": r.get("low"),
-                "close": r.get("close"),
-                "volume": r.get("volume"),
-            })
-        if not payload:
-            return
-        try:
-            resp = post_bars_ingest(payload)
-            logger.info(
-                "[R-A3] write_ohlc_bars: wrote %s rows via Plugin API",
-                resp.get("written", len(payload)),
-            )
-        except Exception as e:
-            logger.warning("write_ohlc_bars failed: %s", e, exc_info=True)
-
     # Control commands older than this are ignored (consumed but not executed).
     CONTROL_CMD_MAX_AGE_SEC = 60
 
@@ -820,19 +751,6 @@ class PostgreSQLSink(StatusSink):
             self._redis, {"subscribed_tickers": symbols or []}
         )
 
-    def get_last_ib_client_id(self) -> Optional[int]:
-        """Read ib_client_id from Redis trading state."""
-        if not self._ensure_redis():
-            return None
-        state = rds.read_trading_daemon_state(self._redis)
-        if not state:
-            return None
-        v = state.get("ib_client_id")
-        try:
-            return int(v) if v is not None else None
-        except (TypeError, ValueError):
-            return None
-
     def get_ib_connection_config(self) -> Optional[Dict[str, Any]]:
         """Read settings.ib_host_account_id for R-A4 (hedging / market data account). Host/port/client IDs come from config YAML."""
         if not self._ensure_conn():
@@ -851,63 +769,6 @@ class PostgreSQLSink(StatusSink):
             self._conn.rollback()
             logger.debug("get_ib_connection_config failed: %s", e)
             return None
-
-    def get_watchlist_stk_symbols(self) -> List[str]:
-        """Return distinct symbol strings from watchlist where sec_type is STK (or null/empty).
-        Used by daemon to subscribe to market data for Watchlist stocks only (R-RM*)."""
-        if not self._ensure_conn():
-            return []
-        try:
-            with self._conn.cursor() as cur:
-                cur.execute(
-                    """
-                    SELECT DISTINCT TRIM(symbol) AS sym FROM watchlist
-                    WHERE symbol IS NOT NULL AND TRIM(symbol) != ''
-                    AND (sec_type IS NULL OR UPPER(TRIM(sec_type)) = 'STK')
-                    ORDER BY sym
-                    """
-                )
-                rows = cur.fetchall()
-            self._conn.rollback()
-            return [str(r[0]) for r in rows if r and r[0]]
-        except Exception as e:
-            logger.debug("get_watchlist_stk_symbols failed: %s", e)
-            self._conn.rollback()
-            return []
-
-    def get_watchlist_opt_contracts(self) -> List[Dict[str, Any]]:
-        """Return watchlist rows where sec_type is OPT (contract_key, symbol, sec_type, expiry, strike, option_right).
-        Used by daemon to subscribe to Real-time ticker for Watchlist options. Ordered by created_at DESC for consistent truncation."""
-        if not self._ensure_conn():
-            return []
-        try:
-            with self._conn.cursor() as cur:
-                cur.execute(
-                    """
-                    SELECT contract_key, symbol, sec_type, expiry, strike, option_right
-                    FROM watchlist
-                    WHERE sec_type IS NOT NULL AND UPPER(TRIM(sec_type)) = 'OPT'
-                    ORDER BY created_at DESC NULLS LAST
-                    """
-                )
-                rows = cur.fetchall()
-            self._conn.rollback()
-            return [
-                {
-                    "contract_key": str(r[0]),
-                    "symbol": str(r[1]) if r[1] else "",
-                    "sec_type": str(r[2]) if r[2] else "OPT",
-                    "expiry": str(r[3]) if r[3] else "",
-                    "strike": float(r[4]) if r[4] is not None else None,
-                    "option_right": str(r[5]) if r[5] else "",
-                }
-                for r in rows
-                if r and r[0]
-            ]
-        except Exception as e:
-            logger.debug("get_watchlist_opt_contracts failed: %s", e)
-            self._conn.rollback()
-            return []
 
     def get_contract_quotes(self, contract_keys: List[str]) -> List[Dict[str, Any]]:
         """Return bid/ask/last/mid from brokerage.contract_quote_live (via per-env FDW) for given contract_keys."""
@@ -947,48 +808,6 @@ class PostgreSQLSink(StatusSink):
             ]
         except Exception as e:
             logger.debug("get_contract_quotes failed: %s", e)
-            self._conn.rollback()
-            return []
-
-    def get_stream_position_stk_symbols(self) -> List[str]:
-        """Return distinct STK symbols from brokerage.positions for stream host/secondary accounts.
-        JOINs settings on per-env conn (FDW-qualified positions)."""
-        if not self._ensure_conn():
-            return []
-        try:
-            with self._conn.cursor() as cur:
-                cur.execute(
-                    "SELECT stream_host_account_id, stream_secondary_account_id FROM settings WHERE id = 1"
-                )
-                row = cur.fetchone()
-            if not row:
-                return []
-            account_ids: List[str] = []
-            for i in (0, 1):
-                v = row[i] if i < len(row) and row[i] is not None else None
-                if v is not None and str(v).strip():
-                    account_ids.append(str(v).strip())
-            if not account_ids:
-                return []
-            placeholders = ", ".join("%s" for _ in account_ids)
-            with self._conn.cursor() as cur:
-                cur.execute(
-                    f"""
-                    SELECT DISTINCT TRIM(ap.symbol) AS sym
-                    FROM {POSITIONS} ap
-                    WHERE ap.account_id IN (""" + placeholders + """)
-                    AND ap.symbol IS NOT NULL AND TRIM(ap.symbol) != ''
-                    AND (ap.sec_type IS NULL OR UPPER(TRIM(ap.sec_type)) = 'STK')
-                    AND COALESCE(ap.position, 0) != 0
-                    ORDER BY sym
-                    """,
-                    tuple(account_ids),
-                )
-                rows = cur.fetchall()
-            self._conn.rollback()
-            return [str(r[0]) for r in rows if r and r[0]]
-        except Exception as e:
-            logger.debug("get_stream_position_stk_symbols failed: %s", e)
             self._conn.rollback()
             return []
 
