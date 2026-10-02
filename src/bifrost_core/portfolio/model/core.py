@@ -15,6 +15,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from psycopg2.extras import RealDictCursor
 
 from bifrost_core.persistence.postgres.brokerage_tables import ACCOUNT, CONTRACT_QUOTE_LIVE, POSITIONS
+from bifrost_core.portfolio.quote_freshness import fresh_quote_sql, underlying_spot
 from bifrost_core.portfolio.units import option_cost_per_share
 from bifrost_core.portfolio.model.black_scholes import (
     _bs_delta,
@@ -58,7 +59,10 @@ def _fetch_positions(conn: Any, account_id: str) -> List[Dict[str, Any]]:
                 cq.mid  AS price_mid,
                 cq.last AS price_last
             FROM {POSITIONS} ap
-            LEFT JOIN {CONTRACT_QUOTE_LIVE} cq ON ap.contract_key = cq.contract_key
+            -- Only quotes inside the live window: under D10 the daemon writes none and
+            -- the table's old rows were being modelled as today's prices (TD-02).
+            LEFT JOIN {CONTRACT_QUOTE_LIVE} cq
+                ON ap.contract_key = cq.contract_key AND {fresh_quote_sql('cq')}
             WHERE ap.account_id = %s
             ORDER BY ap.symbol, ap.sec_type, ap.contract_key
             """,
@@ -583,6 +587,16 @@ def compute_model_analysis(conn: Any, account_id: str) -> Dict[str, Any]:
     summary = _fetch_account_summary(conn, account_id)
     groups = _group_positions(rows)
 
+    # A group with no fresh stock quote -- every group while D10 keeps the daemon
+    # from writing, and any options-only name -- is measured against the last
+    # daily close, labelled as such, the way the Positions page prices stock.
+    closes: Dict[str, Any] = {}
+    for sym, g in groups.items():
+        if g["spot"] is not None:
+            g["spot_source"] = "live"
+            continue
+        g["spot"], g["spot_source"], _ = underlying_spot(conn, sym, close_cache=closes)
+
     # Build per-leg mid prices lookup for greeks/stress (keyed by underlying)
     # Keyed by expiry as well as strike and right. Without it, the two legs a
     # roll leaves on one underlying — same strike, same right, different dates —
@@ -656,6 +670,7 @@ def compute_model_analysis(conn: Any, account_id: str) -> Dict[str, Any]:
         entry: Dict[str, Any] = {
             "symbol": sym,
             "spot": spot,
+            "spot_source": g.get("spot_source"),
             "dte_days": dte,
             "dte_basis": "farthest_expiry",
             "farthest_expiry": farthest.isoformat() if farthest else None,

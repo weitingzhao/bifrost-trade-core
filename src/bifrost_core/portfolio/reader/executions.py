@@ -9,6 +9,8 @@ from zoneinfo import ZoneInfo
 
 from psycopg2.extras import RealDictCursor
 
+from bifrost_core.portfolio.quote_freshness import fresh_quote_sql
+
 from bifrost_core.portfolio.units import option_cost_per_share, position_value
 from bifrost_core.persistence.postgres.brokerage_tables import (
     COMMISSIONS,
@@ -1692,7 +1694,8 @@ def get_position_instance_attribution(
                    ap.position, ap.avg_cost, ap.expiry, ap.strike, ap.option_right,
                    cql.mid AS price_mid, cql.last AS price_last
             FROM {POSITIONS} ap
-            LEFT JOIN {CONTRACT_QUOTE_LIVE} cql ON ap.contract_key = cql.contract_key
+            LEFT JOIN {CONTRACT_QUOTE_LIVE} cql
+                ON ap.contract_key = cql.contract_key AND {fresh_quote_sql('cql')}
             WHERE {pos_where}
         ),
         pos_has_final AS (

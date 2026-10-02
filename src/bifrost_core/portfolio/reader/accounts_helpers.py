@@ -3,11 +3,11 @@
 import json
 import logging
 import math
-import os
 from datetime import date, datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
 from bifrost_core.persistence.postgres.brokerage_tables import ACCOUNT
+from bifrost_core.portfolio.quote_freshness import LIVE_QUOTE_MAX_AGE_SEC
 
 logger = logging.getLogger(__name__)
 
@@ -451,7 +451,8 @@ def _rows_to_executions(rows: Any, cur: Any) -> List[Dict[str, Any]]:
 
 
 # STK: if contract_quote_live is older than this (sec) or has no NBBO, prefer stock_day close for Last/price.
-STK_LIVE_STALE_SEC = float(os.environ.get("POSITIONS_STK_LIVE_STALE_SEC", str(4 * 3600)))
+# One threshold for every reader of contract_quote_live (portfolio/quote_freshness.py).
+STK_LIVE_STALE_SEC = LIVE_QUOTE_MAX_AGE_SEC
 
 
 def resolve_daily_prev_close_from_fallback(

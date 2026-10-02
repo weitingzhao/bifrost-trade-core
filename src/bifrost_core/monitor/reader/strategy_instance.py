@@ -7,6 +7,8 @@ from typing import Any, Dict, List, Optional
 
 from psycopg2.extras import RealDictCursor
 
+from bifrost_core.portfolio.quote_freshness import fresh_quote_sql
+
 from bifrost_core.persistence.postgres.brokerage_tables import (
     CONTRACT_QUOTE_LIVE,
     EXECUTIONS_FINAL,
@@ -298,7 +300,8 @@ def get_instance_open_option_legs(conn: Any, strategy_instance_id: int) -> List[
                     WHERE strategy_instance_id = %s
                       AND upper(trim(COALESCE(sec_type, ''))) = 'OPT'
                 ) tagged ON ap.account_id = tagged.account_id AND ap.contract_key = tagged.contract_key
-                LEFT JOIN {CONTRACT_QUOTE_LIVE} ip ON ap.contract_key = ip.contract_key
+                LEFT JOIN {CONTRACT_QUOTE_LIVE} ip
+                    ON ap.contract_key = ip.contract_key AND {fresh_quote_sql('ip')}
                 WHERE ap.position IS NOT NULL AND ap.position != 0
                 ORDER BY ap.contract_key
                 """,
