@@ -69,47 +69,28 @@ def get_structure_by_id(conn: Any, strategy_structure_id: int) -> Optional[Dict[
         return None
 
 
+_LIST_STRUCTURES_SELECT = """
+    SELECT s.strategy_structure_id, s.name,
+           t.template_code AS structure_type,
+           CAST(NULL AS text) AS structure_subtype,
+           t.display_name AS structure_subtype_label,
+           s.strategy_template_id,
+           t.dim_direction, t.dim_structure, t.dim_coverage,
+           t.dim_risk, t.dim_volatility, t.dim_time,
+           t.template_code AS template_code, t.display_name AS template_display_name,
+           s.version, s.is_active, s.created_at, s.updated_at, s.notes,
+           s.legs_json
+    FROM strategy_structure s
+    LEFT JOIN strategy_template t ON t.strategy_template_id = s.strategy_template_id
+"""
+
+
 def list_structures(conn: Any, active_only: bool = True) -> List[Dict[str, Any]]:
     """Return list of strategy_structure rows with legs for sheet summarization."""
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            if active_only:
-                cur.execute(
-                    """
-                    SELECT s.strategy_structure_id, s.name,
-                           t.template_code AS structure_type,
-                           CAST(NULL AS text) AS structure_subtype,
-                           t.display_name AS structure_subtype_label,
-                           s.strategy_template_id,
-                           t.dim_direction, t.dim_structure, t.dim_coverage,
-                           t.dim_risk, t.dim_volatility, t.dim_time,
-                           t.template_code AS template_code, t.display_name AS template_display_name,
-                           s.version, s.is_active, s.created_at, s.updated_at, s.notes,
-                           s.legs_json
-                    FROM strategy_structure s
-                    LEFT JOIN strategy_template t ON t.strategy_template_id = s.strategy_template_id
-                    WHERE s.is_active = true
-                    ORDER BY s.name
-                    """
-                )
-            else:
-                cur.execute(
-                    """
-                    SELECT s.strategy_structure_id, s.name,
-                           t.template_code AS structure_type,
-                           CAST(NULL AS text) AS structure_subtype,
-                           t.display_name AS structure_subtype_label,
-                           s.strategy_template_id,
-                           t.dim_direction, t.dim_structure, t.dim_coverage,
-                           t.dim_risk, t.dim_volatility, t.dim_time,
-                           t.template_code AS template_code, t.display_name AS template_display_name,
-                           s.version, s.is_active, s.created_at, s.updated_at, s.notes,
-                           s.legs_json
-                    FROM strategy_structure s
-                    LEFT JOIN strategy_template t ON t.strategy_template_id = s.strategy_template_id
-                    ORDER BY s.name
-                    """
-                )
+            where = "WHERE s.is_active = true" if active_only else ""
+            cur.execute(f"{_LIST_STRUCTURES_SELECT} {where} ORDER BY s.name")
             rows = cur.fetchall()
         out = [dict(r) for r in rows]
         for item in out:
@@ -120,43 +101,26 @@ def list_structures(conn: Any, active_only: bool = True) -> List[Dict[str, Any]]
         return []
 
 
+_LIST_OPPORTUNITIES_SELECT = """
+    SELECT o.strategy_opportunity_id, o.name, o.strategy_structure_id,
+           o.default_gate_safety_strategy_id, o.scope_type,
+           o.is_active, o.created_at, o.updated_at,
+           s.name AS structure_name,
+           g.name AS gate_safety_name,
+           (SELECT array_agg(sym ORDER BY ord)
+            FROM jsonb_array_elements_text(o.symbols_json) WITH ORDINALITY AS t(sym, ord)) AS symbols
+    FROM strategy_opportunity o
+    LEFT JOIN strategy_structure s ON s.strategy_structure_id = o.strategy_structure_id
+    LEFT JOIN gate_safety_strategy g ON g.gate_safety_strategy_id = o.default_gate_safety_strategy_id
+"""
+
+
 def list_opportunities(conn: Any, active_only: bool = True) -> List[Dict[str, Any]]:
     """Return list of strategy_opportunity rows with structure_name, gate_safety_name, scope_type, and symbols for list UI."""
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            if active_only:
-                cur.execute(
-                    """
-                    SELECT o.strategy_opportunity_id, o.name, o.strategy_structure_id,
-                           o.default_gate_safety_strategy_id, o.scope_type,
-                           o.is_active, o.created_at, o.updated_at,
-                           s.name AS structure_name,
-                           g.name AS gate_safety_name,
-                           (SELECT array_agg(sym ORDER BY ord)
-                            FROM jsonb_array_elements_text(o.symbols_json) WITH ORDINALITY AS t(sym, ord)) AS symbols
-                    FROM strategy_opportunity o
-                    LEFT JOIN strategy_structure s ON s.strategy_structure_id = o.strategy_structure_id
-                    LEFT JOIN gate_safety_strategy g ON g.gate_safety_strategy_id = o.default_gate_safety_strategy_id
-                    WHERE o.is_active = true
-                    ORDER BY o.name
-                    """
-                )
-            else:
-                cur.execute(
-                    """
-                    SELECT o.strategy_opportunity_id, o.name, o.strategy_structure_id,
-                           o.default_gate_safety_strategy_id, o.scope_type,
-                           o.is_active, o.created_at, o.updated_at,
-                           s.name AS structure_name,
-                           g.name AS gate_safety_name,
-                           (SELECT array_agg(sym ORDER BY ord)
-                            FROM jsonb_array_elements_text(o.symbols_json) WITH ORDINALITY AS t(sym, ord)) AS symbols
-                    FROM strategy_opportunity o
-                    LEFT JOIN strategy_structure s ON s.strategy_structure_id = o.strategy_structure_id
-                    LEFT JOIN gate_safety_strategy g ON g.gate_safety_strategy_id = o.default_gate_safety_strategy_id
-                    ORDER BY o.name
-                    """
-                )
+            where = "WHERE o.is_active = true" if active_only else ""
+            cur.execute(f"{_LIST_OPPORTUNITIES_SELECT} {where} ORDER BY o.name")
             rows = cur.fetchall()
         return [dict(r) for r in rows]
     except Exception:
@@ -224,39 +188,24 @@ def _allocation_row_to_dict(row: Dict[str, Any]) -> Dict[str, Any]:
     return out
 
 
+_LIST_ALLOCATIONS_SELECT = """
+    SELECT p.strategy_allocation_id, p.name, p.gate_safety_strategy_id,
+           p.max_positions, p.max_bp_pct, p.is_active,
+           p.created_at, p.updated_at, g.name AS gate_safety_name,
+           (SELECT array_agg(po.strategy_opportunity_id ORDER BY po.sort_order)
+            FROM strategy_allocation_opportunity po
+            WHERE po.strategy_allocation_id = p.strategy_allocation_id) AS strategy_opportunity_ids
+    FROM strategy_allocation p
+    LEFT JOIN gate_safety_strategy g ON g.gate_safety_strategy_id = p.gate_safety_strategy_id
+"""
+
+
 def list_allocations(conn: Any, active_only: bool = True) -> List[Dict[str, Any]]:
     """Return list of strategy_allocation rows with gate_safety_name and opportunity ids from junction table."""
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            if active_only:
-                cur.execute(
-                    """
-                    SELECT p.strategy_allocation_id, p.name, p.gate_safety_strategy_id,
-                           p.max_positions, p.max_bp_pct, p.is_active,
-                           p.created_at, p.updated_at, g.name AS gate_safety_name,
-                           (SELECT array_agg(po.strategy_opportunity_id ORDER BY po.sort_order)
-                            FROM strategy_allocation_opportunity po
-                            WHERE po.strategy_allocation_id = p.strategy_allocation_id) AS strategy_opportunity_ids
-                    FROM strategy_allocation p
-                    LEFT JOIN gate_safety_strategy g ON g.gate_safety_strategy_id = p.gate_safety_strategy_id
-                    WHERE p.is_active = true
-                    ORDER BY p.name
-                    """
-                )
-            else:
-                cur.execute(
-                    """
-                    SELECT p.strategy_allocation_id, p.name, p.gate_safety_strategy_id,
-                           p.max_positions, p.max_bp_pct, p.is_active,
-                           p.created_at, p.updated_at, g.name AS gate_safety_name,
-                           (SELECT array_agg(po.strategy_opportunity_id ORDER BY po.sort_order)
-                            FROM strategy_allocation_opportunity po
-                            WHERE po.strategy_allocation_id = p.strategy_allocation_id) AS strategy_opportunity_ids
-                    FROM strategy_allocation p
-                    LEFT JOIN gate_safety_strategy g ON g.gate_safety_strategy_id = p.gate_safety_strategy_id
-                    ORDER BY p.name
-                    """
-                )
+            where = "WHERE p.is_active = true" if active_only else ""
+            cur.execute(f"{_LIST_ALLOCATIONS_SELECT} {where} ORDER BY p.name")
             rows = cur.fetchall()
         return [_allocation_row_to_dict(dict(r)) for r in rows]
     except Exception:
@@ -268,17 +217,7 @@ def get_allocation_by_id(conn: Any, strategy_allocation_id: int) -> Optional[Dic
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(
-                """
-                SELECT p.strategy_allocation_id, p.name, p.gate_safety_strategy_id,
-                       p.max_positions, p.max_bp_pct, p.is_active,
-                       p.created_at, p.updated_at, g.name AS gate_safety_name,
-                       (SELECT array_agg(po.strategy_opportunity_id ORDER BY po.sort_order)
-                        FROM strategy_allocation_opportunity po
-                        WHERE po.strategy_allocation_id = p.strategy_allocation_id) AS strategy_opportunity_ids
-                FROM strategy_allocation p
-                LEFT JOIN gate_safety_strategy g ON g.gate_safety_strategy_id = p.gate_safety_strategy_id
-                WHERE p.strategy_allocation_id = %s
-                """,
+                f"{_LIST_ALLOCATIONS_SELECT} WHERE p.strategy_allocation_id = %s",
                 (strategy_allocation_id,),
             )
             row = cur.fetchone()

@@ -152,49 +152,40 @@ def get_gates_by_id(conn: Any, gate_safety_strategy_id: int) -> Optional[Dict[st
         return None
 
 
-def get_active_gate_safety_strategy_id(conn: Any) -> Optional[int]:
-    """Return settings.active_gate_safety_strategy_id for id=1, or None if missing/not set."""
+# The three ids the daemon's settings row points at -- the only columns _settings_ref reads.
+_SETTINGS_REFS = frozenset(
+    {"active_gate_safety_strategy_id", "active_strategy_structure_id", "active_strategy_allocation_id"}
+)
+
+
+def _settings_ref(conn: Any, column: str) -> Optional[int]:
+    """settings.<column> for id=1, or None if the row or the value is missing."""
+    if column not in _SETTINGS_REFS:
+        raise ValueError(f"not a settings reference: {column}")
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute(
-                "SELECT active_gate_safety_strategy_id FROM settings WHERE id = 1"
-            )
+            cur.execute(f"SELECT {column} FROM settings WHERE id = 1")
             row = cur.fetchone()
-        if row is None or row.get("active_gate_safety_strategy_id") is None:
+        if row is None or row.get(column) is None:
             return None
-        return int(row["active_gate_safety_strategy_id"])
+        return int(row[column])
     except Exception:
         return None
+
+
+def get_active_gate_safety_strategy_id(conn: Any) -> Optional[int]:
+    """Return settings.active_gate_safety_strategy_id for id=1, or None if missing/not set."""
+    return _settings_ref(conn, "active_gate_safety_strategy_id")
 
 
 def get_active_strategy_structure_id(conn: Any) -> Optional[int]:
     """Return settings.active_strategy_structure_id for id=1, or None if missing/not set."""
-    try:
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute(
-                "SELECT active_strategy_structure_id FROM settings WHERE id = 1"
-            )
-            row = cur.fetchone()
-        if row is None or row.get("active_strategy_structure_id") is None:
-            return None
-        return int(row["active_strategy_structure_id"])
-    except Exception:
-        return None
+    return _settings_ref(conn, "active_strategy_structure_id")
 
 
 def get_active_strategy_allocation_id(conn: Any) -> Optional[int]:
     """Return settings.active_strategy_allocation_id for id=1, or None if missing/not set."""
-    try:
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute(
-                "SELECT active_strategy_allocation_id FROM settings WHERE id = 1"
-            )
-            row = cur.fetchone()
-        if row is None or row.get("active_strategy_allocation_id") is None:
-            return None
-        return int(row["active_strategy_allocation_id"])
-    except Exception:
-        return None
+    return _settings_ref(conn, "active_strategy_allocation_id")
 
 
 def get_gate_safety_name(conn: Any, gate_safety_strategy_id: int) -> Optional[str]:
