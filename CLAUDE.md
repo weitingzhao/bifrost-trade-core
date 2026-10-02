@@ -51,7 +51,8 @@ make db-init        # 初始化/刷新 PostgreSQL schema
 ## 架构关键点
 
 - `persistence/postgres/postgres_sink.py` — `PostgreSQLSink`，`StatusSink` 的唯一实现：daemon 状态快照写 per-env Redis，
-  账户 / 持仓 / 成交 / `contract_quote_live` 写 Golden Source `raw_broker.*`
+  账户 / 持仓 / 成交 / `contract_quote_live` 写 Golden Source `raw_broker.*`。连接时不跑 DDL、不终止别的 backend
+  （TD-45，0.35.0）；表只由发布的 db-init Job 建，缺表时写入失败并记 error
 - `portfolio/` 的模型被 API 后端 (`bifrost-trade-api`) 直接 import
 - `ib_operator/` 仅是 RPC client 侧封装；IB 侧由 **Platform IB Gateway Plugin → `redis-ib`** 承接（`bifrost-trade-socket` 已归档）。
   D10 BLOCKED：不得经它接通实盘下单

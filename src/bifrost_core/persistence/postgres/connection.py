@@ -1,74 +1,12 @@
-"""Shared PostgreSQL connection and lock helpers for persistence, scripts, and servers.
+"""Shared PostgreSQL connection helpers for persistence, scripts, and servers.
+
+``release_pg_locks_for_tables`` (pg_terminate_backend on lock holders) was removed in
+core 0.35.0 (TD-45); nothing may terminate other backends to get its way.
 
 Config shape and env vars (PGHOST, PGPORT, PGDATABASE, PGUSER, PGPASSWORD) match docs/DATABASE.md §1.
 """
 
-import logging
 import os
-from typing import List, Tuple
-
-import psycopg2
-
-logger = logging.getLogger(__name__)
-
-# Formerly daemon_heartbeat / daemon_run_status; IPC moved to Redis. Keep helper for other PG locks.
-_DAEMON_LOCK_TABLES: Tuple[str, ...] = ()
-
-
-def _is_lock_timeout_error(e: Exception) -> bool:
-    """True if exception is due to lock timeout (55P03 or message)."""
-    if getattr(e, "pgcode", None) == "55P03":
-        return True
-    msg = str(e).lower()
-    return "lock timeout" in msg or "canceling statement due to lock timeout" in msg
-
-
-def release_pg_locks_for_tables(
-    config: dict,
-    tables: Tuple[str, ...] = _DAEMON_LOCK_TABLES,
-) -> int:
-    """Open a new connection, find backends holding or waiting for locks on the given
-    table names, terminate them (pg_terminate_backend), and return the number terminated.
-    Used when the daemon hits lock timeout on shared PG tables after crash/restart.
-    """
-    params = _get_conn_params(config)
-    params["connect_timeout"] = 10
-    try:
-        conn = psycopg2.connect(**params)
-    except Exception as e:
-        logger.warning("release_pg_locks_for_tables: connect failed: %s", e)
-        return 0
-    my_pid = conn.get_backend_pid()
-    try:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT DISTINCT l.pid
-                FROM pg_locks l
-                JOIN pg_class c ON l.relation = c.oid
-                JOIN pg_stat_activity a ON l.pid = a.pid
-                WHERE c.relname = ANY(%s)
-                  AND l.pid != %s
-                """,
-                (list(tables), my_pid),
-            )
-            pids: List[int] = [r[0] for r in cur.fetchall()]
-    except Exception as e:
-        logger.warning("release_pg_locks_for_tables: query failed: %s", e)
-        conn.close()
-        return 0
-    terminated = 0
-    for pid in pids:
-        try:
-            with conn.cursor() as cur:
-                cur.execute("SELECT pg_terminate_backend(%s)", (pid,))
-                if cur.fetchone()[0]:
-                    terminated += 1
-                    logger.info("Terminated backend pid=%s (lock on %s)", pid, tables)
-        except Exception as e:
-            logger.debug("Failed to terminate pid=%s: %s", pid, e)
-    conn.close()
-    return terminated
 
 
 def _pg_block_dbname(pg: dict) -> str | None:

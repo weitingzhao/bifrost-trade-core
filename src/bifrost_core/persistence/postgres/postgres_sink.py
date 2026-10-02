@@ -14,13 +14,9 @@ from bifrost_core.persistence.status_sink import (
     StatusSink,
 )
 from bifrost_core.persistence.postgres.connection import (
-    _DAEMON_LOCK_TABLES,
     _get_conn_params,
     _get_golden_source_conn_params,
-    _is_lock_timeout_error,
-    release_pg_locks_for_tables,
 )
-from bifrost_core.persistence.postgres.ddl import _ensure_tables
 from bifrost_core.persistence.postgres.accounts_sync import (
     _has_meaningful_commission,
     sync_accounts_snapshot_to_tables,
@@ -42,9 +38,33 @@ from bifrost_core.portfolio.contract_key import (
 
 logger = logging.getLogger(__name__)
 
+# Postgres "undefined_table". The sink never creates a table (TD-45, core 0.35.0): the schema
+# comes only from the release's db-init Job, so a missing table fails the write, loudly.
+_UNDEFINED_TABLE = "42P01"
+
+
+def _log_write_failure(what: str, exc: Exception) -> None:
+    """Log a failed write; a missing table is an error that names where the schema comes from."""
+    if getattr(exc, "pgcode", None) == _UNDEFINED_TABLE:
+        logger.error(
+            "%s failed: table missing (%s). The daemon does not create tables; "
+            "run the release's db-init Job.",
+            what,
+            str(exc).strip().splitlines()[0] if str(exc).strip() else exc,
+        )
+        return
+    logger.warning("%s failed: %s", what, exc, exc_info=True)
+
 
 class PostgreSQLSink(StatusSink):
-    """Daemon IPC state in Redis; PG still used for brokerage / settings."""
+    """Daemon IPC state in Redis; PG still used for brokerage / settings.
+
+    Connecting runs no DDL and never terminates other backends (TD-45, core 0.35.0).
+    Before 0.35.0 every connect ran ``_ensure_tables`` (and ``ensure_brokerage_schema`` on
+    Golden Source), and a lock timeout there made it ``pg_terminate_backend`` the lock
+    holders. Schema is applied by the release's db-init Job only; ``ddl.ensure_tables`` and
+    ``brokerage_ddl.ensure_brokerage_schema`` stay for that Job and the scripts.
+    """
 
     def __init__(self, config: dict):
         self._config = config
@@ -82,41 +102,28 @@ class PostgreSQLSink(StatusSink):
             return self._redis is not None
 
     def _connect(self) -> None:
+        """Open the per-env connection with session timeouts. No DDL (TD-45)."""
         params = _get_conn_params(self._config)
-        for attempt in (1, 2):
-            try:
-                self._conn = psycopg2.connect(**params)
-                # Avoid blocking forever if another session holds a lock on shared PG tables.
-                with self._conn.cursor() as cur:
-                    cur.execute("SET lock_timeout = '5s'")
-                    cur.execute("SET idle_in_transaction_session_timeout = '60s'")
-                self._conn.commit()
-                _ensure_tables(self._conn)
-                logger.info(
-                    "PostgreSQL sink connected: %s@%s:%s/%s",
-                    params["user"],
-                    params["host"],
-                    params["port"],
-                    params["dbname"],
-                )
-                return
-            except Exception as e:
-                self._conn = None
-                if attempt == 1 and _is_lock_timeout_error(e):
-                    n = release_pg_locks_for_tables(self._config)
-                    if n > 0:
-                        logger.info(
-                            "Released %s backend(s) holding lock on %s; retrying connect",
-                            n,
-                            _DAEMON_LOCK_TABLES,
-                        )
-                        time.sleep(0.5)
-                        continue
-                logger.warning("PostgreSQL sink connect failed: %s", e)
-                return
+        try:
+            self._conn = psycopg2.connect(**params)
+            # Avoid blocking forever if another session holds a lock on shared PG tables.
+            with self._conn.cursor() as cur:
+                cur.execute("SET lock_timeout = '5s'")
+                cur.execute("SET idle_in_transaction_session_timeout = '60s'")
+            self._conn.commit()
+            logger.info(
+                "PostgreSQL sink connected: %s@%s:%s/%s",
+                params["user"],
+                params["host"],
+                params["port"],
+                params["dbname"],
+            )
+        except Exception as e:
+            self._conn = None
+            logger.warning("PostgreSQL sink connect failed: %s", e)
 
     def _connect_golden(self) -> None:
-        """Connect to bifrost_golden_source for brokerage.* writes."""
+        """Connect to bifrost_golden_source for brokerage.* writes. No DDL (TD-45)."""
         params = _get_golden_source_conn_params(self._config)
         try:
             self._golden_conn = psycopg2.connect(**{**params, "connect_timeout": 10})
@@ -124,19 +131,6 @@ class PostgreSQLSink(StatusSink):
                 cur.execute("SET lock_timeout = '5s'")
                 cur.execute("SET idle_in_transaction_session_timeout = '60s'")
             self._golden_conn.commit()
-            try:
-                from bifrost_core.persistence.postgres.brokerage_ddl import (
-                    ensure_brokerage_schema,
-                )
-
-                ensure_brokerage_schema(self._golden_conn)
-                self._golden_conn.commit()
-            except Exception as ddl_err:
-                try:
-                    self._golden_conn.rollback()
-                except Exception:
-                    pass
-                logger.debug("ensure_brokerage_schema (best-effort): %s", ddl_err)
             logger.info(
                 "PostgreSQL golden_source connected: %s@%s:%s/%s",
                 params["user"],
@@ -204,7 +198,7 @@ class PostgreSQLSink(StatusSink):
                     self._golden_conn.rollback()
                 except Exception:
                     pass
-            logger.warning("PostgreSQL write_snapshot (accounts) failed: %s", e, exc_info=True)
+            _log_write_failure("PostgreSQL write_snapshot (accounts)", e)
 
     def write_operation(self, record: Dict[str, Any]) -> None:
         """No-op: daemon_auto_operations retired (Wave 1)."""
@@ -284,7 +278,7 @@ class PostgreSQLSink(StatusSink):
             logger.info("[R-M6] write_contract_quote_live: commit ok")
         except Exception as e:
             self._golden_conn.rollback()
-            logger.warning("write_contract_quote_live failed: %s", e, exc_info=True)
+            _log_write_failure("write_contract_quote_live", e)
 
     def write_account_executions(self, rows: Any) -> None:
         """R-A2: write executions to brokerage.executions_raw_tws; commissions to brokerage.commissions."""
@@ -452,27 +446,25 @@ class PostgreSQLSink(StatusSink):
                         model,
                         raw_extra,
                     )
-                    # Write: brokerage.executions_raw_tws
-                    try:
-                        if exec_id:
-                            cur.execute(
-                                f"""
-                                INSERT INTO {GOLDEN_EXECUTIONS_RAW_TWS} ({cols})
-                                VALUES ({placeholders})
-                                ON CONFLICT (exec_id) WHERE exec_id IS NOT NULL AND exec_id != '' DO NOTHING
-                                """,
-                                vals,
-                            )
-                        else:
-                            cur.execute(
-                                f"""
-                                INSERT INTO {GOLDEN_EXECUTIONS_RAW_TWS} ({cols})
-                                VALUES ({placeholders})
-                                """,
-                                vals,
-                            )
-                    except Exception:
-                        pass  # raw table may not exist yet on older DBs
+                    # Write: brokerage.executions_raw_tws. A missing table fails the whole write
+                    # (logged by _log_write_failure); it used to be skipped silently.
+                    if exec_id:
+                        cur.execute(
+                            f"""
+                            INSERT INTO {GOLDEN_EXECUTIONS_RAW_TWS} ({cols})
+                            VALUES ({placeholders})
+                            ON CONFLICT (exec_id) WHERE exec_id IS NOT NULL AND exec_id != '' DO NOTHING
+                            """,
+                            vals,
+                        )
+                    else:
+                        cur.execute(
+                            f"""
+                            INSERT INTO {GOLDEN_EXECUTIONS_RAW_TWS} ({cols})
+                            VALUES ({placeholders})
+                            """,
+                            vals,
+                        )
 
                     commission = r.get("commission")
                     realized_pnl = r.get("realized_pnl")
@@ -536,7 +528,7 @@ class PostgreSQLSink(StatusSink):
             logger.info("[R-A2] write_account_executions: wrote %s rows", len(rows))
         except Exception as e:
             self._golden_conn.rollback()
-            logger.warning("write_account_executions failed: %s", e, exc_info=True)
+            _log_write_failure("write_account_executions", e)
 
     def update_execution_commission(
         self, exec_id: str, commission: Any, realized_pnl: Any, currency: Any,
@@ -594,7 +586,7 @@ class PostgreSQLSink(StatusSink):
             self._golden_conn.commit()
         except Exception as e:
             self._golden_conn.rollback()
-            logger.warning("update_execution_commission failed: exec_id=%r %s", exec_id, e)
+            _log_write_failure(f"update_execution_commission exec_id={exec_id!r}", e)
 
     def write_open_orders(self, orders: List[Dict[str, Any]]) -> None:
         """R-A5: 写入当前未成交订单快照到 brokerage.open_orders；全量替换（TRUNCATE + INSERT）。"""
@@ -630,7 +622,7 @@ class PostgreSQLSink(StatusSink):
             self._golden_conn.commit()
         except Exception as e:
             self._golden_conn.rollback()
-            logger.warning("write_open_orders failed: %s", e, exc_info=True)
+            _log_write_failure("write_open_orders", e)
 
     # Control commands older than this are ignored (consumed but not executed).
     CONTROL_CMD_MAX_AGE_SEC = 60

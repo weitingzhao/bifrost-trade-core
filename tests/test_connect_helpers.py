@@ -135,8 +135,7 @@ def test_accounts_writers_on_connect_failure(case: int, calls: List[Dict[str, An
 _ALLOWED_INLINE_CONNECT = {
     "monitor/reader/write_support.py",  # the helper itself (`connect` seam)
     "monitor/reader/common.py",  # StatusReader: long-lived, sets its own session timeouts
-    "persistence/postgres/postgres_sink.py",  # daemon sink (schema apply path, TD-45)
-    "persistence/postgres/connection.py",  # release_pg_locks_for_tables (connect_timeout=10)
+    "persistence/postgres/postgres_sink.py",  # daemon sink: long-lived, sets its own timeouts (no DDL, TD-45)
 }
 
 
