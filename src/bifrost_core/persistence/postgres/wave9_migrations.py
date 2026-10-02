@@ -6,9 +6,9 @@ import json
 import logging
 from typing import Any
 
-from bifrost_core.monitor.reader.gate_safety import build_gate_params_from_flat_row
-from bifrost_core.monitor.reader.strategy_dim_catalog import DIM_TYPE_TO_ENUM, dim_literals_by_type
-from bifrost_core.monitor.schemas.gate_params import GateParams
+# The monitor-side names are imported where they are used, not here: ddl imports this
+# module, and a module-level import made `import ddl` pull in the monitor tree (TD-47).
+# The names this module used to expose still resolve through __getattr__ below.
 
 logger = logging.getLogger(__name__)
 
@@ -21,7 +21,24 @@ _WAVE9_RETIRED_TABLES = (
     "strategy_dim",
 )
 
-_DIM_TYPE_TO_ENUM = DIM_TYPE_TO_ENUM
+_DEFERRED = {
+    "build_gate_params_from_flat_row": "bifrost_core.monitor.reader.gate_safety",
+    "DIM_TYPE_TO_ENUM": "bifrost_core.monitor.reader.strategy_dim_catalog",
+    "_DIM_TYPE_TO_ENUM": "bifrost_core.monitor.reader.strategy_dim_catalog",
+    "dim_literals_by_type": "bifrost_core.monitor.reader.strategy_dim_catalog",
+    "GateParams": "bifrost_core.monitor.schemas.gate_params",
+}
+
+
+def __getattr__(name: str) -> Any:
+    target = _DEFERRED.get(name)
+    if target is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    import importlib
+
+    value = getattr(importlib.import_module(target), name.lstrip("_"))
+    globals()[name] = value
+    return value
 
 _DIM_COL_TO_TYPE = {
     "dim_direction": "direction",
@@ -90,6 +107,8 @@ def _any_gate_flat_column_exists(cur: Any) -> bool:
 
 
 def _flat_column_defaults() -> dict[str, Any]:
+    from bifrost_core.monitor.schemas.gate_params import GateParams
+
     gp = GateParams().model_dump()
     strategy = gp["strategy"]
     state = gp["state"]
@@ -258,6 +277,8 @@ def _migrate_opportunity_json(cur: Any) -> None:
 
 
 def _migrate_gate_params(cur: Any) -> None:
+    from bifrost_core.monitor.reader.gate_safety import build_gate_params_from_flat_row
+
     existing_flat = _existing_gate_flat_columns(cur)
     if not existing_flat:
         return
@@ -320,6 +341,11 @@ def ensure_dim_enum_types(cur: Any) -> None:
     drift is logged: writes validated against the catalog would then be refused by
     the type, or the reverse (2026-09-26: every env had drifted since Wave 9).
     """
+    from bifrost_core.monitor.reader.strategy_dim_catalog import (
+        DIM_TYPE_TO_ENUM,
+        dim_literals_by_type,
+    )
+
     literals_map = dim_literals_by_type()
     for dim_type, enum_name in DIM_TYPE_TO_ENUM.items():
         literals = literals_map.get(dim_type, ())
@@ -352,6 +378,11 @@ def dim_enum_drift(cur: Any) -> dict[str, dict[str, list[str]]]:
     Empty when every type that exists agrees with the catalog. A missing type is
     not drift: ensure_dim_enum_types creates it from the catalog.
     """
+    from bifrost_core.monitor.reader.strategy_dim_catalog import (
+        DIM_TYPE_TO_ENUM,
+        dim_literals_by_type,
+    )
+
     cur.execute(
         """
         SELECT t.typname, e.enumlabel
@@ -407,11 +438,13 @@ def _create_dim_enums(cur: Any) -> None:
 
 
 def _alter_dim_columns_to_enum(cur: Any) -> None:
+    from bifrost_core.monitor.reader.strategy_dim_catalog import DIM_TYPE_TO_ENUM
+
     for table in ("strategy_template", "gate_safety_strategy"):
         if not _table_exists(cur, table):
             continue
         for col, dim_type in _DIM_COL_TO_TYPE.items():
-            enum_name = _DIM_TYPE_TO_ENUM[dim_type]
+            enum_name = DIM_TYPE_TO_ENUM[dim_type]
             if not _column_exists(cur, table, col):
                 continue
             cur.execute(
