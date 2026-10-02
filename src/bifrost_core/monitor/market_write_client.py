@@ -1,7 +1,9 @@
-"""HTTP write client for Plugin Market Data API (bars ingest + delete).
+"""HTTP write client for Plugin Market Data API (ingest job enqueue).
 
-Used by monitor/reader/market.py write functions to POST/DELETE bars
-via the Plugin API instead of direct psycopg2 SQL.
+Used by monitor/services/market_jobs.py and monitor/integrations/index_data_client.py.
+The bars ingest / delete calls went with their only callers, monitor.reader's
+write_ohlc_bars_to_db / write_stock_bars / delete_stock_bars_for_symbol, in core 0.34.0
+(TD-78): nothing in api, worker or Flex called them.
 
 Pattern mirrors bifrost-trade-api/research/market_data_client.py (urllib only, no new deps).
 """
@@ -12,9 +14,8 @@ import json
 import logging
 import os
 import urllib.error
-import urllib.parse
 import urllib.request
-from typing import Any, Dict, List
+from typing import Any, Dict
 
 logger = logging.getLogger(__name__)
 
@@ -49,42 +50,6 @@ def post_ingest_enqueue(
     body = json.dumps({"kind": kind, "payload": payload or {}, "priority": priority}).encode("utf-8")
     req = urllib.request.Request(url, data=body, method="POST")
     for k, v in _write_headers().items():
-        req.add_header(k, v)
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        return json.loads(resp.read())
-
-
-def post_bars_ingest(rows: List[Dict[str, Any]], timeout: int = 60) -> Dict[str, Any]:
-    """POST rows to /stocks/bars/ingest. Returns {"ok": True, "written": N} on success."""
-    url = f"{_plugin_base_url()}/stocks/bars/ingest"
-    body = json.dumps({"rows": rows}).encode("utf-8")
-    req = urllib.request.Request(url, data=body, method="POST")
-    for k, v in _write_headers().items():
-        req.add_header(k, v)
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        return json.loads(resp.read())
-
-
-def delete_bars(
-    symbol: str,
-    delete_daily: bool = True,
-    periods: List[str] | None = None,
-    timeout: int = 30,
-) -> Dict[str, Any]:
-    """DELETE /stocks/bars?symbol=...&delete_daily=...&periods=... Returns response dict."""
-    base = _plugin_base_url()
-    params: Dict[str, str] = {
-        "symbol": symbol,
-        "delete_daily": "true" if delete_daily else "false",
-    }
-    if periods:
-        params["periods"] = ",".join(periods)
-    qs = "&".join(
-        f"{k}={urllib.parse.quote(str(v))}" for k, v in params.items()
-    )
-    url = f"{base}/stocks/bars?{qs}"
-    req = urllib.request.Request(url, method="DELETE")
-    for k, v in _write_headers(content_type=False).items():
         req.add_header(k, v)
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         return json.loads(resp.read())

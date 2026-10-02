@@ -2,7 +2,7 @@
 
 import logging
 import math
-from datetime import date, datetime, timezone
+from datetime import date
 from typing import Any, Dict, List, Optional, Tuple
 
 from psycopg2.extras import RealDictCursor
@@ -318,125 +318,6 @@ def get_bars_coverage(conn: Any, symbols: Optional[List[str]] = None) -> List[Di
 
 # ----- Module-level (status_config) for re-export -----
 
-def write_ohlc_bars_to_db(status_config: dict, rows: List[Dict[str, Any]]) -> bool:
-    """Write OHLC bars via Plugin Market Data API (POST /stocks/bars/ingest).
-
-    Each row is normalised to ``{symbol, period, bar_time, open, high, low, close, volume}``
-    with ``bar_time`` as ISO-8601 string. Daily bars preserve the original ``bar_date`` to
-    avoid UTC date shift.
-
-    Plugin API accepts raw period labels (``1 D``, ``1 min``, ``5 mins``, ``1 hour``).
-    """
-    if not rows:
-        return False
-    try:
-        from bifrost_core.monitor.market_write_client import post_bars_ingest
-
-        payload: List[Dict[str, Any]] = []
-        for r in rows:
-            symbol = (r.get("symbol") or "").strip()
-            period = (r.get("period") or "1 D").strip()
-            bar_time = r.get("bar_time")
-            if bar_time is None or not symbol:
-                continue
-
-            if isinstance(bar_time, (int, float)):
-                bar_dt = datetime.fromtimestamp(float(bar_time), tz=timezone.utc)
-            else:
-                bar_dt = bar_time
-
-            if period.upper() == "1 D":
-                bar_date_str = r.get("bar_date")
-                if bar_date_str:
-                    bt_iso = str(bar_date_str)[:10]
-                elif isinstance(bar_dt, datetime):
-                    bt_iso = bar_dt.strftime("%Y-%m-%d")
-                else:
-                    bt_iso = str(bar_dt)
-            else:
-                bt_iso = bar_dt.isoformat() if isinstance(bar_dt, datetime) else str(bar_dt)
-
-            payload.append({
-                "symbol": symbol,
-                "period": period,
-                "bar_time": bt_iso,
-                "open": r.get("open"),
-                "high": r.get("high"),
-                "low": r.get("low"),
-                "close": r.get("close"),
-                "volume": r.get("volume"),
-            })
-
-        if not payload:
-            return False
-
-        resp = post_bars_ingest(payload)
-        written = resp.get("written", len(payload))
-        logger.info(
-            "[R-A3] write_ohlc_bars_to_db: wrote %s rows via Plugin API",
-            written,
-        )
-        return True
-    except Exception as e:
-        logger.warning("write_ohlc_bars_to_db failed: %s", e)
-        return False
-
-
-def write_stock_bars(status_config: dict, symbol: str, period: str, bars: List[Dict[str, Any]]) -> bool:
-    """Batch write bars for one symbol+period. Thin wrapper over write_ohlc_bars_to_db."""
-    if not bars:
-        return True
-    per = (period or "1 D").strip()
-    sym = (symbol or "").strip()
-    if not sym:
-        return False
-    rows = []
-    for b in bars:
-        r = dict(b)
-        r["symbol"] = sym
-        r["period"] = per
-        rows.append(r)
-    return write_ohlc_bars_to_db(status_config, rows)
-
-
-def delete_stock_bars_for_symbol(
-    status_config: dict,
-    symbol: str,
-    periods: Optional[list] = None,
-) -> Dict[str, Any]:
-    """Delete bars for a symbol via Plugin Market Data API (DELETE /stocks/bars).
-
-    Returns ``{ok, deleted_day, deleted_min}`` or ``{ok: False, error}``.
-    """
-    sym = (symbol or "").strip()
-    if not sym:
-        return {"ok": False, "error": "Symbol required"}
-    valid_periods = {"1 D", "1 min", "5 mins", "1 hour"}
-    if periods:
-        periods = [p.strip() for p in periods if (p or "").strip() in valid_periods]
-    delete_daily = not periods or "1 D" in periods
-    min_periods = [p for p in ("1 min", "5 mins", "1 hour") if not periods or p in periods]
-    try:
-        from bifrost_core.monitor.market_write_client import delete_bars
-
-        resp = delete_bars(
-            symbol=sym,
-            delete_daily=delete_daily,
-            periods=min_periods if min_periods else None,
-        )
-        deleted_day = resp.get("deleted_daily", 0)
-        deleted_min = resp.get("deleted_minute", 0)
-        logger.info(
-            "delete_stock_bars_for_symbol %s periods=%s: deleted_day=%s deleted_min=%s",
-            sym, periods, deleted_day, deleted_min,
-        )
-        return {"ok": True, "deleted_day": deleted_day, "deleted_min": deleted_min}
-    except Exception as e:
-        logger.warning("delete_stock_bars_for_symbol failed: %s", e)
-        return {"ok": False, "error": str(e)}
-
-
-
 def get_is_us_trading_day(status_config: dict, date_str: str) -> bool:
     """Return True if the given date (YYYY-MM-DD) is a US (NYSE) trading day."""
     try:
@@ -474,9 +355,6 @@ def get_market_holidays(status_config: dict, exchange: Optional[str] = None, yea
 
 
 __all__ = [
-    "write_ohlc_bars_to_db",
-    "write_stock_bars",
-    "delete_stock_bars_for_symbol",
     "get_is_us_trading_day",
     "get_market_holidays",
 ]

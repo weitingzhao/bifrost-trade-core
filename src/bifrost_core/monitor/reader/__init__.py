@@ -34,9 +34,6 @@ _LAZY: dict[str, str] = {
     "update_one_execution": "bifrost_core.portfolio.reader.accounts",
     "upsert_account_transactions": "bifrost_core.portfolio.reader.accounts",
     "write_account_executions_to_db": "bifrost_core.portfolio.reader.accounts",
-    "delete_stock_bars_for_symbol": "bifrost_core.monitor.reader.market",
-    "write_ohlc_bars_to_db": "bifrost_core.monitor.reader.market",
-    "write_stock_bars": "bifrost_core.monitor.reader.market",
     "write_ib_config": "bifrost_core.monitor.reader.settings",
 }
 
@@ -50,7 +47,6 @@ __all__ = [
     "WriteNotFound",
     "batch_update_execution_strategy",
     "delete_one_execution",
-    "delete_stock_bars_for_symbol",
     "insert_one_execution",
     "sync_accounts_snapshot_to_db",
     "update_execution_commission",
@@ -60,9 +56,7 @@ __all__ = [
     "write_control_command",
     "write_heartbeat_interval",
     "write_ib_config",
-    "write_ohlc_bars_to_db",
     "write_run_status",
-    "write_stock_bars",
 ]
 
 
@@ -97,11 +91,6 @@ if TYPE_CHECKING:  # static analysers and IDEs see the eager form
         WriteFailed,
         WriteInvalid,
         WriteNotFound,
-    )
-    from bifrost_core.monitor.reader.market import (
-        delete_stock_bars_for_symbol,
-        write_ohlc_bars_to_db,
-        write_stock_bars,
     )
     from bifrost_core.monitor.reader.settings import write_ib_config
     from bifrost_core.monitor.reader.status import (
