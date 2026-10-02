@@ -33,7 +33,8 @@ def _pos_row(
     strategy_instance_label=None,
     strategy_opportunity_name=None,
     strategy_instance_opened_at_epoch=None,
-    structure_type=None,
+    strategy_structure_name=None,
+    template_code=None,
     scope_type=None,
     strategy_structure_id=None,
     net_qty_contribution=None,
@@ -56,7 +57,8 @@ def _pos_row(
         "strategy_instance_label": strategy_instance_label,
         "strategy_opportunity_name": strategy_opportunity_name,
         "strategy_instance_opened_at_epoch": strategy_instance_opened_at_epoch,
-        "structure_type": structure_type,
+        "strategy_structure_name": strategy_structure_name,
+        "template_code": template_code,
         "scope_type": scope_type,
         "strategy_structure_id": strategy_structure_id,
         "net_qty_contribution": net_qty_contribution,
@@ -408,3 +410,22 @@ class TestEdgeCases:
         for r in result:
             assert r["strategy_instance_id"] == 10
             assert r["attribution_ratio"] == 1.0
+
+
+def test_structure_is_the_strategy_structure_row():
+    """Attribution names the structure and its template apart (TD-41); structure_type is the name, for one version."""
+    rows = [
+        _pos_row(
+            strategy_instance_id=7,
+            strategy_structure_id=3,
+            strategy_structure_name="AAPL covered call 10% OTM",
+            template_code="covered_call_otm",
+            net_qty_contribution=-5,
+            exec_count=1,
+        )
+    ]
+    (row,) = _build_attribution_rows(rows)
+    assert row["strategy_structure_name"] == "AAPL covered call 10% OTM"
+    assert row["template_code"] == "covered_call_otm"
+    assert row["structure_type"] == "AAPL covered call 10% OTM"
+

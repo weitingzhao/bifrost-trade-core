@@ -1777,7 +1777,8 @@ def get_position_instance_attribution(
             si.label AS strategy_instance_label,
             so.name AS strategy_opportunity_name,
             EXTRACT(EPOCH FROM si.opened_at)::bigint AS strategy_instance_opened_at_epoch,
-            ss.name AS structure_type,
+            ss.name AS strategy_structure_name,
+            t.template_code AS template_code,
             so.scope_type,
             ss.strategy_structure_id,
             eg.net_qty_contribution,
@@ -1787,6 +1788,7 @@ def get_position_instance_attribution(
         LEFT JOIN strategy_instance si ON eg.strategy_instance_id = si.strategy_instance_id
         LEFT JOIN strategy_opportunity so ON eg.strategy_opportunity_id = so.strategy_opportunity_id
         LEFT JOIN strategy_structure ss ON so.strategy_structure_id = ss.strategy_structure_id
+        LEFT JOIN strategy_template t ON ss.strategy_template_id = t.strategy_template_id
         ORDER BY p.account_id, p.contract_key, eg.strategy_instance_id NULLS LAST
         """
 
@@ -1865,7 +1867,8 @@ def _build_attribution_rows(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                 strategy_opportunity_id=None,
                 strategy_opportunity_name=None,
                 strategy_instance_opened_at_epoch=None,
-                structure_type=None,
+                strategy_structure_name=None,
+                template_code=None,
                 scope_type=None,
                 strategy_structure_id=None,
                 open_qty_est=pos_qty,
@@ -1901,7 +1904,8 @@ def _build_attribution_rows(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                 strategy_opportunity_id=r.get("strategy_opportunity_id"),
                 strategy_opportunity_name=r.get("strategy_opportunity_name"),
                 strategy_instance_opened_at_epoch=r.get("strategy_instance_opened_at_epoch"),
-                structure_type=r.get("structure_type"),
+                strategy_structure_name=r.get("strategy_structure_name"),
+                template_code=r.get("template_code"),
                 scope_type=r.get("scope_type"),
                 strategy_structure_id=r.get("strategy_structure_id"),
                 open_qty_est=open_qty,
@@ -1926,7 +1930,8 @@ def _make_attribution_row(
     strategy_opportunity_id: Optional[int],
     strategy_opportunity_name: Optional[str],
     strategy_instance_opened_at_epoch: Optional[int],
-    structure_type: Optional[str],
+    strategy_structure_name: Optional[str],
+    template_code: Optional[str],
     scope_type: Optional[str],
     strategy_structure_id: Optional[int],
     open_qty_est: float,
@@ -1954,7 +1959,12 @@ def _make_attribution_row(
         "strategy_opportunity_id": strategy_opportunity_id,
         "strategy_opportunity_name": (strategy_opportunity_name or "").strip() if strategy_opportunity_name else None,
         "strategy_instance_opened_at_epoch": strategy_instance_opened_at_epoch,
-        "structure_type": (structure_type or "").strip() if structure_type else None,
+        # 'structure' is the strategy_structure row (debt TD-41): its name, and the
+        # template it is built from. structure_type used to be the name here and the
+        # template code on /strategies/structures; it stays one version as the name.
+        "strategy_structure_name": (strategy_structure_name or "").strip() if strategy_structure_name else None,
+        "template_code": (template_code or "").strip() if template_code else None,
+        "structure_type": (strategy_structure_name or "").strip() if strategy_structure_name else None,
         "scope_type": (scope_type or "").strip() if scope_type else None,
         "strategy_structure_id": strategy_structure_id,
         "open_qty_est": open_qty_est,
