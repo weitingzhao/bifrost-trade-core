@@ -143,3 +143,8 @@ def _get_golden_source_conn_params(config: dict) -> dict:
         ),
     }
 
+
+# Public names for the two builders above (TD-20, core 0.34.0). api, worker and Flex import the
+# private names today; they keep working, and these are the same objects.
+get_conn_params = _get_conn_params
+get_golden_source_conn_params = _get_golden_source_conn_params

@@ -285,10 +285,14 @@ _NAMES: dict[str, tuple[str, ...]] = {
     "bifrost_core.persistence.postgres.connection": (
         "_get_conn_params",
         "_get_golden_source_conn_params",
+        # public aliases (TD-20, 0.34.0) for downstream to move to
+        "get_conn_params",
+        "get_golden_source_conn_params",
     ),
     # trade-api
     "bifrost_core.persistence.postgres.ddl": (
         "_ensure_tables",
+        "ensure_tables",  # public alias (TD-20, 0.34.0)
     ),
     # trade-api
     "bifrost_core.persistence.postgres.market_tables": (
@@ -413,3 +417,23 @@ def test_downstream_imports_from_a_cold_start() -> None:
         [sys.executable, "-c", _FRESH_SCRIPT, payload], capture_output=True, text=True, env=env
     )
     assert proc.returncode == 0, proc.stdout + proc.stderr
+
+
+def test_public_aliases_are_the_private_objects() -> None:
+    """TD-20: the public names are aliases, not copies -- downstream may switch in any order."""
+    from bifrost_core.persistence.postgres import connection, ddl
+
+    assert connection.get_conn_params is connection._get_conn_params
+    assert connection.get_golden_source_conn_params is connection._get_golden_source_conn_params
+    assert ddl.ensure_tables is ddl._ensure_tables
+
+
+def test_status_reader_config_is_the_private_attribute_read_only() -> None:
+    """TD-20: the api reads StatusReader._config in 34 places; .config is the same object."""
+    from bifrost_core.monitor.reader.common import StatusReader
+
+    cfg = {"sink": "postgres", "postgres": {"host": "db.invalid"}}
+    reader = StatusReader(cfg)
+    assert reader.config is reader._config is cfg
+    with pytest.raises(AttributeError):
+        reader.config = {}  # type: ignore[misc]

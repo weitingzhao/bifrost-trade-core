@@ -733,3 +733,7 @@ def _ensure_tables(conn, log=None, log_table=None) -> None:
         _retire_ops_audit_log(cur)
 
         conn.commit()
+
+
+# Public name (TD-20, core 0.34.0); the api's schema-refresh script imports _ensure_tables today.
+ensure_tables = _ensure_tables

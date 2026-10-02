@@ -40,6 +40,15 @@ class StatusReader:
         self._local = threading.local()
         self._redis: Optional[Any] = None
 
+    @property
+    def config(self) -> dict:
+        """The status config this reader was built with -- the same object, not a copy.
+
+        Public read access for the api, which reads ``reader._config`` today (TD-20).
+        Read-only: there is no setter.
+        """
+        return self._config
+
     def _ensure_redis(self) -> Optional[Any]:
         if self._redis is not None:
             try:
