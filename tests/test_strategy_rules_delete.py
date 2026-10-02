@@ -80,17 +80,20 @@ def test_an_opportunity_without_trades_goes(conn) -> None:
     assert fake.cur.executed[-1] == ("DELETE FROM strategy_opportunity WHERE strategy_opportunity_id = %s", (5,))
 
 
-def test_the_active_allocation_stays(conn) -> None:
-    fake = conn([(1,), (True,)])
-    with pytest.raises(RuleInUseError, match="active allocation"):
+def test_the_allocation_the_daemon_runs_stays(conn) -> None:
+    fake = conn([(1,), (3,)])
+    with pytest.raises(RuleInUseError, match="daemon runs this allocation"):
         rules.delete_allocation(CFG, 3)
     assert not _deleted(fake)
 
 
-def test_an_inactive_allocation_goes(conn) -> None:
-    fake = conn([(1,), (False,)])
+def test_an_allocation_on_the_books_but_not_run_goes(conn) -> None:
+    # is_active (on the books) is not a reason: only what the daemon reads is.
+    fake = conn([(1,), (7,)])
     assert rules.delete_allocation(CFG, 3) is True
     assert fake.commits == 1
+    conn([(1,), (None,)])
+    assert rules.delete_allocation(CFG, 3) is True
 
 
 def test_a_gate_set_in_use_names_its_users(conn) -> None:
@@ -102,8 +105,14 @@ def test_a_gate_set_in_use_names_its_users(conn) -> None:
         rules.delete_gate_safety(CFG, 9)
 
 
+def test_the_daemons_gate_set_stays(conn) -> None:
+    conn([(1,), (0,), (0,), (9,)])
+    with pytest.raises(RuleInUseError, match="daemon's settings use this gate set"):
+        rules.delete_gate_safety(CFG, 9)
+
+
 def test_an_unused_gate_set_goes(conn) -> None:
-    fake = conn([(1,), (0,), (0,)])
+    fake = conn([(1,), (0,), (0,), (None,)])
     assert rules.delete_gate_safety(CFG, 9) is True
     assert fake.cur.executed[-1] == ("DELETE FROM gate_safety_strategy WHERE gate_safety_strategy_id = %s", (9,))
 

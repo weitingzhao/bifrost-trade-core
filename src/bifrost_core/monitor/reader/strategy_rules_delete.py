@@ -9,8 +9,11 @@ is refused with the reason, in words the Desk shows as they are:
 - an opportunity with trades (``strategy_instance`` rows) — its trades would
   lose their rule. Its allocation memberships go with it (the junction
   cascades), and a plan that pointed at it keeps its text but drops the link.
-- an allocation that is active — the one the daemon reads.
-- a gate set that an opportunity defaults to or an allocation uses.
+- the allocation the daemon runs (`settings.active_strategy_allocation_id`,
+  what Set active writes). An allocation merely on the books (`is_active`)
+  may go — the daemon does not read it.
+- a gate set that an opportunity defaults to, an allocation uses, or the
+  daemon's settings point at.
 """
 
 import logging
@@ -88,16 +91,19 @@ def delete_opportunity(status_config: Optional[dict], strategy_opportunity_id: i
     return _delete(status_config, "strategy_opportunity", "strategy_opportunity_id", strategy_opportunity_id, check)
 
 
+def _daemon_setting(cur: Any, column: str) -> Optional[int]:
+    """What the daemon's settings row points at (id = 1), or None."""
+    cur.execute(f"SELECT {column} FROM settings WHERE id = 1")
+    row = cur.fetchone()
+    return int(row[0]) if row and row[0] is not None else None
+
+
 def delete_allocation(status_config: Optional[dict], strategy_allocation_id: int) -> bool:
-    """Delete an allocation that is not the active one."""
+    """Delete an allocation the daemon does not run."""
 
     def check(cur: Any) -> None:
-        cur.execute(
-            "SELECT is_active FROM strategy_allocation WHERE strategy_allocation_id = %s",
-            (strategy_allocation_id,),
-        )
-        if bool(cur.fetchone()[0]):
-            raise RuleInUseError("It is the active allocation; set another one active first.")
+        if _daemon_setting(cur, "active_strategy_allocation_id") == strategy_allocation_id:
+            raise RuleInUseError("The daemon runs this allocation; set another one active first.")
 
     return _delete(status_config, "strategy_allocation", "strategy_allocation_id", strategy_allocation_id, check)
 
@@ -116,6 +122,8 @@ def delete_gate_safety(status_config: Optional[dict], gate_safety_strategy_id: i
             (gate_safety_strategy_id,),
         )
         allocs = int(cur.fetchone()[0])
+        if not opps and not allocs and _daemon_setting(cur, "active_gate_safety_strategy_id") == gate_safety_strategy_id:
+            raise RuleInUseError("The daemon's settings use this gate set; point them at another one first.")
         if opps or allocs:
             users = []
             if opps:
