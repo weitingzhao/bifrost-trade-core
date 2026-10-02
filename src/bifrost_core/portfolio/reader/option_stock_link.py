@@ -8,11 +8,9 @@ from datetime import date, timedelta
 from collections import defaultdict
 from typing import Any, Dict, List, Optional, Tuple
 
-import psycopg2
 from psycopg2.extras import RealDictCursor
 
 from bifrost_core.persistence.postgres.brokerage_tables import EXECUTIONS_FINAL, OPTION_STOCK_LINK
-from bifrost_core.persistence.postgres.connection import _get_conn_params
 
 logger = logging.getLogger(__name__)
 
@@ -72,8 +70,9 @@ def slippage_amount_vs_close(signed_qty: float, price: Any, close_price: Any) ->
 
 
 def _connect(status_config: dict):
-    params = _get_conn_params(status_config)
-    return psycopg2.connect(**params)
+    from bifrost_core.monitor.reader import write_support as ws
+
+    return ws.open_conn(status_config)
 
 
 def fetch_execution_final_row(

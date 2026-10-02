@@ -64,6 +64,37 @@ def connect(params: Dict[str, Any], golden: bool = False) -> Any:
     return psycopg2.connect(**params)
 
 
+def open_conn(status_config: Dict[str, Any], *, golden: bool = False) -> Any:
+    """Open a connection from a status config, with a connect timeout; raises on failure.
+
+    The per-env database, or with ``golden=True`` the Golden Source. Every reader and
+    writer that opens its own connection from a status config goes through here, so a
+    host that does not answer fails after ``_CONNECT_TIMEOUT_S`` instead of hanging
+    (TD-46, 0.33.1). The caller owns the connection: commit / rollback / close as before.
+    """
+    params = (_get_golden_source_conn_params if golden else _get_conn_params)(status_config)
+    return connect({**params, "connect_timeout": _CONNECT_TIMEOUT_S}, golden=golden)
+
+
+def conn_from_config(
+    status_config: Optional[Dict[str, Any]], what: str, *, log: Optional[logging.Logger] = None
+) -> Any:
+    """A connection to the per-env database, or None.
+
+    The shared body of every module's ``_conn_from_config``: None when the config is
+    empty or not Postgres, and None (logged as a warning) when the connect fails.
+    """
+    if not status_config or (
+        status_config.get("sink") != "postgres" and not status_config.get("postgres")
+    ):
+        return None
+    try:
+        return open_conn(status_config)
+    except Exception as e:
+        (log or logger).warning("%s connect failed: %s", what, e)
+        return None
+
+
 @contextmanager
 def write_connection(conn_or_config: Any, what: str, *, golden: bool = False) -> Iterator[Any]:
     """Yield a connection for one write.
@@ -81,8 +112,7 @@ def write_connection(conn_or_config: Any, what: str, *, golden: bool = False) ->
         raise WriteFailed(f"Cannot write {what}: Postgres is not configured.", unavailable=True)
     store = "the Golden Source" if golden else "the database"
     try:
-        params = (_get_golden_source_conn_params if golden else _get_conn_params)(conn_or_config)
-        conn = connect({**params, "connect_timeout": _CONNECT_TIMEOUT_S}, golden=golden)
+        conn = open_conn(conn_or_config, golden=golden)
     except Exception as e:
         logger.warning("write %s: connect to %s failed: %s", what, store, e)
         raise WriteFailed(f"Cannot write {what}: {store} is unreachable.", unavailable=True) from e

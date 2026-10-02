@@ -8,7 +8,6 @@ import logging
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
-import psycopg2
 from psycopg2.extras import RealDictCursor
 from pydantic import ValidationError
 
@@ -17,7 +16,6 @@ from bifrost_core.monitor.reader import write_support as ws
 from bifrost_core.monitor.reader.errors import WriteFailed, WriteInvalid, WriteNotFound
 from bifrost_core.monitor.reader.strategy_dim_catalog import is_valid_dim_code, validate_dim_fields
 from bifrost_core.monitor.schemas.gate_params import GateParams
-from bifrost_core.persistence.postgres.connection import _get_conn_params
 
 logger = logging.getLogger(__name__)
 
@@ -35,15 +33,8 @@ _METADATA_COLUMNS = (
 
 
 def _conn_from_config(status_config: Optional[dict]) -> Any:
-    """Open a connection from status_config (postgres). Returns None if config invalid."""
-    if not status_config or (status_config.get("sink") != "postgres" and not status_config.get("postgres")):
-        return None
-    try:
-        params = _get_conn_params(status_config)
-        return psycopg2.connect(**params)
-    except Exception as e:
-        logger.warning("gate_safety_write connect failed: %s", e)
-        return None
+    """Open a connection from status_config (postgres). None when not configured or unreachable."""
+    return ws.conn_from_config(status_config, "gate_safety_write", log=logger)
 
 
 def _payload_to_metadata_and_params(payload: Dict[str, Any]) -> Tuple[Dict[str, Any], Dict[str, Any]]:

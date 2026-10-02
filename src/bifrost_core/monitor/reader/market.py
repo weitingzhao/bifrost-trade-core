@@ -5,12 +5,11 @@ import math
 from datetime import date, datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
-import psycopg2
 from psycopg2.extras import RealDictCursor
 
 from bifrost_core.persistence.postgres.brokerage_tables import CONTRACT_QUOTE_LIVE
 from bifrost_core.portfolio.quote_freshness import fresh_quote_sql
-from bifrost_core.persistence.postgres.connection import _get_conn_params
+from bifrost_core.monitor.reader import write_support as ws
 
 logger = logging.getLogger(__name__)
 
@@ -449,8 +448,7 @@ def get_is_us_trading_day(status_config: dict, date_str: str) -> bool:
     if not status_config or (status_config.get("sink") != "postgres" and not status_config.get("postgres")):
         return True
     try:
-        params = _get_conn_params(status_config)
-        conn = psycopg2.connect(**params)
+        conn = ws.open_conn(status_config)
         try:
             return get_is_us_trading_day_conn(conn, date_str)
         finally:
@@ -465,8 +463,7 @@ def get_market_holidays(status_config: dict, exchange: Optional[str] = None, yea
     if not status_config or (status_config.get("sink") != "postgres" and not status_config.get("postgres")):
         return []
     try:
-        params = _get_conn_params(status_config)
-        conn = psycopg2.connect(**params)
+        conn = ws.open_conn(status_config)
         try:
             return get_market_holidays_conn(conn, exchange=exchange, year=year)
         finally:

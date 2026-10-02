@@ -19,12 +19,10 @@ import json
 import logging
 from typing import Any, Dict, Iterable, List, Optional
 
-import psycopg2
 from psycopg2.extras import RealDictCursor
 
 from bifrost_core.monitor.reader import write_support as ws
 from bifrost_core.monitor.reader.errors import WriteFailed, WriteInvalid, WriteNotFound
-from bifrost_core.persistence.postgres.connection import _get_conn_params
 
 logger = logging.getLogger(__name__)
 
@@ -52,16 +50,8 @@ def clean_tags(tags: Optional[Iterable[Any]]) -> Optional[List[str]]:
 
 
 def _conn_from_config(status_config: Optional[dict]) -> Any:
-    """Open a connection from status_config (postgres). None when not configured."""
-    if not status_config or (
-        status_config.get("sink") != "postgres" and not status_config.get("postgres")
-    ):
-        return None
-    try:
-        return psycopg2.connect(**_get_conn_params(status_config))
-    except Exception as e:  # pragma: no cover - connection failure path
-        logger.warning("trade_review connect failed: %s", e)
-        return None
+    """Open a connection from status_config (postgres). None when not configured or unreachable."""
+    return ws.conn_from_config(status_config, "trade_review", log=logger)
 
 
 def _close(conn: Any) -> None:

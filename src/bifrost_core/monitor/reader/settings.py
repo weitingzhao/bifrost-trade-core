@@ -3,10 +3,9 @@
 import logging
 from typing import Iterable, Any, Dict, Optional
 
-import psycopg2
 from psycopg2.extras import RealDictCursor
 
-from bifrost_core.persistence.postgres.connection import _get_conn_params
+from bifrost_core.monitor.reader import write_support as ws
 
 logger = logging.getLogger(__name__)
 
@@ -97,8 +96,7 @@ def write_ib_config(
     stream_host_val = (stream_host_account_id or "").strip() or None
     stream_secondary_val = (stream_secondary_account_id or "").strip() or None
     try:
-        params = _get_conn_params(status_config)
-        conn = psycopg2.connect(**params)
+        conn = ws.open_conn(status_config)
         try:
             with conn.cursor() as cur:
                 cur.execute(
@@ -162,8 +160,7 @@ def write_active_strategy_and_gates(
     if not status_config or (status_config.get("sink") != "postgres" and not status_config.get("postgres")):
         return False
     try:
-        params = _get_conn_params(status_config)
-        conn = psycopg2.connect(**params)
+        conn = ws.open_conn(status_config)
         try:
             with conn.cursor() as cur:
                 validate_settings_active_refs(cur, {c: values[c] for c in columns})

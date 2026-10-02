@@ -7,26 +7,17 @@ import json
 import logging
 from typing import Any, Dict, List, Optional
 
-import psycopg2
 
 from bifrost_core.monitor.reader import strategy as strategy_reader
 from bifrost_core.monitor.reader import write_support as ws
 from bifrost_core.monitor.reader.errors import WriteFailed, WriteInvalid, WriteNotFound
-from bifrost_core.persistence.postgres.connection import _get_conn_params
 
 logger = logging.getLogger(__name__)
 
 
 def _conn_from_config(status_config: Optional[dict]) -> Any:
-    """Open a connection from status_config (postgres). Returns None if config invalid."""
-    if not status_config or (status_config.get("sink") != "postgres" and not status_config.get("postgres")):
-        return None
-    try:
-        params = _get_conn_params(status_config)
-        return psycopg2.connect(**params)
-    except Exception as e:
-        logger.warning("strategy_opportunity_write connect failed: %s", e)
-        return None
+    """Open a connection from status_config (postgres). None when not configured or unreachable."""
+    return ws.conn_from_config(status_config, "strategy_opportunity_write", log=logger)
 
 
 def _normalize_symbols(value: Any) -> List[str]:

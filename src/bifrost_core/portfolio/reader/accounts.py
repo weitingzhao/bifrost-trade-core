@@ -29,10 +29,6 @@ from bifrost_core.persistence.postgres.brokerage_tables import (
     OPTION_STOCK_LINK,
     POSITIONS,
 )
-from bifrost_core.persistence.postgres.connection import (
-    _get_conn_params,
-    _get_golden_source_conn_params,
-)
 
 from bifrost_core.monitor.reader import market as market_module
 from bifrost_core.monitor.reader import write_support as ws
@@ -154,10 +150,8 @@ def replace_execution_instance_allocations(
         return False
     raw_tbl, pk_col, pk_val = _raw_table_pk_for_account_executions_id(account_executions_id)
     try:
-        params = _get_conn_params(status_config)
-        gs_params = _get_golden_source_conn_params(status_config)
-        conn = psycopg2.connect(**params)
-        golden = psycopg2.connect(**{**gs_params, "connect_timeout": 10})
+        conn = ws.open_conn(status_config)
+        golden = ws.open_conn(status_config, golden=True)
         try:
             with conn.cursor() as cur, golden.cursor() as gcur:
                 if not _apply_instance_allocations_on_cursor(
@@ -634,8 +628,7 @@ def sync_accounts_snapshot_to_db(
     if not accounts_list:
         return True
     try:
-        gs_params = _get_golden_source_conn_params(status_config)
-        conn = psycopg2.connect(**{**gs_params, "connect_timeout": 10})
+        conn = ws.open_conn(status_config, golden=True)
         try:
             with conn.cursor() as cur:
                 cur.execute("SET lock_timeout = '5s'")
@@ -673,8 +666,7 @@ def write_account_executions_to_db(
         stats_out["tws_raw_updated_ids"] = []
         stats_out["tws_raw_skipped_ids"] = []
     try:
-        gs_params = _get_golden_source_conn_params(status_config)
-        conn = psycopg2.connect(**{**gs_params, "connect_timeout": 10})
+        conn = ws.open_conn(status_config, golden=True)
         try:
             with conn.cursor() as cur:
                 for r in rows:
@@ -1060,8 +1052,7 @@ def update_execution_commission(
     yield_redemption_date_val = _nz(yield_redemption_date)
     currency_val = currency if (currency and str(currency).strip()) else None
     try:
-        gs_params = _get_golden_source_conn_params(status_config)
-        conn = psycopg2.connect(**{**gs_params, "connect_timeout": 10})
+        conn = ws.open_conn(status_config, golden=True)
         try:
             with conn.cursor() as cur:
                 cur.execute(
@@ -1145,10 +1136,8 @@ def insert_one_execution(status_config: dict, body: Dict[str, Any]) -> Optional[
             strategy_instance_id = None
     exec_dt = _exec_time_to_dt(exec_time)
     try:
-        params = _get_conn_params(status_config)
-        gs_params = _get_golden_source_conn_params(status_config)
-        env_conn = psycopg2.connect(**params)
-        golden = psycopg2.connect(**{**gs_params, "connect_timeout": 10})
+        env_conn = ws.open_conn(status_config)
+        golden = ws.open_conn(status_config, golden=True)
         try:
             with golden.cursor() as cur, env_conn.cursor() as env_cur:
                 cols = "account_id, exec_id, exec_time, symbol, sec_type, side, quantity, price, source, expiry, strike, option_right, exchange, order_id, cum_qty, contract_key, raw_extra, strategy_opportunity_id, strategy_instance_id"
@@ -1234,8 +1223,7 @@ def upsert_account_transactions(status_config: dict, rows: List[Dict[str, Any]])
     if not rows:
         return 0
     try:
-        gs_params = _get_golden_source_conn_params(status_config)
-        conn = psycopg2.connect(**{**gs_params, "connect_timeout": 10})
+        conn = ws.open_conn(status_config, golden=True)
         try:
             with conn.cursor() as cur:
                 for r in rows:
@@ -1393,10 +1381,8 @@ def update_one_execution(status_config: dict, account_executions_id: int, body: 
     raw_tbl, pk_col, pk_val = _raw_table_pk_for_account_executions_id(account_executions_id)
     values.append(pk_val)
     try:
-        params = _get_conn_params(status_config)
-        gs_params = _get_golden_source_conn_params(status_config)
-        env_conn = psycopg2.connect(**params)
-        golden = psycopg2.connect(**{**gs_params, "connect_timeout": 10})
+        env_conn = ws.open_conn(status_config)
+        golden = ws.open_conn(status_config, golden=True)
         try:
             with golden.cursor() as cur, env_conn.cursor() as env_cur:
                 if updates:
@@ -1473,10 +1459,8 @@ def delete_one_execution(status_config: dict, account_executions_id: int) -> boo
         return False
     raw_tbl, pk_col, pk_val = _raw_table_pk_for_account_executions_id(account_executions_id)
     try:
-        params = _get_conn_params(status_config)
-        gs_params = _get_golden_source_conn_params(status_config)
-        env_conn = psycopg2.connect(**params)
-        golden = psycopg2.connect(**{**gs_params, "connect_timeout": 10})
+        env_conn = ws.open_conn(status_config)
+        golden = ws.open_conn(status_config, golden=True)
         try:
             with golden.cursor() as cur, env_conn.cursor() as env_cur:
                 cur.execute(f"SELECT exec_id FROM {raw_tbl} WHERE {pk_col} = %s", (pk_val,))

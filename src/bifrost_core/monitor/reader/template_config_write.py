@@ -19,22 +19,13 @@ from bifrost_core.monitor.reader import template_config
 from bifrost_core.monitor.reader import write_support as ws
 from bifrost_core.monitor.reader.errors import WriteConflict, WriteFailed, WriteInvalid, WriteNotFound
 from bifrost_core.monitor.schemas.gate_params import TemplateLeg
-from bifrost_core.persistence.postgres.connection import _get_conn_params
 
 logger = logging.getLogger(__name__)
 
 
 def _conn_from_config(status_config: Optional[dict]) -> Any:
-    if not status_config or (
-        status_config.get("sink") != "postgres" and not status_config.get("postgres")
-    ):
-        return None
-    try:
-        params = _get_conn_params(status_config)
-        return psycopg2.connect(**params)
-    except Exception as e:
-        logger.warning("template_config_write connect failed: %s", e)
-        return None
+    """Open a connection from status_config (postgres). None when not configured or unreachable."""
+    return ws.conn_from_config(status_config, "template_config_write", log=logger)
 
 
 def _validate_leg(leg: Dict[str, Any]) -> None:

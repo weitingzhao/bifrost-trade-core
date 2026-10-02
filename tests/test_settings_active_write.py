@@ -7,6 +7,7 @@ from typing import Any, List, Tuple
 import pytest
 
 import bifrost_core.monitor.reader.settings as settings
+from bifrost_core.monitor.reader import write_support as ws
 
 
 class _Cur:
@@ -43,8 +44,7 @@ class _Conn:
 @pytest.fixture
 def log(monkeypatch: pytest.MonkeyPatch) -> List[Tuple[str, Any]]:
     seen: List[Tuple[str, Any]] = []
-    monkeypatch.setattr(settings, "_get_conn_params", lambda cfg: {})
-    monkeypatch.setattr(settings.psycopg2, "connect", lambda **_: _Conn(seen))
+    monkeypatch.setattr(ws, "connect", lambda params, golden=False: _Conn(seen))
     return seen
 
 
