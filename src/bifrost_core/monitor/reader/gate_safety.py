@@ -6,6 +6,7 @@ from typing import Any, Dict, List, Optional
 from psycopg2.extras import RealDictCursor
 
 from bifrost_core.monitor.schemas.gate_params import GateParams
+from bifrost_core.monitor.reader.errors import ReadFailed
 
 _GATE_SAFETY_SELECT = """
     SELECT gate_safety_strategy_id, name, version,
@@ -253,5 +254,6 @@ def list_gate_safety_sets(conn: Any) -> List[Dict[str, Any]]:
             )
             rows = cur.fetchall()
         return [{**dict(r), "structure_type": None} for r in rows]
-    except Exception:
-        return []
+    except Exception as e:
+        # A failed read is not an empty one: raise, so the API answers 503 (TD-08).
+        raise ReadFailed(f"list_gate_safety_sets: {e}") from e

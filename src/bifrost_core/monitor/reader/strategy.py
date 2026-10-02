@@ -4,6 +4,7 @@ import json
 from typing import Any, Dict, List, Optional
 
 from psycopg2.extras import RealDictCursor
+from bifrost_core.monitor.reader.errors import ReadFailed
 
 
 def _parse_json(raw: Any, default: Any) -> Any:
@@ -97,8 +98,9 @@ def list_structures(conn: Any, active_only: bool = True) -> List[Dict[str, Any]]
             item["legs"] = _structure_legs_from_row(item)
             item.pop("legs_json", None)
         return out
-    except Exception:
-        return []
+    except Exception as e:
+        # A failed read is not an empty one: raise, so the API answers 503 (TD-08).
+        raise ReadFailed(f"list_structures: {e}") from e
 
 
 _LIST_OPPORTUNITIES_SELECT = """
@@ -123,8 +125,9 @@ def list_opportunities(conn: Any, active_only: bool = True) -> List[Dict[str, An
             cur.execute(f"{_LIST_OPPORTUNITIES_SELECT} {where} ORDER BY o.name")
             rows = cur.fetchall()
         return [dict(r) for r in rows]
-    except Exception:
-        return []
+    except Exception as e:
+        # A failed read is not an empty one: raise, so the API answers 503 (TD-08).
+        raise ReadFailed(f"list_opportunities: {e}") from e
 
 
 def get_opportunity_by_id(conn: Any, strategy_opportunity_id: int) -> Optional[Dict[str, Any]]:
@@ -208,8 +211,9 @@ def list_allocations(conn: Any, active_only: bool = True) -> List[Dict[str, Any]
             cur.execute(f"{_LIST_ALLOCATIONS_SELECT} {where} ORDER BY p.name")
             rows = cur.fetchall()
         return [_allocation_row_to_dict(dict(r)) for r in rows]
-    except Exception:
-        return []
+    except Exception as e:
+        # A failed read is not an empty one: raise, so the API answers 503 (TD-08).
+        raise ReadFailed(f"list_allocations: {e}") from e
 
 
 def get_allocation_by_id(conn: Any, strategy_allocation_id: int) -> Optional[Dict[str, Any]]:

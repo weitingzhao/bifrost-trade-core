@@ -25,6 +25,7 @@ from bifrost_core.portfolio.reader import instrument_class as instrument_class_m
 from bifrost_core.monitor.reader import settings as settings_module
 from bifrost_core.monitor.reader import status as status_module
 from bifrost_core.monitor.reader import watchlist as watchlist_module
+from bifrost_core.monitor.reader.errors import ReadFailed
 
 logger = logging.getLogger(__name__)
 
@@ -376,9 +377,11 @@ class StatusReader:
     def list_gate_safety_sets(self) -> List[Dict[str, Any]]:
         """Return list of gate_safety_strategy rows for management dropdown."""
         if not self._connect():
-            return []
-        result = gate_safety_module.list_gate_safety_sets(self._conn)
-        self._end_read_txn()
+            raise ReadFailed("list_gate_safety_sets: database unavailable")
+        try:
+            result = gate_safety_module.list_gate_safety_sets(self._conn)
+        finally:
+            self._end_read_txn()
         return result
 
     def get_gate_safety_full_by_id(self, gate_safety_strategy_id: int) -> Optional[Dict[str, Any]]:
@@ -400,9 +403,11 @@ class StatusReader:
     def list_structures(self, active_only: bool = True) -> List[Dict[str, Any]]:
         """Return list of strategy_structure rows."""
         if not self._connect():
-            return []
-        result = strategy_module.list_structures(self._conn, active_only=active_only)
-        self._end_read_txn()
+            raise ReadFailed("list_structures: database unavailable")
+        try:
+            result = strategy_module.list_structures(self._conn, active_only=active_only)
+        finally:
+            self._end_read_txn()
         return result
 
     def list_dims_grouped(self) -> Dict[str, List[Dict[str, Any]]]:
@@ -436,9 +441,11 @@ class StatusReader:
     def list_opportunities(self, active_only: bool = True) -> List[Dict[str, Any]]:
         """Return list of strategy_opportunity rows (with structure_name from JOIN)."""
         if not self._connect():
-            return []
-        result = strategy_module.list_opportunities(self._conn, active_only=active_only)
-        self._end_read_txn()
+            raise ReadFailed("list_opportunities: database unavailable")
+        try:
+            result = strategy_module.list_opportunities(self._conn, active_only=active_only)
+        finally:
+            self._end_read_txn()
         return result
 
     def get_opportunity_by_id(self, strategy_opportunity_id: int) -> Optional[Dict[str, Any]]:
@@ -452,9 +459,11 @@ class StatusReader:
     def list_allocations(self, active_only: bool = True) -> List[Dict[str, Any]]:
         """Return list of strategy_allocation rows (with gate_safety_name from JOIN)."""
         if not self._connect():
-            return []
-        result = strategy_module.list_allocations(self._conn, active_only=active_only)
-        self._end_read_txn()
+            raise ReadFailed("list_allocations: database unavailable")
+        try:
+            result = strategy_module.list_allocations(self._conn, active_only=active_only)
+        finally:
+            self._end_read_txn()
         return result
 
     def get_allocation_by_id(self, strategy_allocation_id: int) -> Optional[Dict[str, Any]]:
@@ -475,16 +484,18 @@ class StatusReader:
     ) -> List[Dict[str, Any]]:
         """Return strategy_instance rows, optionally filtered by account_id, strategy_opportunity_id, strategy_instance_ids, opened_at range (Unix seconds)."""
         if not self._connect():
-            return []
-        result = strategy_instance_module.list_instances(
-            self._conn,
-            account_id=account_id,
-            strategy_opportunity_id=strategy_opportunity_id,
-            strategy_instance_ids=strategy_instance_ids,
-            opened_at_from=opened_at_from,
-            opened_at_until=opened_at_until,
-        )
-        self._end_read_txn()
+            raise ReadFailed("list_strategy_instances: database unavailable")
+        try:
+            result = strategy_instance_module.list_instances(
+                self._conn,
+                account_id=account_id,
+                strategy_opportunity_id=strategy_opportunity_id,
+                strategy_instance_ids=strategy_instance_ids,
+                opened_at_from=opened_at_from,
+                opened_at_until=opened_at_until,
+            )
+        finally:
+            self._end_read_txn()
         return result
 
     def get_strategy_instance_by_id(self, strategy_instance_id: int) -> Optional[Dict[str, Any]]:

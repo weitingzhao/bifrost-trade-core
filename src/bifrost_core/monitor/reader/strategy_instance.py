@@ -15,6 +15,7 @@ from bifrost_core.persistence.postgres.brokerage_tables import (
     INSTANCE_ALLOCATION,
     POSITIONS,
 )
+from bifrost_core.monitor.reader.errors import ReadFailed
 
 logger = logging.getLogger(__name__)
 
@@ -106,10 +107,8 @@ def list_instances(
             out.append(d)
         return out
     except Exception as e:
-        # Warning, not debug: an empty list here reaches the page as "no
-        # instances" — the failure must at least be visible in the log.
-        logger.warning("list_instances failed: %s", e)
-        return []
+        # A failed read is not an empty one: raise, so the API answers 503 (TD-08).
+        raise ReadFailed(f"list_instances: {e}") from e
 
 
 def get_instance_by_id(conn: Any, strategy_instance_id: int) -> Optional[Dict[str, Any]]:
