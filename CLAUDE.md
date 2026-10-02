@@ -1,5 +1,5 @@
 <!--
-parity-ids: core-versioning-v2
+parity-ids: core-versioning-v3
 对等文件: .cursor/rules/versioning.mdc
 改任一侧必须同步另一侧并 bump 两侧版本号；校验: bash ../scripts/check-agent-config-parity.sh
 -->
@@ -28,11 +28,12 @@ parity-ids: core-versioning-v2
 本 repo 是 **`bifrost-core` Python 共享库** (`src/bifrost_core/`) — 被所有其他后端 repo pip install 后引用：
 
 - `config/` — YAML 配置加载（Settings、环境合并）
-- `core/` — 工具函数（日志、Redis URL 解析）
-- `persistence/` — PostgreSQL sink、DDL、账户同步
-- `portfolio/` — 持仓模型、Greeks 聚合、多账户
+- `core/` — 工具函数（日志、Redis URL 解析、`realtime/` Redis 行情 / 账户键）
+- `persistence/` — `postgres/`（DDL、Golden Source `raw_broker` DDL 与 FDW、`PostgreSQLSink`、账户同步）、`redis_daemon_state.py`（daemon IPC）
+- `portfolio/` — 持仓模型、Greeks 聚合、多账户、`ib_edge.py`（从 Redis 读账户快照）
 - `ib_operator/` — IB Operator RPC 客户端（client 侧）
-- `monitor/` — 状态读取层（供 API 后端查询 DB）
+- `monitor/` — 读取层与写入函数（供 API 后端与 daemon 使用）
+- `pricing/`、`observability/`、`sse/` — Black-Scholes、Prometheus、SSE 队列工具
 
 **本 repo 不包含任何业务进程或应用入口**。交易 daemon 归属 `bifrost-trade-worker`。
 
@@ -48,13 +49,17 @@ make db-init        # 初始化/刷新 PostgreSQL schema
 
 ## 架构关键点
 
-- `persistence/postgres_sink.py` — StatusSink 的唯一实现，写 daemon 状态快照
+- `persistence/postgres/postgres_sink.py` — `PostgreSQLSink`，`StatusSink` 的唯一实现：daemon 状态快照写 per-env Redis，
+  账户 / 持仓 / 成交 / `contract_quote_live` 写 Golden Source `raw_broker.*`
 - `portfolio/` 的模型被 API 后端 (`bifrost-trade-api`) 直接 import
-- `ib_operator/` 仅是 RPC client 侧封装；生产侧执行由 **Platform IB Gateway Plugin → `redis-ib`** 承接（`bifrost-trade-socket` 的 Operator 为半退役参考实现）
+- `ib_operator/` 仅是 RPC client 侧封装；IB 侧由 **Platform IB Gateway Plugin → `redis-ib`** 承接（`bifrost-trade-socket` 已归档）。
+  D10 BLOCKED：不得经它接通实盘下单
 
 ## 版本发布规范
 
-- 修改 `src/bifrost_core/` 中的共享库后，必须 bump `pyproject.toml` 中的 version（当前 **0.20.2**）
+- 修改 `src/bifrost_core/` 中的共享库后，必须 bump `pyproject.toml` 中的 version（当前版本以 `pyproject.toml` 为准）
+- 下游与发布流程见 `.cursor/rules/versioning.mdc`
+- 下面是 0.20.2 及以前的版本说明，之后不再在此追加：新版本的说明在提交信息里，DDL 变更在 `docs/DATABASE.md` §6
 - 其他 repo 通过 git tag 安装：`pip install git+https://github.com/ORG/bifrost-trade-core.git@v0.x.x`
 - 破坏性变更需要同步更新所有依赖 repo 的 pyproject.toml
 - **0.20.2**: `account_sync_heartbeat_from_state` returns `sync_failures` / `last_error` /
@@ -98,8 +103,9 @@ make db-init        # 初始化/刷新 PostgreSQL schema
 
 ## 数据库规范
 
-- 开发库：`bifrost_dev`，生产库：`bifrost_prod`
-- 表命名前缀：`daemon_`、`account_`、`contract_`、`strategy_`、`gate_safety_`、`job_`、`preference_`
+- 三环境库：`bifrost_dev` / `bifrost_stg` / `bifrost_prod`（同一份 `_ensure_tables()`）；IB 券商数据在 Golden Source `raw_broker.*`
+- 表命名前缀：`strategy_`、`gate_safety_`、`preference_`；桥表 `account_execution_*`。`daemon_*`（→ Redis）与 `job_*`（→ Plugin）已退役。
+  规则见 `../.claude/skills/database-design/SKILL.md`
 - FK 列名与被引用 PK 名完全一致
 - `gate_safety_strategy`：metadata 标量 + **`params_json`**（Wave 9）；六个 `dim_*` 列为 `dim_*_t` enum（Wave 10）
 - DDL 变更必须在 `docs/DATABASE.md` 的 §6 变更日志中记录

@@ -19,7 +19,7 @@ Authoritative runtime DDL:
 
 | Domain | Module | Database |
 |--------|--------|----------|
-| Per-env Trade (`strategy_*`, `gate_safety_*`, `preference_*`, `watchlist`, jobs, bridge tables) | [`ddl.py`](../src/bifrost_core/persistence/postgres/ddl.py) `_ensure_tables()` | `bifrost_{dev,stg,prod}` `public.*` |
+| Per-env Trade (`settings`, `strategy_*`, `trade_review`, `gate_safety_*`, `preference_*`, `watchlist`, bridge tables) | [`ddl.py`](../src/bifrost_core/persistence/postgres/ddl.py) `_ensure_tables()` | `bifrost_{dev,stg,prod}` `public.*` |
 | Daemon / Account Sync process IPC | [`redis_daemon_state.py`](../src/bifrost_core/persistence/redis_daemon_state.py) — see [DAEMON_IPC_REDIS.md](DAEMON_IPC_REDIS.md) | per-env Redis (`config.redis`) |
 | Brokerage Golden Source (IB account / positions / executions) | [`brokerage_ddl.py`](../src/bifrost_core/persistence/postgres/brokerage_ddl.py) | `bifrost_golden_source` `raw_broker.*` |
 | Market Data (Polygon) | Market Data Plugin | `bifrost_golden_source` `raw_market.*` / `ops_jobs.*` |
@@ -39,9 +39,11 @@ bifrost_golden_source
 └── flex_ops.* (DEPRECATED views → ops_jobs; audit only)
 
 bifrost_{dev,stg,prod}
-├── public.*          # strategy_*, gate_safety_*, preferences, watchlist, bridge tables (settings)
+├── public.*          # settings, strategy_*, trade_review, gate_safety_*, preference_*, watchlist,
+│                     # bridge tables — 18 tables, every column in the appendix below
 ├── brokerage.*       # postgres_fdw foreign tables → raw_broker + local views
-└── market.*          # postgres_fdw foreign tables → raw_market (canonical GS: raw_market.*)
+└── market.*          # postgres_fdw foreign tables → raw_market (ticker, us_market_holiday,
+                      # ticker_related) + local view v_us_equity_universe
 ```
 
 Do not create `flex_ops` on Trade env databases. Flex queue + freshness live in Golden Source `ops_jobs` only.
@@ -55,11 +57,17 @@ Do not create `flex_ops` on Trade env databases. Flex queue + freshness live in 
 
 **Wave 8 — `settings.active_*_id` FK** (core 0.16.0): `ON DELETE SET NULL` to `strategy_structure`, `gate_safety_strategy`, `strategy_allocation`.
 
-**Wave 8 — Flex tokens**: canonical source is K8s Secret (`FLEX_HOST_TOKEN` / `FLEX_SECONDARY_TOKEN`); `settings.ib_flex_*_token` columns **DEPRECATED** (not dropped yet).
+**Flex tokens**: the only source is the K8s Secret (`FLEX_HOST_TOKEN` / `FLEX_SECONDARY_TOKEN`). The
+`settings.ib_flex_host_token` / `ib_flex_secondary_token` columns were deprecated in Wave 8 and **dropped in
+Wave 11** (core 0.18.0, `migrate_wave11_drop_flex_token_columns()`, which `_ensure_tables()` still runs); DEV has
+neither column (checked 2026-10-01).
 
 Qualified names: [`brokerage_tables.py`](../src/bifrost_core/persistence/postgres/brokerage_tables.py), [`market_tables.py`](../src/bifrost_core/persistence/postgres/market_tables.py).
 
-Writers open `connect_golden_source()`. Readers stay on the per-env connection and JOIN `brokerage.*` via FDW.
+Writers connect to Golden Source with `psycopg2.connect(**_get_golden_source_conn_params(config))`
+([`connection.py`](../src/bifrost_core/persistence/postgres/connection.py)) and write `raw_broker.*` (`GOLDEN_*`
+names). Readers stay on the per-env connection and JOIN `brokerage.*` via FDW. One exception: the batch
+strategy-attribution update writes through the updatable `brokerage.executions_raw_*` foreign tables.
 
 Process IPC (heartbeat / run_status / control) is **not** in PostgreSQL. `_ensure_tables()` does not create the retired `daemon_*` / `account_sync_*` IPC tables.
 
@@ -77,16 +85,45 @@ Retired (merged into `gate_safety_strategy` in core `0.8.1`): `gate_safety_state
 
 `settings.active_gate_safety_strategy_id` points at the active set. Opportunity / allocation tables keep FK `*_gate_safety_strategy_id`.
 
-## Strategy tables (9 tables)
+## Strategy tables (7 tables)
+
+The seven `strategy_*` tables on the live DB, plus `trade_review` (strategy-adjacent, documented below).
+Every column is in the [appendix](#appendix--public-columns-bifrost_dev-2026-10-01).
 
 | Table | jsonb / notes |
 |-------|----------------|
-| `strategy_template` | `legs_json`, `params_json`, `characteristics_json` |
-| `strategy_structure` | `legs_json`, `meta_json` |
-| `strategy_opportunity` | `symbols_json`, `entry_conditions_json` |
-| `strategy_allocation` | scalar limits; N:M via `strategy_allocation_opportunity` |
-| `strategy_instance` | unchanged |
+| `strategy_template` | `legs_json`, `params_json`, `characteristics_json`; six `dim_*` enum columns |
+| `strategy_structure` | `legs_json`, `meta_json`; optional FK to a template |
+| `strategy_opportunity` | `symbols_json`, `entry_conditions_json`; FK to a structure and a default gate set |
+| `strategy_allocation` | scalar limits (`max_positions`, `max_bp_pct`); optional gate set |
+| `strategy_allocation_opportunity` | N:M junction allocation ↔ opportunity (`sort_order`); both FKs ON DELETE CASCADE |
+| `strategy_instance` | one traded instance of an opportunity in one account — see below |
 | `strategy_plan` | `legs_json`, `source_json`; structured trade plans — **advisory, no execution consumer (D10)** |
+
+### `strategy_instance`
+
+One position the desk actually opened under an opportunity, in one IB account. Executions are attributed to
+it, plans that were filled point at it, and Review keeps one verdict per instance.
+
+| Column | Meaning |
+|--------|---------|
+| `strategy_instance_id` | PK |
+| `strategy_opportunity_id` | NOT NULL, FK → `strategy_opportunity` **ON DELETE RESTRICT** (an opportunity with instances cannot be deleted) |
+| `account_id` | IB account. An execution can be allocated to the instance only when its account matches |
+| `opened_at` | When the position was opened (NOT NULL). A filled plan's `filled_at` is this value |
+| `label` / `notes` | Free text |
+| `created_at` / `updated_at` | Row timestamps |
+
+Indexes: `(strategy_opportunity_id)`, `(account_id, opened_at)`. Nothing in the schema limits an
+opportunity/account pair to one open instance.
+
+Referenced by: `account_execution_instance_allocation.strategy_instance_id` (ON DELETE RESTRICT),
+`strategy_plan.strategy_instance_id` (SET NULL), `trade_review.strategy_instance_id` (CASCADE, UNIQUE), and —
+with no FK, because they live in Golden Source — `raw_broker.executions_raw_*.strategy_instance_id`
+(see [BROKERAGE_GOLDEN_SOURCE.md](BROKERAGE_GOLDEN_SOURCE.md#strategy-attribution-and-legacy-columns)).
+An instance's executions are the union of both links: quantity splits in
+`account_execution_instance_allocation`, and whole executions tagged on the raw row
+([`strategy_instance.py`](../src/bifrost_core/monitor/reader/strategy_instance.py)).
 
 ### `strategy_plan` (core **0.22.0**)
 
@@ -155,7 +192,7 @@ the book's Δ (stocks + options) leaves fixed-income and cash-like shares out.
 | Column | Meaning |
 |--------|---------|
 | `preference_instrument_class_id` | PK |
-| `contract_key` | UNIQUE — the key positions, watchlist and category tags use (STK: `SYMBOL|STK|||`, e.g. `SGOV|STK|||`). No FK: a registration outlives the holding |
+| `contract_key` | UNIQUE — the key positions, watchlist and category tags use (STK: `SYMBOL\|STK\|\|\|`, e.g. `SGOV\|STK\|\|\|`). No FK: a registration outlives the holding |
 | `instrument_class` | `stock` · `fixed_income` · `cash_like` (CHECK; text rather than an enum type, so a fourth class is one constraint change) |
 | `note` | Optional: why it is registered so |
 
@@ -212,12 +249,17 @@ Reads and writes: [`saved_search.py`](../src/bifrost_core/monitor/reader/saved_s
 | — | 0.26.0 | Add `trade_review` (one review record per strategy instance: tags added / dropped, `reviewed_at`) |
 | — | 0.27.0 | Add `preference_instrument_class` (stock / fixed_income / cash_like per `contract_key`); the positions read LEFT JOINs it where the table exists (unclassified otherwise) |
 | — | 0.28.0 | Add `preference_saved_search` (a page's scope under a name, one operator); no DDL for the new deletes — `delete_plan` (drafts) and `strategy_rules_delete` (opportunity · allocation · gate set, refused while in use) |
+| — | docs only (2026-10-01) | No DDL. DATABASE.md corrected against the live DEV schema (debt TD-35): the Flex token columns are recorded as dropped (Wave 11), not pending; `jobs` removed from the per-env table list (retired Wave 5); "Strategy tables" lists the 7 `strategy_*` tables that exist (adds `strategy_allocation_opportunity`) and documents `strategy_instance`; `market.us_market_holiday` and `market.ticker_related` documented; `connect_golden_source()` (deleted by TD-59) no longer cited; per-table column appendix added. BROKERAGE_GOLDEN_SOURCE.md documents the `raw_broker` non-vendor columns |
 
 
 ## Brokerage tables
 
-| Golden Source | Legacy public name |
-|---------------|--------------------|
+Per-env FDW name; the physical table is the same name under Golden Source `raw_broker.*`. Columns and the
+non-vendor columns (`strategy_*`, `legacy_account_executions_id`, `id` PKs) are in
+[BROKERAGE_GOLDEN_SOURCE.md](BROKERAGE_GOLDEN_SOURCE.md).
+
+| Per-env FDW (`raw_broker.*` in Golden Source) | Legacy public name |
+|-----------------------------------------------|--------------------|
 | `brokerage.account` | `account` |
 | `brokerage.positions` | `account_positions` |
 | `brokerage.executions_raw_tws` | `executions_raw_tws` |
@@ -230,10 +272,15 @@ Reads and writes: [`saved_search.py`](../src/bifrost_core/monitor/reader/saved_s
 | `brokerage.settings_flex` | `settings_ib_flex` |
 | views `brokerage.executions*` | `account_executions*` |
 
-Bridge tables remain per-env (FK to `strategy_instance`):
+Bridge tables remain per-env. They key executions by the unified `account_executions_id` of the
+`brokerage.executions` view and cannot FK it (the rows live in Golden Source); integrity is checked in core:
 
-- `account_execution_instance_allocation`
-- `account_execution_option_stock_link`
+- `account_execution_instance_allocation` — splits one execution's quantity across `strategy_instance` rows
+  (FK `strategy_instance_id` ON DELETE RESTRICT; UNIQUE per execution × instance). Writing allocations for an
+  execution clears that execution's raw-row `strategy_*` tags
+  ([`accounts.py`](../src/bifrost_core/portfolio/reader/accounts.py) `_apply_instance_allocations_on_cursor`)
+- `account_execution_option_stock_link` — links an option execution to the stock fill(s) of its exercise or
+  assignment (`role` ∈ exercise · assignment); no FK at all
 
 `_ensure_tables()` does **not** recreate migrated brokerage objects in `public`.
 `option_trades` is P7-retired (Market Data Plugin) and is also not created.
@@ -243,10 +290,43 @@ Bridge tables remain per-env (FK to `strategy_instance`):
 | Per-env FDW | Golden Source | Purpose |
 |-------------|---------------|---------|
 | `market.ticker` | `raw_market.ticker` | Full ticker catalog (FDW foreign table) |
-| `market.v_us_equity_universe` | `raw_market.v_us_equity_universe` | Local VIEW: active US CS equities |
+| `market.us_market_holiday` | `raw_market.us_market_holiday` | Exchange holiday / early-close calendar (FDW foreign table) |
+| `market.ticker_related` | `raw_market.ticker_related` | Related tickers per symbol, ranked (FDW foreign table) |
+| `market.v_us_equity_universe` | — (local view over `market.ticker`) | Local VIEW: active US CS equities |
 | `public.v_us_equity_universe` | — | **Stable Trade read contract** over `market.v_us_equity_universe` (adds synthetic `tickers_id`); not scheduled for removal |
 
-Setup: `setup_fdw_market_tables()` in [`brokerage_ddl.py`](../src/bifrost_core/persistence/postgres/brokerage_ddl.py). Requires `golden_source_server` to exist (created by `setup_fdw_foreign_tables`).
+Setup: `setup_fdw_market_tables()` in [`brokerage_ddl.py`](../src/bifrost_core/persistence/postgres/brokerage_ddl.py) imports
+the three tables listed in `MARKET_FOREIGN_TABLES` ([`market_tables.py`](../src/bifrost_core/persistence/postgres/market_tables.py)).
+Requires `golden_source_server` to exist (created by `setup_fdw_foreign_tables`). The Market Data Plugin writes
+the Golden Source side; Trade only reads.
+
+#### `market.us_market_holiday`
+
+Replaces the retired `public.reference_us_holidays`. Read by core
+[`monitor/reader/market.py`](../src/bifrost_core/monitor/reader/market.py) (`get_is_us_trading_day_conn`: a weekday is a
+trading day unless an `NYSE` row for that date has `status = 'closed'`) and by trade-api `GET /market/holidays`.
+`POST` / `DELETE /market/holidays` answer 405 — the calendar is the Plugin's.
+
+| Column | Type | Null | Notes |
+|--------|------|------|-------|
+| `exchange` | text | no | e.g. `NYSE` |
+| `holiday_date` | date | no | |
+| `name` | text | yes | |
+| `status` | text | yes | `closed` (vendor `closed`/`holiday`) or `early-close`; only `closed` makes a weekday a non-trading day |
+| `open_time` / `close_time` | timestamptz | yes | the vendor's `open` / `close` for that date (session bounds on an early close) |
+| `fetched_at` | timestamptz | no | when the Plugin pulled the row |
+
+#### `market.ticker_related`
+
+Replaces the retired `public.ticker_related_tickers`. Read by trade-api
+`GET /research/data/ticker-overview/{symbol}` (top 12 `to_symbol` by `rank` for `from_symbol`).
+
+| Column | Type | Null | Notes |
+|--------|------|------|-------|
+| `from_symbol` | text | no | the symbol asked about |
+| `to_symbol` | text | no | a related symbol |
+| `rank` | int4 | no | ascending = more related |
+| `fetched_at` | timestamptz | no | when the Plugin pulled the row |
 
 Retired (core 0.8.3): `public.us_equity_universe` (physical table), `public.sepa_symbol_price_readiness` (physical table), `public.v_sepa_us_equity_universe` (view), `public.v_sepa_symbol_price_readiness` (view), `universe_sync.py` (Plugin API sync module). Universe data now comes directly from Golden Source via FDW. Price readiness summary is computed at query time from Plugin API `/readiness/bar-aggregate`.
 
@@ -280,3 +360,279 @@ make db-init-brokerage-fdw   # + FDW into current per-env DB (needs superuser)
 ```
 
 See also [BROKERAGE_GOLDEN_SOURCE.md](BROKERAGE_GOLDEN_SOURCE.md), [DAEMON_IPC_REDIS.md](DAEMON_IPC_REDIS.md), and [GOLDEN_SOURCE_RETENTION.md](../../bifrost-trade-infra/docs/GOLDEN_SOURCE_RETENTION.md).
+
+## Appendix — public columns (bifrost_dev, 2026-10-01)
+
+Generated from DEV `information_schema.columns` + `pg_constraint` on 2026-10-01 — the 18 base tables in `public`.
+STG / PROD run the same `_ensure_tables()`; when a table here disagrees with `ddl.py`, the live DB wins and
+this appendix is stale — regenerate it. Meaning of the jsonb columns and the state machines is in the sections
+above; this is the type-level reference. "Unified execution id" = `brokerage.executions.account_executions_id`:
+Flex `executions_raw_flex_id` (> 0), TWS `-executions_raw_tws_id`, journal `-(1000000000 + executions_raw_journal_id)`.
+
+Enum types (labels, unordered): `dim_direction_t` bearish · bullish · neutral; `dim_structure_t` butterfly ·
+calendar · condor · custom · diagonal · ratio · single_leg · straddle · vertical; `dim_coverage_t`
+cash_secured · covered · naked · synthetic; `dim_risk_t` defined · undefined; `dim_volatility_t` long_vol ·
+short_vol · vol_neutral; `dim_time_t` flex · leaps · monthly · weekly.
+
+The one public view, `v_us_equity_universe`, is `market.v_us_equity_universe` (`symbol`, `name`, `market`,
+`locale`, `primary_exchange`, `instrument_type`, `active`, `sector`, `industry`, `list_date`, `market_cap`) plus
+`tickers_id = hashtext(upper(trim(symbol)))::bigint`.
+
+#### `account_execution_instance_allocation`
+
+| Column | Type | Null | Default / notes |
+|--------|------|------|-----------------|
+| `account_execution_instance_allocation_id` | int8 | no | bigserial; PK |
+| `account_id` | text | no |  |
+| `account_executions_id` | int8 | no | UNIQUE (account_executions_id, strategy_instance_id); unified id of `brokerage.executions` (see below); no FK — the execution lives in Golden Source |
+| `strategy_instance_id` | int8 | no | UNIQUE (account_executions_id, strategy_instance_id); FK → `strategy_instance.strategy_instance_id` ON DELETE RESTRICT |
+| `allocated_quantity` | float8 | no | signed share of the fill; the rows of one execution must sum to its signed quantity (checked in core, not by the DB) |
+| `created_at` | timestamptz | no | `now()` |
+| `updated_at` | timestamptz | no | `now()` |
+
+#### `account_execution_option_stock_link`
+
+| Column | Type | Null | Default / notes |
+|--------|------|------|-----------------|
+| `account_execution_option_stock_link_id` | int8 | no | bigserial; PK |
+| `account_id` | text | no |  |
+| `option_account_executions_id` | int8 | no | UNIQUE (option_account_executions_id, stock_account_executions_id); unified execution id of the option leg; no FK |
+| `stock_account_executions_id` | int8 | no | UNIQUE (option_account_executions_id, stock_account_executions_id); unified execution id of the stock fill; no FK |
+| `role` | text | yes | CHECK ∈ exercise · assignment |
+| `note` | text | yes |  |
+| `created_at` | timestamptz | no | `now()` |
+
+#### `gate_safety_strategy`
+
+| Column | Type | Null | Default / notes |
+|--------|------|------|-----------------|
+| `gate_safety_strategy_id` | int8 | no | bigserial; PK |
+| `name` | text | no |  |
+| `version` | int4 | no | `1` |
+| `is_active` | bool | no | `true` |
+| `created_at` | timestamptz | no | `now()` |
+| `updated_at` | timestamptz | no | `now()` |
+| `dim_direction` | dim_direction_t | yes |  |
+| `dim_structure` | dim_structure_t | yes |  |
+| `dim_coverage` | dim_coverage_t | yes |  |
+| `dim_risk` | dim_risk_t | yes |  |
+| `dim_volatility` | dim_volatility_t | yes |  |
+| `dim_time` | dim_time_t | yes |  |
+| `params_json` | jsonb | no | `'{}'` |
+
+#### `preference_instrument_class`
+
+| Column | Type | Null | Default / notes |
+|--------|------|------|-----------------|
+| `preference_instrument_class_id` | int8 | no | bigserial; PK |
+| `contract_key` | text | no | UNIQUE |
+| `instrument_class` | text | no | CHECK ∈ stock · fixed_income · cash_like |
+| `note` | text | yes |  |
+| `created_at` | timestamptz | no | `now()` |
+| `updated_at` | timestamptz | no | `now()` |
+
+#### `preference_market_streams_symbol_order`
+
+| Column | Type | Null | Default / notes |
+|--------|------|------|-----------------|
+| `category_name` | text | no | PK (category_name, symbol); category by name, no FK |
+| `symbol` | text | no | PK (category_name, symbol) |
+| `sort_order` | int4 | no | `0` |
+| `updated_at` | timestamptz | yes | `now()` |
+
+#### `preference_position_categories`
+
+| Column | Type | Null | Default / notes |
+|--------|------|------|-----------------|
+| `id` | int8 | no | bigserial; PK; legacy name — not `<table>_id` |
+| `name` | text | no |  |
+| `description` | text | yes |  |
+| `sort_order` | int4 | yes |  |
+| `created_at` | timestamptz | yes | `now()` |
+| `updated_at` | timestamptz | yes | `now()` |
+
+#### `preference_position_category_tags`
+
+| Column | Type | Null | Default / notes |
+|--------|------|------|-----------------|
+| `account_id` | text | no | PK (account_id, contract_key) |
+| `contract_key` | text | no | PK (account_id, contract_key); one category per (account, contract) |
+| `category_id` | int4 | no | FK → `preference_position_categories.id` ON DELETE CASCADE; int4 referencing a bigint PK |
+| `created_at` | timestamptz | yes | `now()` |
+
+#### `preference_saved_search`
+
+| Column | Type | Null | Default / notes |
+|--------|------|------|-----------------|
+| `preference_saved_search_id` | int8 | no | bigserial; PK |
+| `owner` | text | no | `'operator'`; UNIQUE (owner, route, label) |
+| `route` | text | no | UNIQUE (owner, route, label) |
+| `label` | text | no | UNIQUE (owner, route, label) |
+| `state_json` | jsonb | no | `'{}'` |
+| `created_at` | timestamptz | no | `now()` |
+| `updated_at` | timestamptz | no | `now()` |
+
+#### `settings`
+
+| Column | Type | Null | Default / notes |
+|--------|------|------|-----------------|
+| `id` | int4 | no | `1`; PK; single row; `_ensure_tables()` seeds `id = 1` |
+| `ib_host_account_id` | text | yes | trading (host) IB account — `/status` `ib_client.account.trading`; monitor `POST /config/ib` |
+| `flex_default_range_days` | int4 | no | `30`; Flex Query range in days (reader falls back to 30) |
+| `flex_init_range_days` | int4 | no | `360`; Flex Query initial range in days (reader falls back to 360) |
+| `stream_host_account_id` | text | yes | event-stream host account — `ib_client.account.event_host` |
+| `stream_secondary_account_id` | text | yes | event-stream secondary account — `ib_client.account.event_secondary` |
+| `active_strategy_structure_id` | int8 | yes | FK → `strategy_structure.strategy_structure_id` ON DELETE SET NULL; monitor `POST /config/active-strategy`; the daemon loads it at start |
+| `active_gate_safety_strategy_id` | int8 | yes | FK → `gate_safety_strategy.gate_safety_strategy_id` ON DELETE SET NULL; monitor `POST /config/active-strategy`; the daemon loads the gate set at start |
+| `active_strategy_allocation_id` | int8 | yes | FK → `strategy_allocation.strategy_allocation_id` ON DELETE SET NULL; monitor `POST /config/active-strategy` |
+
+#### `strategy_allocation`
+
+| Column | Type | Null | Default / notes |
+|--------|------|------|-----------------|
+| `strategy_allocation_id` | int8 | no | bigserial; PK |
+| `name` | text | no |  |
+| `gate_safety_strategy_id` | int8 | yes | FK → `gate_safety_strategy.gate_safety_strategy_id` |
+| `is_active` | bool | no | `true` |
+| `created_at` | timestamptz | no | `now()` |
+| `updated_at` | timestamptz | no | `now()` |
+| `max_positions` | int4 | yes |  |
+| `max_bp_pct` | numeric | yes |  |
+
+#### `strategy_allocation_opportunity`
+
+| Column | Type | Null | Default / notes |
+|--------|------|------|-----------------|
+| `strategy_allocation_id` | int8 | no | PK (strategy_allocation_id, strategy_opportunity_id); FK → `strategy_allocation.strategy_allocation_id` ON DELETE CASCADE |
+| `strategy_opportunity_id` | int8 | no | PK (strategy_allocation_id, strategy_opportunity_id); FK → `strategy_opportunity.strategy_opportunity_id` ON DELETE CASCADE |
+| `sort_order` | int4 | no | `0` |
+
+#### `strategy_instance`
+
+| Column | Type | Null | Default / notes |
+|--------|------|------|-----------------|
+| `strategy_instance_id` | int8 | no | bigserial; PK |
+| `strategy_opportunity_id` | int8 | no | FK → `strategy_opportunity.strategy_opportunity_id` ON DELETE RESTRICT |
+| `account_id` | text | no | IB account the instance trades in; allocation rows must match it |
+| `opened_at` | timestamptz | no | when the position was opened; a filled `strategy_plan.filled_at` is this value |
+| `label` | text | yes |  |
+| `notes` | text | yes |  |
+| `created_at` | timestamptz | no | `now()` |
+| `updated_at` | timestamptz | no | `now()` |
+
+#### `strategy_opportunity`
+
+| Column | Type | Null | Default / notes |
+|--------|------|------|-----------------|
+| `strategy_opportunity_id` | int8 | no | bigserial; PK |
+| `name` | text | no |  |
+| `strategy_structure_id` | int8 | no | FK → `strategy_structure.strategy_structure_id` |
+| `default_gate_safety_strategy_id` | int8 | yes | FK → `gate_safety_strategy.gate_safety_strategy_id` |
+| `scope_type` | text | yes | free text, no CHECK |
+| `is_active` | bool | no | `true` |
+| `created_at` | timestamptz | no | `now()` |
+| `updated_at` | timestamptz | no | `now()` |
+| `entry_conditions_json` | jsonb | no | `'[]'` |
+| `symbols_json` | jsonb | no | `'[]'` |
+
+#### `strategy_plan`
+
+| Column | Type | Null | Default / notes |
+|--------|------|------|-----------------|
+| `strategy_plan_id` | int8 | no | bigserial; PK |
+| `account_id` | text | no |  |
+| `symbol` | text | no |  |
+| `structure_label` | text | no |  |
+| `strategy_structure_id` | int8 | yes | FK → `strategy_structure.strategy_structure_id` ON DELETE SET NULL |
+| `strategy_opportunity_id` | int8 | yes | FK → `strategy_opportunity.strategy_opportunity_id` ON DELETE SET NULL |
+| `legs_json` | jsonb | no | `'[]'` |
+| `qty` | int4 | no | CHECK `qty > 0` |
+| `price_effect` | text | yes | CHECK ∈ credit · debit |
+| `limit_price` | numeric | yes | CHECK `limit_price >= 0` |
+| `target_kind` | text | yes | CHECK set together with `target_value`; CHECK ∈ credit_pct · option_price · underlying_price |
+| `target_value` | numeric | yes | CHECK set together with `target_kind` |
+| `stop_kind` | text | yes | CHECK set together with `stop_value`; CHECK ∈ credit_multiple · option_price · underlying_price |
+| `stop_value` | numeric | yes | CHECK set together with `stop_kind` |
+| `exit_by` | date | yes |  |
+| `rationale` | text | yes |  |
+| `source_kind` | text | no | `'manual'`; CHECK ∈ manual · symbol · hypothesis · inbox_draft · roll |
+| `source_ref` | text | yes |  |
+| `source_json` | jsonb | no | `'[]'` |
+| `status` | text | no | `'draft'`; CHECK ∈ draft · intended · filled · cancelled; `expired` is derived, never stored (see §strategy_plan) |
+| `expires_at` | timestamptz | yes |  |
+| `intended_at` | timestamptz | yes |  |
+| `filled_at` | timestamptz | yes |  |
+| `cancelled_at` | timestamptz | yes |  |
+| `strategy_instance_id` | int8 | yes | FK → `strategy_instance.strategy_instance_id` ON DELETE SET NULL |
+| `parent_strategy_plan_id` | int8 | yes | FK → `strategy_plan.strategy_plan_id` ON DELETE SET NULL |
+| `created_at` | timestamptz | no | `now()` |
+| `updated_at` | timestamptz | no | `now()` |
+
+#### `strategy_structure`
+
+| Column | Type | Null | Default / notes |
+|--------|------|------|-----------------|
+| `strategy_structure_id` | int8 | no | bigserial; PK |
+| `name` | text | no |  |
+| `strategy_template_id` | int8 | yes | FK → `strategy_template.strategy_template_id` |
+| `version` | int4 | no | `1` |
+| `is_active` | bool | no | `true` |
+| `created_at` | timestamptz | no | `now()` |
+| `updated_at` | timestamptz | no | `now()` |
+| `notes` | text | yes |  |
+| `meta_json` | jsonb | no | `'{}'` |
+| `legs_json` | jsonb | no | `'[]'` |
+
+#### `strategy_template`
+
+| Column | Type | Null | Default / notes |
+|--------|------|------|-----------------|
+| `strategy_template_id` | int8 | no | bigserial; PK |
+| `template_code` | text | no | UNIQUE |
+| `display_name` | text | no |  |
+| `dim_direction` | dim_direction_t | yes |  |
+| `dim_structure` | dim_structure_t | yes |  |
+| `dim_coverage` | dim_coverage_t | yes |  |
+| `dim_risk` | dim_risk_t | yes |  |
+| `dim_volatility` | dim_volatility_t | yes |  |
+| `dim_time` | dim_time_t | yes |  |
+| `explanation` | text | yes |  |
+| `typical_use` | text | yes |  |
+| `example` | text | yes |  |
+| `nature` | text | yes |  |
+| `sort_order` | int4 | no | `0` |
+| `is_active` | bool | no | `true` |
+| `created_at` | timestamptz | no | `now()` |
+| `updated_at` | timestamptz | no | `now()` |
+| `params_json` | jsonb | no | `'[]'` |
+| `characteristics_json` | jsonb | no | `'[]'` |
+| `legs_json` | jsonb | no | `'[]'` |
+
+#### `trade_review`
+
+| Column | Type | Null | Default / notes |
+|--------|------|------|-----------------|
+| `trade_review_id` | int8 | no | bigserial; PK |
+| `strategy_instance_id` | int8 | no | FK → `strategy_instance.strategy_instance_id` ON DELETE CASCADE; UNIQUE |
+| `tags_added` | jsonb | no | `'[]'` |
+| `tags_dropped` | jsonb | no | `'[]'` |
+| `note` | text | yes |  |
+| `reviewed_at` | timestamptz | yes | NULL = awaiting review |
+| `created_at` | timestamptz | no | `now()` |
+| `updated_at` | timestamptz | no | `now()` |
+
+#### `watchlist`
+
+| Column | Type | Null | Default / notes |
+|--------|------|------|-----------------|
+| `contract_key` | text | no | PK; `SYMBOL\|STK\|\|\|` or `SYMBOL\|OPT\|YYYYMMDD\|STRIKE\|R` |
+| `symbol` | text | yes |  |
+| `sec_type` | text | yes |  |
+| `expiry` | text | yes |  |
+| `strike` | float8 | yes |  |
+| `option_right` | text | yes |  |
+| `display_label` | text | yes |  |
+| `source` | text | yes | writer passes `'manual'` unless told otherwise |
+| `created_at` | timestamptz | yes | `now()` |
+| `category_id` | int4 | yes | FK → `preference_position_categories.id` ON DELETE SET NULL |
+| `optionable` | bool | yes | `false`; NULL reads as false; an update without the field keeps the stored value |
