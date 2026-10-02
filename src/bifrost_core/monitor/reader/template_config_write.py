@@ -1,6 +1,9 @@
 """Write strategy_template (+ legs, params, characteristics).
 
 Strategy dimensions are catalog-defined (strategy_dim_catalog, the dim_*_t enums) and are not written here.
+
+``patch_template`` and ``delete_template_strict`` (core 0.33.0, TD-15) raise the
+``Write*`` outcomes; the older writers keep raising ``ValueError`` for one release.
 """
 
 import json
@@ -13,6 +16,8 @@ import psycopg2
 from bifrost_core.monitor.reader import strategy_dim_catalog
 from bifrost_core.monitor.reader import structure_type_config_constants as _const
 from bifrost_core.monitor.reader import template_config
+from bifrost_core.monitor.reader import write_support as ws
+from bifrost_core.monitor.reader.errors import WriteConflict, WriteFailed, WriteInvalid, WriteNotFound
 from bifrost_core.monitor.schemas.gate_params import TemplateLeg
 from bifrost_core.persistence.postgres.connection import _get_conn_params
 
@@ -301,3 +306,108 @@ def replace_template_characteristics(
         conn.commit()
     finally:
         conn.close()
+
+
+# --- TD-15 writers (core 0.33.0): return the row / raise Write* ---------------------
+
+_DIM_FIELDS = ("dim_direction", "dim_structure", "dim_coverage", "dim_risk", "dim_volatility", "dim_time")
+_TEMPLATE_TEXT_FIELDS = ("explanation", "typical_use", "example", "nature")
+TEMPLATE_PATCHABLE = (
+    "template_code",
+    "display_name",
+    *_DIM_FIELDS,
+    *_TEMPLATE_TEXT_FIELDS,
+    "sort_order",
+    "is_active",
+)
+_TEMPLATE_CODE_RE = re.compile(r"^[a-z][a-z0-9_]*$")
+
+
+def patch_template(conn_or_config: Any, strategy_template_id: int, fields: Dict[str, Any]) -> Dict[str, Any]:
+    """Change the template's own fields; return it as ``template_config.get_template_detail`` reads it.
+
+    ``template_code`` NOT NULL, unique, already lowercase snake_case (not rewritten) ·
+    ``display_name`` NOT NULL text · ``dim_*`` nullable catalog codes · ``explanation`` /
+    ``typical_use`` / ``example`` / ``nature`` nullable text · ``sort_order`` NOT NULL whole
+    number · ``is_active`` boolean. Legs, params and characteristics keep their own
+    replace writers. Raises WriteInvalid, WriteNotFound, WriteConflict (code in use), WriteFailed.
+    """
+    what = f"template {strategy_template_id}"
+    fields = ws.check_fields(fields, TEMPLATE_PATCHABLE, "template")
+    columns: Dict[str, Any] = {}
+    if "template_code" in fields:
+        code = ws.text(fields["template_code"], "template_code", nullable=False)
+        if not _TEMPLATE_CODE_RE.match(code or ""):
+            raise WriteInvalid("template_code must be lowercase snake_case (a-z, 0-9, _; a letter first).")
+        columns["template_code"] = code
+    if "display_name" in fields:
+        columns["display_name"] = ws.text(fields["display_name"], "display_name", nullable=False)
+    for name in _DIM_FIELDS:
+        if name in fields:
+            code = ws.text(fields[name], name, nullable=True)
+            if code is not None and not strategy_dim_catalog.is_valid_dim_code(name[len("dim_"):], code):
+                raise WriteInvalid(f"{name}: {code} is not a code in the dim catalog.")
+            columns[name] = code
+    for name in _TEMPLATE_TEXT_FIELDS:
+        if name in fields:
+            columns[name] = ws.text(fields[name], name, nullable=True)
+    if "sort_order" in fields:
+        columns["sort_order"] = ws.integer(fields["sort_order"], "sort_order", nullable=False)
+    if "is_active" in fields:
+        columns["is_active"] = ws.boolean(fields["is_active"], "is_active")
+    assignments, values = ws.set_clause(columns)
+    with ws.write_connection(conn_or_config, what) as conn:
+        try:
+            with ws.write_transaction(conn, what):
+                with conn.cursor() as cur:
+                    cur.execute(
+                        f"UPDATE strategy_template SET {assignments} WHERE strategy_template_id = %s",
+                        [*values, strategy_template_id],
+                    )
+                    if cur.rowcount == 0:
+                        raise WriteNotFound(f"No template {strategy_template_id}.")
+                row = template_config.get_template_detail(conn, strategy_template_id)
+                if row is None:
+                    raise WriteFailed(f"{what} was changed but could not be read back; nothing was saved.")
+        except WriteConflict as e:
+            if "template_code" in columns:
+                raise WriteConflict(
+                    f"template_code {columns['template_code']} is already used by another template."
+                ) from e
+            raise
+    return row
+
+
+def delete_template_strict(conn_or_config: Any, strategy_template_id: int) -> Dict[str, Any]:
+    """Hard-delete a template no structure uses. Returns ``{"deleted": "hard", "strategy_template_id"}``.
+
+    A structure that uses it -- active or deactivated (a deactivated structure still
+    references the template) -- refuses the delete with WriteConflict naming them.
+    Raises WriteNotFound, WriteConflict, WriteFailed.
+    """
+    what = f"template {strategy_template_id}"
+    with ws.write_connection(conn_or_config, what) as conn, ws.write_transaction(conn, what, on_fk="conflict"):
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT 1 FROM strategy_template WHERE strategy_template_id = %s FOR UPDATE",
+                (strategy_template_id,),
+            )
+            if cur.fetchone() is None:
+                raise WriteNotFound(f"No template {strategy_template_id}.")
+            cur.execute(
+                "SELECT name, is_active FROM strategy_structure WHERE strategy_template_id = %s "
+                "ORDER BY is_active DESC, name",
+                (strategy_template_id,),
+            )
+            users = cur.fetchall() or []
+            if users:
+                names = [f"{u[0]}{'' if u[1] else ' (deactivated)'}" for u in users]
+                verb = "uses" if len(users) == 1 else "use"
+                raise WriteConflict(
+                    f"{ws.plural(len(users), 'structure', 'structures')} {verb} this template: "
+                    f"{ws.name_list(names)}. Point {'it' if len(users) == 1 else 'them'} at another template first."
+                )
+            cur.execute("DELETE FROM strategy_template WHERE strategy_template_id = %s", (strategy_template_id,))
+            if cur.rowcount == 0:
+                raise WriteNotFound(f"No template {strategy_template_id}.")
+    return {"deleted": "hard", "strategy_template_id": strategy_template_id}

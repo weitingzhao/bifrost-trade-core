@@ -1,10 +1,16 @@
-"""Write strategy_allocation and strategy_allocation_opportunity. Used by POST/PUT allocations API."""
+"""Write strategy_allocation and strategy_allocation_opportunity. Used by POST/PUT allocations API.
+
+``patch_allocation`` (core 0.33.0, TD-15) returns the row and raises ``Write*``;
+``update_allocation`` keeps answering a bool for one release."""
 
 import logging
 from typing import Any, Dict, List, Optional
 
 import psycopg2
 
+from bifrost_core.monitor.reader import strategy as strategy_reader
+from bifrost_core.monitor.reader import write_support as ws
+from bifrost_core.monitor.reader.errors import WriteFailed, WriteInvalid, WriteNotFound
 from bifrost_core.persistence.postgres.connection import _get_conn_params
 
 logger = logging.getLogger(__name__)
@@ -206,3 +212,106 @@ def update_allocation(
             conn.close()
         except Exception:
             pass
+
+
+# --- TD-15 writer (core 0.33.0): return the row / raise Write* ----------------------
+
+ALLOCATION_PATCHABLE = (
+    "name",
+    "gate_safety_strategy_id",
+    "max_positions",
+    "max_bp_pct",
+    "allocation_limits",
+    "is_active",
+    "strategy_opportunity_ids",
+)
+_LIMIT_KEYS = ("max_positions", "max_bp_pct")
+
+
+def _expand_allocation_limits(fields: Dict[str, Any]) -> Dict[str, Any]:
+    """``allocation_limits`` is the PUT body's shape: an object of the two limits.
+
+    In a PATCH its keys are patched one by one (a key left out keeps its value);
+    ``allocation_limits: null`` clears both. Sending a limit both ways is refused.
+    """
+    if "allocation_limits" not in fields:
+        return fields
+    out = dict(fields)
+    limits = out.pop("allocation_limits")
+    if limits is None:
+        limits = {k: None for k in _LIMIT_KEYS}
+    if not isinstance(limits, dict):
+        raise WriteInvalid("allocation_limits must be an object with max_positions and/or max_bp_pct.")
+    unknown = sorted(str(k) for k in limits if k not in _LIMIT_KEYS)
+    if unknown:
+        raise WriteInvalid(f"Unknown allocation_limits field: {', '.join(unknown)}. Allowed: max_positions, max_bp_pct.")
+    for key, value in limits.items():
+        if key in out:
+            raise WriteInvalid(f"{key} was sent both on its own and inside allocation_limits; send it once.")
+        out[key] = value
+    return out
+
+
+def patch_allocation(conn_or_config: Any, strategy_allocation_id: int, fields: Dict[str, Any]) -> Dict[str, Any]:
+    """Change the fields the client sent; return the row as ``strategy.get_allocation_by_id`` reads it.
+
+    ``name`` NOT NULL text · ``is_active`` boolean · ``gate_safety_strategy_id`` nullable id ·
+    ``max_positions`` nullable whole number >= 0 · ``max_bp_pct`` nullable number >= 0
+    (or both through ``allocation_limits``) · ``strategy_opportunity_ids`` replaces the
+    membership in the order given (``[]`` empties it; null is refused).
+    Raises WriteInvalid (incl. an id that does not exist), WriteNotFound, WriteFailed.
+    """
+    what = f"allocation {strategy_allocation_id}"
+    fields = ws.check_fields(fields, ALLOCATION_PATCHABLE, "allocation")
+    fields = _expand_allocation_limits(fields)
+    if not fields:
+        raise WriteInvalid("Nothing to change: allocation_limits was empty.")
+    columns: Dict[str, Any] = {}
+    if "name" in fields:
+        columns["name"] = ws.text(fields["name"], "name", nullable=False)
+    if "gate_safety_strategy_id" in fields:
+        columns["gate_safety_strategy_id"] = ws.row_id(
+            fields["gate_safety_strategy_id"], "gate_safety_strategy_id", nullable=True
+        )
+    if "max_positions" in fields:
+        columns["max_positions"] = ws.integer(fields["max_positions"], "max_positions", nullable=True, minimum=0)
+    if "max_bp_pct" in fields:
+        columns["max_bp_pct"] = ws.number(fields["max_bp_pct"], "max_bp_pct", nullable=True, minimum=0)
+    if "is_active" in fields:
+        columns["is_active"] = ws.boolean(fields["is_active"], "is_active")
+    opportunity_ids: Optional[List[int]] = None
+    if "strategy_opportunity_ids" in fields:
+        raw = ws.list_value(fields["strategy_opportunity_ids"], "strategy_opportunity_ids")
+        opportunity_ids = [ws.row_id(v, "strategy_opportunity_ids item", nullable=False) for v in raw]
+        if len(set(opportunity_ids)) != len(opportunity_ids):
+            raise WriteInvalid("strategy_opportunity_ids lists an opportunity twice.")
+    with ws.write_connection(conn_or_config, what) as conn, ws.write_transaction(conn, what):
+        with conn.cursor() as cur:
+            if columns:
+                assignments, values = ws.set_clause(columns)
+                cur.execute(
+                    f"UPDATE strategy_allocation SET {assignments} WHERE strategy_allocation_id = %s",
+                    [*values, strategy_allocation_id],
+                )
+            else:
+                cur.execute(
+                    "UPDATE strategy_allocation SET updated_at = now() WHERE strategy_allocation_id = %s",
+                    (strategy_allocation_id,),
+                )
+            if cur.rowcount == 0:
+                raise WriteNotFound(f"No allocation {strategy_allocation_id}.")
+            if opportunity_ids is not None:
+                cur.execute(
+                    "DELETE FROM strategy_allocation_opportunity WHERE strategy_allocation_id = %s",
+                    (strategy_allocation_id,),
+                )
+                for i, oid in enumerate(opportunity_ids):
+                    cur.execute(
+                        "INSERT INTO strategy_allocation_opportunity "
+                        "(strategy_allocation_id, strategy_opportunity_id, sort_order) VALUES (%s, %s, %s)",
+                        (strategy_allocation_id, oid, i),
+                    )
+        row = strategy_reader.get_allocation_by_id(conn, strategy_allocation_id)
+        if row is None:
+            raise WriteFailed(f"{what} was changed but could not be read back; nothing was saved.")
+    return row

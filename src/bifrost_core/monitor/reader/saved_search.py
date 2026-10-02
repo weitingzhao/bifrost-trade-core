@@ -20,6 +20,8 @@ from typing import Any, Dict, List, Optional
 import psycopg2
 from psycopg2.extras import RealDictCursor
 
+from bifrost_core.monitor.reader import write_support as ws
+from bifrost_core.monitor.reader.errors import WriteInvalid, WriteNotFound
 from bifrost_core.persistence.postgres.connection import _get_conn_params
 
 logger = logging.getLogger(__name__)
@@ -29,12 +31,14 @@ _LABEL_MAX = 120
 _ROUTE_MAX = 200
 
 
-class SavedSearchError(ValueError):
-    """A save the table would refuse; ``reason`` is what to show."""
+class SavedSearchError(WriteInvalid):
+    """A save the table would refuse; ``reason`` is what to show.
+
+    A ``WriteInvalid`` (and so still a ``ValueError``) since core 0.33.0.
+    """
 
     def __init__(self, reason: str) -> None:
         super().__init__(reason)
-        self.reason = reason
 
 
 def _conn_from_config(status_config: Optional[dict]) -> Any:
@@ -160,3 +164,19 @@ def delete_saved_search(status_config: Optional[dict], saved_search_id: int, own
             conn.close()
         except Exception:  # pragma: no cover - close failure path
             pass
+
+
+def delete_saved_search_strict(conn_or_config: Any, saved_search_id: int, owner: str = OPERATOR) -> Dict[str, Any]:
+    """``delete_saved_search`` with outcomes (core 0.33.0, TD-15):
+    ``{"deleted": "hard", "preference_saved_search_id"}``, or WriteNotFound (no such row
+    for this owner) / WriteFailed (not configured, unreachable, statement failed)."""
+    what = f"saved search {saved_search_id}"
+    with ws.write_connection(conn_or_config, what) as conn, ws.write_transaction(conn, what):
+        with conn.cursor() as cur:
+            cur.execute(
+                "DELETE FROM preference_saved_search WHERE preference_saved_search_id = %s AND owner = %s",
+                (saved_search_id, owner),
+            )
+            if cur.rowcount == 0:
+                raise WriteNotFound(f"No saved search {saved_search_id}.")
+    return {"deleted": "hard", "preference_saved_search_id": saved_search_id}

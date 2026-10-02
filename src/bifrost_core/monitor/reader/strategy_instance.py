@@ -1,4 +1,8 @@
-"""Strategy instance CRUD: list, get, create, update, open-legs. Used for trade attribution (SI.2)."""
+"""Strategy instance CRUD: list, get, create, update, open-legs. Used for trade attribution (SI.2).
+
+``patch_instance`` and ``delete_instance_strict`` (core 0.33.0, TD-15) raise the
+``Write*`` outcomes; ``update_instance`` / ``delete_instance`` keep answering a
+bool for one release."""
 
 import logging
 import math
@@ -12,10 +16,19 @@ from bifrost_core.portfolio.quote_freshness import fresh_quote_sql
 from bifrost_core.persistence.postgres.brokerage_tables import (
     CONTRACT_QUOTE_LIVE,
     EXECUTIONS_FINAL,
+    GOLDEN_EXECUTIONS_RAW_FLEX,
+    GOLDEN_EXECUTIONS_RAW_JOURNAL,
+    GOLDEN_EXECUTIONS_RAW_TWS,
     INSTANCE_ALLOCATION,
     POSITIONS,
 )
-from bifrost_core.monitor.reader.errors import ReadFailed
+from bifrost_core.monitor.reader import write_support as ws
+from bifrost_core.monitor.reader.errors import (
+    ReadFailed,
+    WriteConflict,
+    WriteFailed,
+    WriteNotFound,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -335,3 +348,127 @@ def get_instance_open_option_legs(conn: Any, strategy_instance_id: int) -> List[
     except Exception as e:
         logger.warning("get_instance_open_option_legs failed: %s", e)
         return []
+
+
+# --- TD-15 writers (core 0.33.0): return the row / raise Write* --------------------
+
+INSTANCE_PATCHABLE = ("label", "notes", "opened_at", "created_at")
+
+
+def patch_instance(conn_or_config: Any, strategy_instance_id: int, fields: Dict[str, Any]) -> Dict[str, Any]:
+    """Change the fields the client sent; return the row as ``get_instance_by_id`` reads it.
+
+    ``label`` / ``notes``: nullable text -- null clears, blank is refused.
+    ``opened_at`` / ``created_at``: NOT NULL timestamps (datetime, Unix seconds or ISO 8601).
+    Raises WriteInvalid (empty, unknown key, bad value), WriteNotFound, WriteFailed.
+    """
+    what = f"strategy instance {strategy_instance_id}"
+    fields = ws.check_fields(fields, INSTANCE_PATCHABLE, "strategy instance")
+    columns: Dict[str, Any] = {}
+    for name in ("label", "notes"):
+        if name in fields:
+            columns[name] = ws.text(fields[name], name, nullable=True)
+    for name in ("opened_at", "created_at"):
+        if name in fields:
+            columns[name] = ws.timestamp(fields[name], name, nullable=False)
+    assignments, values = ws.set_clause(columns)
+    with ws.write_connection(conn_or_config, what) as conn, ws.write_transaction(conn, what):
+        with conn.cursor() as cur:
+            cur.execute(
+                f"UPDATE strategy_instance SET {assignments} WHERE strategy_instance_id = %s",
+                [*values, strategy_instance_id],
+            )
+            if cur.rowcount == 0:
+                raise WriteNotFound(f"No strategy instance {strategy_instance_id}.")
+        row = get_instance_by_id(conn, strategy_instance_id)
+        if row is None:
+            raise WriteFailed(f"{what} was changed but could not be read back; nothing was saved.")
+    return row
+
+
+_GOLDEN_RAW_EXECUTION_TABLES = (
+    (GOLDEN_EXECUTIONS_RAW_TWS, "executions_raw_tws_id"),
+    (GOLDEN_EXECUTIONS_RAW_FLEX, "executions_raw_flex_id"),
+    (GOLDEN_EXECUTIONS_RAW_JOURNAL, "executions_raw_journal_id"),
+)
+
+
+def count_attributed_executions(status_config: Any, strategy_instance_id: int) -> int:
+    """Executions whose Golden Source raw row names this instance directly.
+
+    Direct attribution is ``raw_broker.executions_raw_{tws,flex,journal}.strategy_instance_id``
+    on Golden Source (no FK: a cross-database reference). A fill that both TWS and
+    Flex recorded counts once (``exec_id``). The three environments share these rows,
+    so an id written from another environment counts too -- the check errs on the
+    side of keeping the instance. Raises WriteFailed when Golden Source cannot be read.
+    """
+    parts = []
+    for table, pk in _GOLDEN_RAW_EXECUTION_TABLES:
+        tag = table.rsplit(".", 1)[-1]
+        parts.append(
+            f"SELECT COALESCE(NULLIF(trim(exec_id), ''), '{tag}:' || {pk}::text) AS k "
+            f"FROM {table} WHERE strategy_instance_id = %s"
+        )
+    sql = "SELECT count(DISTINCT k) FROM (" + " UNION ALL ".join(parts) + ") attributed"
+    what = f"the executions attributed to strategy instance {strategy_instance_id}"
+    with ws.write_connection(status_config, what, golden=True) as golden:
+        try:
+            with golden.cursor() as cur:
+                cur.execute(sql, [strategy_instance_id] * len(parts))
+                row = cur.fetchone()
+            ws.rollback_quietly(golden)
+        except Exception as e:
+            ws.rollback_quietly(golden)
+            logger.warning("count_attributed_executions(%s) failed: %s", strategy_instance_id, e)
+            raise WriteFailed(
+                f"Could not read {what} from the Golden Source; nothing was deleted."
+            ) from e
+    return int(row[0]) if row and row[0] is not None else 0
+
+
+def delete_instance_strict(status_config: Any, strategy_instance_id: int) -> Dict[str, Any]:
+    """Delete an instance nothing is attributed to. Returns ``{"deleted": "hard", "strategy_instance_id"}``.
+
+    Refused (WriteConflict, nothing deleted) when executions are split-allocated to
+    it (``account_execution_instance_allocation``, per env) or directly attributed
+    to it on Golden Source (``count_attributed_executions``). The Golden Source check
+    needs the status config: a live connection is not enough, and an unreachable
+    Golden Source is WriteFailed, not a blind delete. Its review (``trade_review``)
+    goes with it (CASCADE); a plan that pointed at it keeps its text (SET NULL).
+    """
+    what = f"strategy instance {strategy_instance_id}"
+    if not isinstance(status_config, dict):
+        raise WriteFailed(
+            f"Cannot delete {what}: the status config is needed to check the Golden Source for attributed executions."
+        )
+    with ws.write_connection(status_config, what) as conn, ws.write_transaction(conn, what, on_fk="conflict"):
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT 1 FROM strategy_instance WHERE strategy_instance_id = %s FOR UPDATE",
+                (strategy_instance_id,),
+            )
+            if cur.fetchone() is None:
+                raise WriteNotFound(f"No strategy instance {strategy_instance_id}.")
+            cur.execute(
+                f"SELECT count(DISTINCT account_executions_id) FROM {_ALLOC_TABLE} WHERE strategy_instance_id = %s",
+                (strategy_instance_id,),
+            )
+            split = cur.fetchone()
+            n_split = int(split[0]) if split and split[0] is not None else 0
+            if n_split:
+                raise WriteConflict(
+                    f"{ws.plural(n_split, 'execution is', 'executions are')} split-allocated to this instance; "
+                    "move or clear those allocations first."
+                )
+            n_direct = count_attributed_executions(status_config, strategy_instance_id)
+            if n_direct:
+                raise WriteConflict(
+                    f"{ws.plural(n_direct, 'execution is', 'executions are')} attributed to this instance."
+                )
+            cur.execute(
+                "DELETE FROM strategy_instance WHERE strategy_instance_id = %s",
+                (strategy_instance_id,),
+            )
+            if cur.rowcount == 0:
+                raise WriteNotFound(f"No strategy instance {strategy_instance_id}.")
+    return {"deleted": "hard", "strategy_instance_id": strategy_instance_id}

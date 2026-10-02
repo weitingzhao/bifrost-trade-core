@@ -19,6 +19,10 @@ editing it after the fact would remove the judgement. Roll it instead -- a new
 plan with `source_kind='roll'` and `parent_strategy_plan_id` set. There is no
 delete.
 
+One exception, in ``patch_plan`` only (core 0.33.0): an intended plan may change its
+``expires_at`` and nothing else -- that is what the plan card's "Extend 7 days" and
+"Re-issue intent" buttons do. ``update_plan`` (PUT) still refuses it.
+
 `expired` is not a stored status. An intent whose `expires_at` has passed reads
 as expired, and can still be linked to a fill or cancelled; the row keeps
 saying `intended` because that is what happened.
@@ -34,6 +38,8 @@ from typing import Any, Dict, List, Optional
 import psycopg2
 from psycopg2.extras import RealDictCursor
 
+from bifrost_core.monitor.reader import write_support as ws
+from bifrost_core.monitor.reader.errors import WriteConflict, WriteFailed, WriteInvalid, WriteNotFound
 from bifrost_core.persistence.postgres.connection import _get_conn_params
 
 logger = logging.getLogger(__name__)
@@ -78,12 +84,17 @@ _EDITABLE_COLUMNS = (
 )
 
 
-class PlanRuleError(ValueError):
-    """A plan rule said no, and `reason` is what to show the reader."""
+class PlanRuleError(WriteConflict, ValueError):
+    """A plan rule said no, and `reason` is what to show the reader.
+
+    A ``WriteConflict`` (409) since core 0.33.0 -- the old writers raise it for
+    state refusals and for bad input alike; ``patch_plan`` / ``delete_plan_strict``
+    raise ``WriteInvalid`` for input and ``WriteConflict`` for state instead.
+    Still a ``ValueError`` for the callers that catch it that way.
+    """
 
     def __init__(self, reason: str) -> None:
         super().__init__(reason)
-        self.reason = reason
 
 
 def plan_effective_status(
@@ -573,3 +584,137 @@ def _close(conn: Any) -> None:
         conn.close()
     except Exception:  # pragma: no cover - close failure path
         pass
+
+
+# --- TD-15 writers (core 0.33.0): return the row / raise Write* ---------------------
+
+PLAN_PATCHABLE = (*_EDITABLE_COLUMNS, "legs", "source")
+PLAN_PATCHABLE_WHEN_INTENDED = ("expires_at",)
+_PRICE_EFFECTS = ("credit", "debit")
+_TARGET_KINDS = ("credit_pct", "option_price", "underlying_price")
+_STOP_KINDS = ("credit_multiple", "option_price", "underlying_price")
+_SOURCE_KINDS = ("manual", "symbol", "hypothesis", "inbox_draft", "roll")
+
+
+def _patch_plan_columns(fields: Dict[str, Any]) -> Dict[str, Any]:
+    """Validate each sent field into its column value. Every refusal is WriteInvalid."""
+    cols: Dict[str, Any] = {}
+    for name in ("account_id", "structure_label"):
+        if name in fields:
+            cols[name] = ws.text(fields[name], name, nullable=False)
+    if "symbol" in fields:
+        cols["symbol"] = (ws.text(fields["symbol"], "symbol", nullable=False) or "").upper()
+    for name in ("strategy_structure_id", "strategy_opportunity_id"):
+        if name in fields:
+            cols[name] = ws.row_id(fields[name], name, nullable=True)
+    if "qty" in fields:
+        cols["qty"] = ws.integer(fields["qty"], "qty", nullable=False, minimum=1)
+    if "price_effect" in fields:
+        cols["price_effect"] = ws.choice(fields["price_effect"], "price_effect", _PRICE_EFFECTS, nullable=True)
+    if "limit_price" in fields:
+        cols["limit_price"] = ws.number(fields["limit_price"], "limit_price", nullable=True, minimum=0)
+    if "target_kind" in fields:
+        cols["target_kind"] = ws.choice(fields["target_kind"], "target_kind", _TARGET_KINDS, nullable=True)
+    if "target_value" in fields:
+        cols["target_value"] = ws.number(fields["target_value"], "target_value", nullable=True)
+    if "stop_kind" in fields:
+        cols["stop_kind"] = ws.choice(fields["stop_kind"], "stop_kind", _STOP_KINDS, nullable=True)
+    if "stop_value" in fields:
+        cols["stop_value"] = ws.number(fields["stop_value"], "stop_value", nullable=True)
+    if "exit_by" in fields:
+        cols["exit_by"] = ws.calendar_date(fields["exit_by"], "exit_by", nullable=True)
+    for name in ("rationale", "source_ref"):
+        if name in fields:
+            cols[name] = ws.text(fields[name], name, nullable=True)
+    if "source_kind" in fields:
+        cols["source_kind"] = ws.choice(fields["source_kind"], "source_kind", _SOURCE_KINDS, nullable=False)
+    if "expires_at" in fields:
+        cols["expires_at"] = ws.timestamp(fields["expires_at"], "expires_at", nullable=True)
+    if "legs" in fields:
+        try:
+            legs = normalize_plan_legs(ws.list_value(fields["legs"], "legs"))
+        except PlanRuleError as e:
+            raise WriteInvalid(e.reason) from None
+        cols["legs_json"] = json.dumps(legs)
+    if "source" in fields:
+        items = ws.list_value(fields["source"], "source")
+        if any(not isinstance(item, dict) for item in items):
+            raise WriteInvalid("source must be a list of objects.")
+        cols["source_json"] = json.dumps([dict(item) for item in items])
+    return cols
+
+
+def patch_plan(conn_or_config: Any, strategy_plan_id: int, fields: Dict[str, Any]) -> Dict[str, Any]:
+    """Change the fields the client sent; return the plan as ``get_plan`` reads it.
+
+    A draft takes any field of ``PLAN_PATCHABLE``. An intended plan (expired or not --
+    expiry is not stored) takes ``expires_at`` alone; any other field is WriteConflict
+    with the reason, and so is any field on a filled or cancelled plan.
+
+    NOT NULL: ``account_id`` · ``symbol`` (upper-cased) · ``structure_label`` · ``qty`` (>= 1) ·
+    ``source_kind``. Nullable (null clears): ``strategy_structure_id`` · ``strategy_opportunity_id`` ·
+    ``price_effect`` · ``limit_price`` (>= 0) · ``target_kind`` / ``target_value`` · ``stop_kind`` /
+    ``stop_value`` (each pair set or cleared together, checked against the stored half) ·
+    ``exit_by`` · ``rationale`` · ``source_ref`` · ``expires_at``. Lists: ``legs`` (validated as on
+    create), ``source`` -- replaced whole, ``[]`` empties, null refused.
+    Raises WriteInvalid, WriteNotFound, WriteConflict, WriteFailed.
+    """
+    what = f"plan {strategy_plan_id}"
+    fields = ws.check_fields(fields, PLAN_PATCHABLE, "plan")
+    cols = _patch_plan_columns(fields)
+    with ws.write_connection(conn_or_config, what) as conn, ws.write_transaction(conn, what):
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                "SELECT status, target_kind, target_value, stop_kind, stop_value "
+                "FROM strategy_plan WHERE strategy_plan_id = %s FOR UPDATE",
+                (strategy_plan_id,),
+            )
+            current = cur.fetchone()
+        if current is None:
+            raise WriteNotFound(f"No plan {strategy_plan_id}.")
+        status = str(current["status"])
+        if status == "intended":
+            frozen = sorted(k for k in fields if k not in PLAN_PATCHABLE_WHEN_INTENDED)
+            if frozen:
+                raise WriteConflict(
+                    f"This plan is intended, so only its expiry (expires_at) can change, not "
+                    f"{', '.join(frozen)}. Cancel it and write a new one, or roll it."
+                )
+        elif status != "draft":
+            raise WriteConflict(f"This plan is {status}, and cannot be edited.")
+        merged = {**dict(current), **cols}
+        for kind, value, label in (
+            ("target_kind", "target_value", "target"),
+            ("stop_kind", "stop_value", "stop"),
+        ):
+            if (merged.get(kind) is None) != (merged.get(value) is None):
+                raise WriteInvalid(f"A {label} needs both a kind and a value (or neither).")
+        assignments, values = ws.set_clause(cols, jsonb=("legs_json", "source_json"))
+        with conn.cursor() as cur:
+            cur.execute(
+                f"UPDATE strategy_plan SET {assignments} WHERE strategy_plan_id = %s",
+                [*values, strategy_plan_id],
+            )
+            if cur.rowcount == 0:
+                raise WriteNotFound(f"No plan {strategy_plan_id}.")
+        row = _get_plan_on(conn, strategy_plan_id)
+        if row is None:
+            raise WriteFailed(f"{what} was changed but could not be read back; nothing was saved.")
+    return row
+
+
+def delete_plan_strict(conn_or_config: Any, strategy_plan_id: int) -> Dict[str, Any]:
+    """``delete_plan`` with outcomes: ``{"deleted": "hard", "strategy_plan_id"}``, or
+    WriteNotFound / WriteConflict (only a draft can be deleted) / WriteFailed."""
+    what = f"plan {strategy_plan_id}"
+    with ws.write_connection(conn_or_config, what) as conn, ws.write_transaction(conn, what, on_fk="conflict"):
+        current = _locked_status(conn, strategy_plan_id)
+        if current is None:
+            raise WriteNotFound(f"No plan {strategy_plan_id}.")
+        if current != "draft":
+            raise WriteConflict(f"This plan is {current}; only a draft can be deleted.")
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM strategy_plan WHERE strategy_plan_id = %s", (strategy_plan_id,))
+            if cur.rowcount == 0:
+                raise WriteNotFound(f"No plan {strategy_plan_id}.")
+    return {"deleted": "hard", "strategy_plan_id": strategy_plan_id}
