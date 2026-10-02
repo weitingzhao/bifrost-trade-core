@@ -1,7 +1,9 @@
 """Write strategy_allocation and strategy_allocation_opportunity. Used by POST/PUT allocations API.
 
 ``patch_allocation`` (core 0.33.0, TD-15) returns the row and raises ``Write*``;
-``update_allocation`` keeps answering a bool for one release."""
+``update_allocation`` keeps answering a bool for one release. Since core 0.35.0 (TD-48)
+``create_allocation`` / ``update_allocation`` raise ``WriteInvalid`` (a ``ValueError``) for
+a limit or gate id they cannot store, instead of storing NULL."""
 
 import logging
 from typing import Any, Dict, List, Optional
@@ -12,6 +14,8 @@ from bifrost_core.monitor.reader import write_support as ws
 from bifrost_core.monitor.reader.errors import WriteFailed, WriteInvalid, WriteNotFound
 
 logger = logging.getLogger(__name__)
+
+_LIMIT_KEYS = ("max_positions", "max_bp_pct")
 
 
 def _conn_from_config(status_config: Optional[dict]) -> Any:
@@ -35,21 +39,30 @@ def _normalize_opportunity_ids(value: Any) -> List[int]:
 
 
 def _limits_to_scalars(allocation_limits: Any) -> tuple:
-    """Return (max_positions, max_bp_pct) from allocation_limits dict. Either can be None."""
-    max_positions = None
-    max_bp_pct = None
-    if allocation_limits is not None and isinstance(allocation_limits, dict):
-        if "max_positions" in allocation_limits and allocation_limits["max_positions"] is not None:
-            try:
-                max_positions = int(allocation_limits["max_positions"])
-            except (TypeError, ValueError):
-                pass
-        if "max_bp_pct" in allocation_limits and allocation_limits["max_bp_pct"] is not None:
-            try:
-                max_bp_pct = float(allocation_limits["max_bp_pct"])
-            except (TypeError, ValueError):
-                pass
+    """Return (max_positions, max_bp_pct) from allocation_limits; either can be None.
+
+    Refuses what it cannot store (TD-48, core 0.35.0; it used to store NULL instead): not an
+    object, a key other than the two, ``max_positions`` not a whole number >= 0,
+    ``max_bp_pct`` not a finite number >= 0 -- the same rules as ``patch_allocation``.
+    ``allocation_limits: null`` (or a limit sent as null) clears it.
+    """
+    if allocation_limits is None:
+        return None, None
+    if not isinstance(allocation_limits, dict):
+        raise WriteInvalid("allocation_limits must be an object with max_positions and/or max_bp_pct.")
+    unknown = sorted(str(k) for k in allocation_limits if k not in _LIMIT_KEYS)
+    if unknown:
+        raise WriteInvalid(
+            f"Unknown allocation_limits field: {', '.join(unknown)}. Allowed: max_positions, max_bp_pct."
+        )
+    max_positions = ws.integer(allocation_limits.get("max_positions"), "max_positions", nullable=True, minimum=0)
+    max_bp_pct = ws.number(allocation_limits.get("max_bp_pct"), "max_bp_pct", nullable=True, minimum=0)
     return max_positions, max_bp_pct
+
+
+def _gate_id(payload: Dict[str, Any]) -> Optional[int]:
+    """gate_safety_strategy_id: null, or a whole number >= 1 (refused otherwise; was NULL)."""
+    return ws.row_id(payload.get("gate_safety_strategy_id"), "gate_safety_strategy_id", nullable=True)
 
 
 def create_allocation(status_config: Optional[dict], payload: Dict[str, Any]) -> Optional[int]:
@@ -63,12 +76,7 @@ def create_allocation(status_config: Optional[dict], payload: Dict[str, Any]) ->
         raise ValueError("strategy_opportunity_ids must be a list")
     opportunity_ids = _normalize_opportunity_ids(payload["strategy_opportunity_ids"])
 
-    gate_safety_strategy_id = payload.get("gate_safety_strategy_id")
-    if gate_safety_strategy_id is not None:
-        try:
-            gate_safety_strategy_id = int(gate_safety_strategy_id)
-        except (TypeError, ValueError):
-            gate_safety_strategy_id = None
+    gate_safety_strategy_id = _gate_id(payload)
 
     max_positions, max_bp_pct = _limits_to_scalars(payload.get("allocation_limits"))
     is_active = bool(payload["is_active"]) if payload.get("is_active") is not None else True
@@ -129,12 +137,7 @@ def update_allocation(
     if "strategy_opportunity_ids" in payload:
         opportunity_ids = _normalize_opportunity_ids(payload["strategy_opportunity_ids"])
 
-    gate_safety_strategy_id = payload.get("gate_safety_strategy_id")
-    if gate_safety_strategy_id is not None:
-        try:
-            gate_safety_strategy_id = int(gate_safety_strategy_id)
-        except (TypeError, ValueError):
-            gate_safety_strategy_id = None
+    gate_safety_strategy_id = _gate_id(payload)
 
     max_positions, max_bp_pct = None, None
     if "allocation_limits" in payload:
@@ -216,9 +219,6 @@ ALLOCATION_PATCHABLE = (
     "is_active",
     "strategy_opportunity_ids",
 )
-_LIMIT_KEYS = ("max_positions", "max_bp_pct")
-
-
 def _expand_allocation_limits(fields: Dict[str, Any]) -> Dict[str, Any]:
     """``allocation_limits`` is the PUT body's shape: an object of the two limits.
 

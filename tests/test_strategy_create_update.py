@@ -1,10 +1,10 @@
 """TD-48: the create / update writers behind POST /strategies/allocations and /opportunities.
 
 These are the older writers (answer an id / a bool) that the TD-15 patch_* writers sit
-beside; until now nothing tested them. The tests pin today's behaviour, including two
-silent coercions that are Owner decision 6 in the wave-4 inventory -- an unparseable
-limit is dropped to NULL and a non-integer gate id becomes NULL. If that decision makes
-them refuse instead, these tests change with it. Ids and names are made up.
+beside. Owner decision 6 (wave 4, core 0.35.0): a limit or gate id the writer cannot
+store is refused with WriteInvalid (the api answers 400); until 0.35.0 it was stored as
+NULL without a word. Junk entries in strategy_opportunity_ids are still skipped (not part
+of that decision). Ids and names are made up.
 """
 
 from __future__ import annotations
@@ -15,6 +15,7 @@ import pytest
 
 from bifrost_core.monitor.reader import strategy_allocation_write as allocation_write
 from bifrost_core.monitor.reader import strategy_opportunity_write as opportunity_write
+from bifrost_core.monitor.reader.errors import WriteInvalid
 from write_fakes import FakeConn, Reply
 
 CFG = {"sink": "postgres"}
@@ -47,8 +48,7 @@ def test_create_allocation_inserts_row_and_links_in_order(monkeypatch: pytest.Mo
     assert conn.commits == 1 and conn.closed
 
 
-def test_create_allocation_drops_unparseable_limits_and_gate_id(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Today's behaviour (Owner decision 6 pending): bad values become NULL, no error."""
+def test_create_allocation_clears_limits_sent_as_null(monkeypatch: pytest.MonkeyPatch) -> None:
     conn = FakeConn([("INSERT INTO strategy_allocation (", Reply(one=(42,)))])
     _use(monkeypatch, allocation_write, conn)
     aid = allocation_write.create_allocation(
@@ -56,15 +56,53 @@ def test_create_allocation_drops_unparseable_limits_and_gate_id(monkeypatch: pyt
         {
             "name": "Sleeve",
             "strategy_opportunity_ids": [],
-            "gate_safety_strategy_id": "not-a-number",
-            "allocation_limits": {"max_positions": "four", "max_bp_pct": "lots"},
+            "gate_safety_strategy_id": None,
+            "allocation_limits": {"max_positions": None, "max_bp_pct": 0},
             "is_active": 0,
         },
     )
     assert aid == 42
     _, params = conn.statement("INSERT INTO strategy_allocation (")
-    assert params == ("Sleeve", None, None, None, False)
+    assert params == ("Sleeve", None, None, 0.0, False)
     assert not conn.ran("INSERT INTO strategy_allocation_opportunity")
+
+
+BAD_LIMITS = [
+    ({"allocation_limits": {"max_positions": "four"}}, "max_positions must be a whole number"),
+    ({"allocation_limits": {"max_positions": 2.5}}, "max_positions must be a whole number"),
+    ({"allocation_limits": {"max_positions": -1}}, "max_positions must be 0 or more"),
+    ({"allocation_limits": {"max_positions": True}}, "max_positions must be a whole number"),
+    ({"allocation_limits": {"max_bp_pct": "lots"}}, "max_bp_pct must be a number"),
+    ({"allocation_limits": {"max_bp_pct": float("inf")}}, "max_bp_pct must be a finite number"),
+    ({"allocation_limits": {"max_bp_pct": -5}}, "max_bp_pct must be 0 or more"),
+    ({"allocation_limits": {"max_risk": 3}}, "Unknown allocation_limits field: max_risk"),
+    ({"allocation_limits": [3, 20]}, "allocation_limits must be an object"),
+    ({"gate_safety_strategy_id": "not-a-number"}, "gate_safety_strategy_id must be a whole number"),
+    ({"gate_safety_strategy_id": 0}, "gate_safety_strategy_id must be 1 or more"),
+]
+
+
+@pytest.mark.parametrize("bad,message", BAD_LIMITS)
+def test_create_allocation_refuses_what_it_cannot_store(
+    bad: dict, message: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Owner decision 6: refused (400 at the api) -- was silently stored as NULL."""
+    conn = FakeConn()
+    _use(monkeypatch, allocation_write, conn)
+    with pytest.raises(WriteInvalid, match=message):
+        allocation_write.create_allocation(CFG, {"name": "Sleeve", "strategy_opportunity_ids": [], **bad})
+    assert conn.executed == []
+
+
+@pytest.mark.parametrize("bad,message", BAD_LIMITS)
+def test_update_allocation_refuses_what_it_cannot_store(
+    bad: dict, message: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    conn = FakeConn()
+    _use(monkeypatch, allocation_write, conn)
+    with pytest.raises(WriteInvalid, match=message):
+        allocation_write.update_allocation(CFG, 41, bad)
+    assert conn.executed == []
 
 
 @pytest.mark.parametrize(
@@ -115,16 +153,17 @@ def test_update_allocation_sets_only_what_was_sent(monkeypatch: pytest.MonkeyPat
     assert conn.commits == 1
 
 
-def test_update_allocation_limits_both_columns_and_bad_values_null(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_update_allocation_limits_set_both_columns(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A PUT's allocation_limits replaces both columns: a limit left out is cleared."""
     conn = FakeConn()
     _use(monkeypatch, allocation_write, conn)
     ok = allocation_write.update_allocation(
-        CFG, 41, {"allocation_limits": {"max_positions": "x"}, "gate_safety_strategy_id": "y"}
+        CFG, 41, {"allocation_limits": {"max_positions": "3"}, "gate_safety_strategy_id": None}
     )
     assert ok is True
     sql, params = conn.statement("UPDATE strategy_allocation SET")
     assert "gate_safety_strategy_id = %s, max_positions = %s, max_bp_pct = %s" in sql
-    assert params == [None, None, None, 41]
+    assert params == [None, 3, None, 41]
 
 
 def test_update_allocation_replaces_links(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -165,7 +204,7 @@ def test_create_opportunity_writes_normalised_json(monkeypatch: pytest.MonkeyPat
         {
             "name": " Earnings fade ",
             "strategy_structure_id": "5",
-            "default_gate_safety_strategy_id": "bad",
+            "default_gate_safety_strategy_id": "4",
             "scope_type": " ",
             "symbols": [" ZZZA ", "", None, "ZZZB"],
             "entry_conditions": [
@@ -178,7 +217,7 @@ def test_create_opportunity_writes_normalised_json(monkeypatch: pytest.MonkeyPat
     assert oid == 17
     _, params = conn.statement("INSERT INTO strategy_opportunity (")
     name, structure_id, gate_id, scope, active, symbols_json, conditions_json = params
-    assert (name, structure_id, gate_id, scope, active) == ("Earnings fade", 5, None, None, True)
+    assert (name, structure_id, gate_id, scope, active) == ("Earnings fade", 5, 4, None, True)
     assert symbols_json == '["ZZZA", "ZZZB"]'
     assert conditions_json == (
         '[{"condition_type": "iv_rank_min", "value_text": null, "value_numeric": 40.0, "sort_order": 0}, '
@@ -203,6 +242,19 @@ def test_create_and_update_opportunity_refuse_bad_payload(
     with pytest.raises(ValueError, match=message):
         opportunity_write.create_opportunity(CFG, payload)
     with pytest.raises(ValueError, match=message):
+        opportunity_write.update_opportunity(CFG, 17, payload)
+    assert conn.executed == []
+
+
+@pytest.mark.parametrize("gate", ["bad", 0, -2, 1.5, True])
+def test_opportunity_writers_refuse_a_bad_gate_id(gate: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Owner decision 6: refused (400 at the api) -- was silently stored as NULL."""
+    conn = FakeConn()
+    _use(monkeypatch, opportunity_write, conn)
+    payload = {"name": "A", "strategy_structure_id": 5, "default_gate_safety_strategy_id": gate}
+    with pytest.raises(WriteInvalid, match="default_gate_safety_strategy_id"):
+        opportunity_write.create_opportunity(CFG, payload)
+    with pytest.raises(WriteInvalid, match="default_gate_safety_strategy_id"):
         opportunity_write.update_opportunity(CFG, 17, payload)
     assert conn.executed == []
 

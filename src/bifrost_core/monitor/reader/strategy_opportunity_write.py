@@ -79,12 +79,10 @@ def create_opportunity(status_config: Optional[dict], payload: Dict[str, Any]) -
     except (TypeError, ValueError):
         raise ValueError("strategy_structure_id must be an integer")
 
-    default_gate_safety_strategy_id = payload.get("default_gate_safety_strategy_id")
-    if default_gate_safety_strategy_id is not None:
-        try:
-            default_gate_safety_strategy_id = int(default_gate_safety_strategy_id)
-        except (TypeError, ValueError):
-            default_gate_safety_strategy_id = None
+    # An id that is not a whole number >= 1 is refused (TD-48, core 0.35.0); it used to become NULL.
+    default_gate_safety_strategy_id = ws.row_id(
+        payload.get("default_gate_safety_strategy_id"), "default_gate_safety_strategy_id", nullable=True
+    )
 
     scope_type = (payload.get("scope_type") or "").strip() or None
     symbols = _normalize_symbols(payload.get("symbols"))
@@ -147,12 +145,10 @@ def update_opportunity(
     except (TypeError, ValueError):
         raise ValueError("strategy_structure_id must be an integer")
 
-    default_gate_safety_strategy_id = payload.get("default_gate_safety_strategy_id")
-    if default_gate_safety_strategy_id is not None:
-        try:
-            default_gate_safety_strategy_id = int(default_gate_safety_strategy_id)
-        except (TypeError, ValueError):
-            default_gate_safety_strategy_id = None
+    # An id that is not a whole number >= 1 is refused (TD-48, core 0.35.0); it used to become NULL.
+    default_gate_safety_strategy_id = ws.row_id(
+        payload.get("default_gate_safety_strategy_id"), "default_gate_safety_strategy_id", nullable=True
+    )
 
     scope_type = (payload.get("scope_type") or "").strip() or None
     symbols = _normalize_symbols(payload.get("symbols")) if "symbols" in payload else None
