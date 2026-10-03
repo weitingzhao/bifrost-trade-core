@@ -22,9 +22,9 @@ def parse_strategy_instance_ids_csv(value: Optional[str]) -> Optional[List[int]]
         try:
             n = int(p, 10)
         except ValueError as e:
-            raise ValueError(f"Invalid strategy instance id: {p!r}") from e
+            raise ValueError(f"Invalid trade id: {p!r}") from e
         if n <= 0:
-            raise ValueError("strategy_instance_ids must be positive integers")
+            raise ValueError("trade ids must be positive integers")
         if n not in seen:
             seen.add(n)
             out.append(n)

@@ -454,7 +454,7 @@ def test_review_patch_rules() -> None:
     with pytest.raises(WriteInvalid, match="Unknown review field"):
         trade_review.patch_review(FakeConn(), 41, {"score": 3})
     conn = FakeConn([("FROM strategy_instance", Reply(one=None))])
-    with pytest.raises(WriteNotFound, match="No strategy instance 41"):
+    with pytest.raises(WriteNotFound, match="No trade 41"):
         trade_review.patch_review(conn, 41, {"reviewed": True})
     assert not conn.ran("INSERT INTO trade_review")
     conn = FakeConn([("FROM strategy_instance", Reply(one=(1,))), ("INSERT INTO trade_review", Reply(raises=DB_DOWN))])
@@ -575,7 +575,7 @@ def test_instance_delete_blocked_by_directly_attributed_executions(two_dbs) -> N
     env = _env((_COUNTS, Reply(one=(3, 0))))
     golden = FakeConn()
     two_dbs(env, golden)
-    with pytest.raises(WriteConflict, match="^3 executions are attributed to this instance.$"):
+    with pytest.raises(WriteConflict, match="^3 fills are attributed to this trade.$"):
         strategy_instance.delete_instance_strict(CFG, 41)
     assert not env.ran("DELETE FROM strategy_instance")
     assert env.rollbacks == 1 and env.commits == 0
@@ -587,7 +587,7 @@ def test_instance_delete_blocked_by_directly_attributed_executions(two_dbs) -> N
 def test_instance_delete_blocked_by_split_allocations_with_its_own_reason(two_dbs) -> None:
     env = _env((_COUNTS, Reply(one=(0, 2))))
     two_dbs(env, FakeConn())
-    with pytest.raises(WriteConflict, match="2 executions are split-allocated to this instance"):
+    with pytest.raises(WriteConflict, match="2 fills are split to this trade"):
         strategy_instance.delete_instance_strict(CFG, 41)
     assert not env.ran("DELETE FROM strategy_instance")
 
@@ -609,14 +609,14 @@ def test_count_attributed_executions_reads_this_env(two_dbs) -> None:
 def test_instance_delete_succeeds_when_nothing_is_attributed(two_dbs) -> None:
     env = _env((_COUNTS, Reply(one=(0, 0))))
     two_dbs(env, FakeConn())
-    assert strategy_instance.delete_instance_strict(CFG, 41) == {"deleted": "hard", "strategy_instance_id": 41}
+    assert strategy_instance.delete_instance_strict(CFG, 41) == {"deleted": "hard", "strategy_instance_id": 41, "trade_id": 41}
     assert env.ran("DELETE FROM strategy_instance") and env.commits == 1
 
 
 def test_instance_delete_missing_and_without_config(two_dbs) -> None:
     env = FakeConn([("FOR UPDATE", Reply(one=None))])
     two_dbs(env, FakeConn())
-    with pytest.raises(WriteNotFound, match="No strategy instance 41"):
+    with pytest.raises(WriteNotFound, match="No trade 41"):
         strategy_instance.delete_instance_strict(CFG, 41)
     with pytest.raises(WriteFailed, match="status config is needed"):
         strategy_instance.delete_instance_strict(FakeConn(), 41)

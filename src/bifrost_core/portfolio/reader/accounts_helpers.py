@@ -6,6 +6,7 @@ import math
 from datetime import date, datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
+from bifrost_core.monitor.reader.trade_names import add_trade_names
 from bifrost_core.persistence.postgres.brokerage_tables import ACCOUNT
 from bifrost_core.portfolio.contract_key import read_fallback_opt_key
 from bifrost_core.portfolio.quote_freshness import LIVE_QUOTE_MAX_AGE_SEC
@@ -383,7 +384,7 @@ def _compute_opt_realized_calendar(
                 "pnl": 0.0,
                 "commission": 0.0,
                 "net_pnl": 0.0,
-                "trade_count": 0,
+                "pair_count": 0,
                 "win_count": 0,
                 "loss_count": 0,
                 "pairs": [],
@@ -393,7 +394,7 @@ def _compute_opt_realized_calendar(
         period_totals[pk]["net_pnl"] += pair_net
         period_totals[pk]["commission"] += pair_comm
         period_totals[pk]["pnl"] += pair_net + pair_comm
-        period_totals[pk]["trade_count"] += 1
+        period_totals[pk]["pair_count"] += 1
         period_totals[pk]["pairs"].append(p)
         if pair_net > 0:
             period_totals[pk]["win_count"] += 1
@@ -404,8 +405,6 @@ def _compute_opt_realized_calendar(
     for _, v in sorted(period_totals.items(), key=lambda x: x[0][0]):
         wc, lc = v.get("win_count", 0), v.get("loss_count", 0)
         v["win_rate"] = (wc / (wc + lc)) if (wc + lc) > 0 else None
-        # trade_count here counts closed option pairs, not fills (TD-19): say so by name.
-        v["pair_count"] = v["trade_count"]
         v["pnl"] = round(v["pnl"], 2)
         v["commission"] = round(v["commission"], 2)
         v["net_pnl"] = round(v["net_pnl"], 2)
@@ -433,6 +432,8 @@ def _rows_to_executions(rows: Any, cur: Any) -> List[Dict[str, Any]]:
             except (TypeError, ValueError):
                 pass
         _fill_contract_key_for_opt(d)
+        # trade_id / trade_label / trade_opened_at_epoch beside the instance keys (R1).
+        add_trade_names(d)
         out.append(d)
     return out
 

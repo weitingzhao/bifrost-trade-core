@@ -23,6 +23,7 @@ from psycopg2.extras import RealDictCursor
 
 from bifrost_core.monitor.reader import write_support as ws
 from bifrost_core.monitor.reader.errors import WriteFailed, WriteInvalid, WriteNotFound
+from bifrost_core.monitor.reader.trade_names import add_review_tag_names, review_fields_as_columns
 
 logger = logging.getLogger(__name__)
 
@@ -72,7 +73,8 @@ def _row_out(row: Dict[str, Any]) -> Dict[str, Any]:
                 raw = []
         out[key] = [str(t) for t in raw] if isinstance(raw, list) else []
     out["reviewed"] = out.get("reviewed_at") is not None
-    return out
+    # trade_id and tags_added_json / tags_dropped_json beside the column names (naming R1).
+    return add_review_tag_names(out)
 
 
 def list_reviews(status_config: Optional[dict]) -> List[Dict[str, Any]]:
@@ -185,8 +187,9 @@ def patch_review(conn_or_config: Any, strategy_instance_id: int, fields: Dict[st
     second true keeps the first stamp), false clears it. Raises WriteInvalid,
     WriteNotFound, WriteFailed.
     """
-    what = f"the review of strategy instance {strategy_instance_id}"
-    fields = ws.check_fields(fields, REVIEW_PATCHABLE, "review")
+    what = f"the review of trade {strategy_instance_id}"
+    # tags_added_json / tags_dropped_json are taken too; the new name wins (naming R1).
+    fields = ws.check_fields(review_fields_as_columns(fields), REVIEW_PATCHABLE, "review")
     insert_cols: Dict[str, Any] = {}
     updates: List[str] = []
     values: Dict[str, Any] = {"id": int(strategy_instance_id)}
@@ -220,7 +223,7 @@ def patch_review(conn_or_config: Any, strategy_instance_id: int, fields: Dict[st
                 values,
             )
             if cur.fetchone() is None:
-                raise WriteNotFound(f"No strategy instance {strategy_instance_id}.")
+                raise WriteNotFound(f"No trade {strategy_instance_id}.")
             cur.execute(sql, values)
             row = cur.fetchone()
         if row is None:

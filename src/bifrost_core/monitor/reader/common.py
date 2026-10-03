@@ -15,6 +15,7 @@ from bifrost_core.portfolio.reader import accounts as accounts_module
 from bifrost_core.portfolio.reader import executions as executions_module
 from bifrost_core.portfolio.reader import keyset as keyset_module
 from bifrost_core.portfolio.reader import option_stock_link as option_stock_link_module
+from bifrost_core.monitor.reader import data_probe as data_probe_module
 from bifrost_core.monitor.reader import gate_safety as gate_safety_module
 from bifrost_core.monitor.reader import market as market_module
 from bifrost_core.monitor.reader import strategy as strategy_module
@@ -152,6 +153,18 @@ class StatusReader:
         return status_module.get_operations(
             None, since_ts=since_ts, until_ts=until_ts, type_filter=type_filter, limit=limit
         )
+
+    def get_data_probe(self) -> Dict[str, Any]:
+        """Activity, a sample count and the clone groups of this env's database, for the
+        Ops platform (``data_probe``, D8-A). A read that cannot happen raises ReadFailed."""
+        if not self._connect():
+            raise ReadFailed("data_probe: database unavailable")
+        try:
+            return data_probe_module.read_data_probe(self._conn)
+        except Exception as e:
+            raise ReadFailed(f"data_probe: {e}") from e
+        finally:
+            self._end_read_txn()
 
     def get_open_orders(self) -> List[Dict[str, Any]]:
         if not self._connect():
@@ -914,7 +927,7 @@ class StatusReader:
     ) -> Dict[str, Any]:
         if not self._connect():
             return executions_module._performance_response_summary_only(
-                trade_count=0,
+                fill_count=0,
                 total_realized_pnl=0.0,
                 total_commission=0.0,
                 net_pnl=0.0,

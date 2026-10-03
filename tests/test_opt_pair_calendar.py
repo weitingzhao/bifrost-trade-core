@@ -87,7 +87,7 @@ class TestOptRealizedCalendarUsesFIFO:
         ]
         calendar = _compute_opt_realized_calendar(execs, "day")
         assert len(calendar) == 1
-        assert calendar[0]["trade_count"] == 1
+        assert calendar[0]["pair_count"] == 1
         assert calendar[0]["sec_type"] == "OPT"
 
     def test_cross_day_pair_attributed_to_later_leg(self):
@@ -107,7 +107,7 @@ class TestOptRealizedCalendarUsesFIFO:
         ]
         calendar = _compute_opt_realized_calendar(execs, "day")
         assert len(calendar) == 1
-        assert calendar[0]["trade_count"] == 1
+        assert calendar[0]["pair_count"] == 1
         expected_net = (-2 * 3.0 * 100 - 0.4) + (2 * 4.0 * 100 - 1.0)
         assert abs(calendar[0]["net_pnl"] - round(expected_net, 2)) < 0.02
 

@@ -16,7 +16,7 @@ def test_aggregate_pnl_identical_for_different_structure_labels():
     b = _aggregate_win_rate_metrics("Bull Put Spread", rows)
     c = _aggregate_win_rate_metrics("Cash Secured Put", rows)
 
-    for k in ("total_profit", "total_loss", "profit_trades", "loss_trades", "total_instances"):
+    for k in ("total_profit", "total_loss", "profit_trades", "loss_trades", "total_trades"):
         assert a[k] == b[k] == c[k]
 
     assert a["total_profit"] == 125.5

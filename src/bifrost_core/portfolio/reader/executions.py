@@ -9,6 +9,7 @@ from zoneinfo import ZoneInfo
 
 from psycopg2.extras import RealDictCursor
 
+from bifrost_core.monitor.reader.trade_names import fill_split, realized_by_trade
 from bifrost_core.portfolio.contract_key import opt_key, osi_local_symbol
 from bifrost_core.portfolio.reader import keyset
 from bifrost_core.portfolio.quote_freshness import fresh_quote_sql
@@ -114,7 +115,7 @@ _REALIZED_PNL_COALESCE_E = "COALESCE(c.realized_pnl, e.fifo_pnl_realized) AS rea
 
 
 def attach_instance_allocations(conn: Any, executions: List[Dict[str, Any]]) -> None:
-    """Populate instance_allocations on each execution dict (mutates in place)."""
+    """Populate instance_allocations, and fill_splits beside it, on each execution dict (mutates in place)."""
     if not conn or not executions:
         return
     ids: List[int] = []
@@ -178,6 +179,8 @@ def attach_instance_allocations(conn: Any, executions: List[Dict[str, Any]]) -> 
             continue
         if ke in by_eid:
             e["instance_allocations"] = by_eid[ke]
+            # fill_splits: [{trade_id, quantity, ...}] beside it (naming R1, TD-82).
+            e["fill_splits"] = [fill_split(a) for a in by_eid[ke]]
 
 
 def weight_realized_for_strategy_instance(execution: Dict[str, Any], strategy_instance_id: int) -> float:
@@ -260,13 +263,13 @@ def _add_realized_splits_to_opp_and_inst(
                         "total_pnl": 0.0,
                         "commission": 0.0,
                         "net_pnl": 0.0,
-                        "trade_count": 0,
+                        "fill_count": 0,
                     }
                 by_opp[so_id]["total_pnl"] += rp_part
                 by_opp[so_id]["commission"] += comm_part
                 by_opp[so_id]["net_pnl"] += rp_part - comm_part
                 if so_id not in opp_trade_bump:
-                    by_opp[so_id]["trade_count"] += 1
+                    by_opp[so_id]["fill_count"] += 1
                     opp_trade_bump.add(so_id)
             if si_id not in by_inst:
                 by_inst[si_id] = {
@@ -274,12 +277,12 @@ def _add_realized_splits_to_opp_and_inst(
                     "total_pnl": 0.0,
                     "commission": 0.0,
                     "net_pnl": 0.0,
-                    "trade_count": 0,
+                    "fill_count": 0,
                 }
             by_inst[si_id]["total_pnl"] += rp_part
             by_inst[si_id]["commission"] += comm_part
             by_inst[si_id]["net_pnl"] += rp_part - comm_part
-            by_inst[si_id]["trade_count"] += 1
+            by_inst[si_id]["fill_count"] += 1
         return
     so_id = e.get("strategy_opportunity_id")
     si_id = e.get("strategy_instance_id")
@@ -294,12 +297,12 @@ def _add_realized_splits_to_opp_and_inst(
                 "total_pnl": 0.0,
                 "commission": 0.0,
                 "net_pnl": 0.0,
-                "trade_count": 0,
+                "fill_count": 0,
             }
         by_opp[so_id]["total_pnl"] += rp_val
         by_opp[so_id]["commission"] += comm_val
         by_opp[so_id]["net_pnl"] += rp_val - comm_val
-        by_opp[so_id]["trade_count"] += 1
+        by_opp[so_id]["fill_count"] += 1
     if si_id is not None:
         si_id = int(si_id)
         if si_id not in by_inst:
@@ -308,12 +311,12 @@ def _add_realized_splits_to_opp_and_inst(
                 "total_pnl": 0.0,
                 "commission": 0.0,
                 "net_pnl": 0.0,
-                "trade_count": 0,
+                "fill_count": 0,
             }
         by_inst[si_id]["total_pnl"] += rp_val
         by_inst[si_id]["commission"] += comm_val
         by_inst[si_id]["net_pnl"] += rp_val - comm_val
-        by_inst[si_id]["trade_count"] += 1
+        by_inst[si_id]["fill_count"] += 1
 
 
 def _qty_expr_e_for_scope(source_scope: Optional[str]) -> str:
@@ -1254,7 +1257,7 @@ def _read_transactions(
 
 def _performance_response_summary_only(
     *,
-    trade_count: int,
+    fill_count: int,
     total_realized_pnl: float,
     total_commission: float,
     net_pnl: float,
@@ -1267,7 +1270,7 @@ def _performance_response_summary_only(
     profit_factor: Optional[float] = None,
 ) -> Dict[str, Any]:
     # Wins over the fills that realized a gain or a loss (TD-19): an opening fill realizes
-    # nothing and is not a loss. trade_count / fill_count still count every fill.
+    # nothing and is not a loss. fill_count still counts every fill.
     closed = win_count + loss_count
     win_rate = (win_count / closed) if closed else None
     return {
@@ -1278,8 +1281,7 @@ def _performance_response_summary_only(
             "total_realized_pnl": round(total_realized_pnl, 2),
             "total_commission": round(total_commission, 2),
             "net_pnl": round(net_pnl, 2),
-            "trade_count": trade_count,
-            "fill_count": trade_count,
+            "fill_count": fill_count,
             "win_count": win_count,
             "loss_count": loss_count,
             "win_rate": round(win_rate, 4) if win_rate is not None else None,
@@ -1299,6 +1301,7 @@ def _performance_response_summary_only(
         "realized_by_account_and_sec_type": [],
         "realized_by_strategy_opportunity": [],
         "realized_by_strategy_instance": [],
+        "realized_by_trade": [],
         "calendar": [],
         "calendar_by_sec_type": [],
         "cumulative_curve": [],
@@ -1318,7 +1321,7 @@ def get_performance_instance_summary_only(
     """Aggregate realized PnL for one strategy_instance (includes account_execution_instance_allocation splits)."""
     if conn is None:
         return _performance_response_summary_only(
-            trade_count=0,
+            fill_count=0,
             total_realized_pnl=0.0,
             total_commission=0.0,
             net_pnl=0.0,
@@ -1329,7 +1332,7 @@ def get_performance_instance_summary_only(
         sid = int(strategy_instance_id)
     except (TypeError, ValueError):
         return _performance_response_summary_only(
-            trade_count=0,
+            fill_count=0,
             total_realized_pnl=0.0,
             total_commission=0.0,
             net_pnl=0.0,
@@ -1349,7 +1352,7 @@ def get_performance_instance_summary_only(
         )
         total_rp = 0.0
         total_comm = 0.0
-        trade_count = 0
+        fill_count = 0
         win_count = 0
         loss_count = 0
         wins_rp: List[float] = []
@@ -1366,7 +1369,7 @@ def get_performance_instance_summary_only(
                 comm = 0.0
             total_rp += rp
             total_comm += comm
-            trade_count += 1
+            fill_count += 1
             if rp > 0:
                 win_count += 1
                 wins_rp.append(rp)
@@ -1384,7 +1387,7 @@ def get_performance_instance_summary_only(
         max_win_v = max(wins_rp) if wins_rp else None
         max_loss_v = min(losses_rp) if losses_rp else None
         return _performance_response_summary_only(
-            trade_count=trade_count,
+            fill_count=fill_count,
             total_realized_pnl=total_rp,
             total_commission=total_comm,
             net_pnl=net_pnl,
@@ -1399,7 +1402,7 @@ def get_performance_instance_summary_only(
     except Exception as e:
         logger.debug("get_performance_instance_summary_only failed: %s", e)
         return _performance_response_summary_only(
-            trade_count=0,
+            fill_count=0,
             total_realized_pnl=0.0,
             total_commission=0.0,
             net_pnl=0.0,
@@ -1451,7 +1454,7 @@ def get_performance_stats(
     total_realized_pnl = 0.0
     total_commission = 0.0
     net_pnl = 0.0
-    trade_count = 0
+    fill_count = 0
     wins: List[float] = []
     losses: List[float] = []
     cumulative_curve: List[Dict[str, Any]] = []
@@ -1470,7 +1473,7 @@ def get_performance_stats(
         total_realized_pnl += rp_val
         total_commission += comm_val
         net_pnl += net
-        trade_count += 1
+        fill_count += 1
         if rp_val > 0:
             wins.append(rp_val)
         elif rp_val < 0:
@@ -1502,7 +1505,7 @@ def get_performance_stats(
         wf = _perf_inst_weight(e)
         acc = e.get("account_id") or ""
         if acc not in by_acc:
-            by_acc[acc] = {"total_pnl": 0.0, "commission": 0.0, "net_pnl": 0.0, "trade_count": 0}
+            by_acc[acc] = {"total_pnl": 0.0, "commission": 0.0, "net_pnl": 0.0, "fill_count": 0}
         rp_val = float(e["realized_pnl"]) if e.get("realized_pnl") is not None else 0.0
         comm_val = float(e["commission"]) if e.get("commission") is not None else 0.0
         if not math.isfinite(rp_val):
@@ -1514,8 +1517,8 @@ def get_performance_stats(
         by_acc[acc]["total_pnl"] += rp_val
         by_acc[acc]["commission"] += comm_val
         by_acc[acc]["net_pnl"] += rp_val - comm_val
-        by_acc[acc]["trade_count"] += 1
-    realized_by_account = [{"account_id": acc, "total_pnl": round(v["total_pnl"], 2), "commission": round(v["commission"], 2), "net_pnl": round(v["net_pnl"], 2), "trade_count": v["trade_count"], "fill_count": v["trade_count"]} for acc, v in sorted(by_acc.items())]
+        by_acc[acc]["fill_count"] += 1
+    realized_by_account = [{"account_id": acc, "total_pnl": round(v["total_pnl"], 2), "commission": round(v["commission"], 2), "net_pnl": round(v["net_pnl"], 2), "fill_count": v["fill_count"]} for acc, v in sorted(by_acc.items())]
     if capital_base and capital_base > 0:
         for row in realized_by_account:
             row["return_pct"] = round(100.0 * row["net_pnl"] / capital_base, 4)
@@ -1525,7 +1528,7 @@ def get_performance_stats(
         wf = _perf_inst_weight(e)
         st = (e.get("sec_type") or "UNKNOWN").strip().upper() or "UNKNOWN"
         if st not in by_sec:
-            by_sec[st] = {"total_pnl": 0.0, "commission": 0.0, "net_pnl": 0.0, "trade_count": 0}
+            by_sec[st] = {"total_pnl": 0.0, "commission": 0.0, "net_pnl": 0.0, "fill_count": 0}
         rp_val = float(e["realized_pnl"]) if e.get("realized_pnl") is not None else 0.0
         comm_val = float(e["commission"]) if e.get("commission") is not None else 0.0
         if not math.isfinite(rp_val):
@@ -1537,8 +1540,8 @@ def get_performance_stats(
         by_sec[st]["total_pnl"] += rp_val
         by_sec[st]["commission"] += comm_val
         by_sec[st]["net_pnl"] += rp_val - comm_val
-        by_sec[st]["trade_count"] += 1
-    realized_by_sec_type = [{"sec_type": st, "total_pnl": round(v["total_pnl"], 2), "commission": round(v["commission"], 2), "net_pnl": round(v["net_pnl"], 2), "trade_count": v["trade_count"], "fill_count": v["trade_count"]} for st, v in sorted(by_sec.items())]
+        by_sec[st]["fill_count"] += 1
+    realized_by_sec_type = [{"sec_type": st, "total_pnl": round(v["total_pnl"], 2), "commission": round(v["commission"], 2), "net_pnl": round(v["net_pnl"], 2), "fill_count": v["fill_count"]} for st, v in sorted(by_sec.items())]
     if capital_base and capital_base > 0:
         for row in realized_by_sec_type:
             row["return_pct"] = round(100.0 * row["net_pnl"] / capital_base, 4)
@@ -1549,7 +1552,7 @@ def get_performance_stats(
         acc, st = e.get("account_id") or "", (e.get("sec_type") or "UNKNOWN").strip().upper() or "UNKNOWN"
         key = (acc, st)
         if key not in by_acc_sec:
-            by_acc_sec[key] = {"total_pnl": 0.0, "commission": 0.0, "net_pnl": 0.0, "trade_count": 0}
+            by_acc_sec[key] = {"total_pnl": 0.0, "commission": 0.0, "net_pnl": 0.0, "fill_count": 0}
         rp_val = float(e["realized_pnl"]) if e.get("realized_pnl") is not None else 0.0
         comm_val = float(e["commission"]) if e.get("commission") is not None else 0.0
         if not math.isfinite(rp_val):
@@ -1561,8 +1564,8 @@ def get_performance_stats(
         by_acc_sec[key]["total_pnl"] += rp_val
         by_acc_sec[key]["commission"] += comm_val
         by_acc_sec[key]["net_pnl"] += rp_val - comm_val
-        by_acc_sec[key]["trade_count"] += 1
-    realized_by_account_and_sec_type = [{"account_id": k[0], "sec_type": k[1], "total_pnl": round(v["total_pnl"], 2), "commission": round(v["commission"], 2), "net_pnl": round(v["net_pnl"], 2), "trade_count": v["trade_count"], "fill_count": v["trade_count"]} for k, v in sorted(by_acc_sec.items())]
+        by_acc_sec[key]["fill_count"] += 1
+    realized_by_account_and_sec_type = [{"account_id": k[0], "sec_type": k[1], "total_pnl": round(v["total_pnl"], 2), "commission": round(v["commission"], 2), "net_pnl": round(v["net_pnl"], 2), "fill_count": v["fill_count"]} for k, v in sorted(by_acc_sec.items())]
     if capital_base and capital_base > 0:
         for row in realized_by_account_and_sec_type:
             row["return_pct"] = round(100.0 * row["net_pnl"] / capital_base, 4)
@@ -1576,8 +1579,8 @@ def get_performance_stats(
             by_inst,
             only_strategy_instance_id=strategy_instance_id,
         )
-    realized_by_strategy_opportunity = [{"strategy_opportunity_id": k, "total_pnl": round(v["total_pnl"], 2), "commission": round(v["commission"], 2), "net_pnl": round(v["net_pnl"], 2), "trade_count": v["trade_count"], "fill_count": v["trade_count"]} for k, v in sorted(by_opp.items())]
-    realized_by_strategy_instance = [{"strategy_instance_id": k, "total_pnl": round(v["total_pnl"], 2), "commission": round(v["commission"], 2), "net_pnl": round(v["net_pnl"], 2), "trade_count": v["trade_count"], "fill_count": v["trade_count"]} for k, v in sorted(by_inst.items())]
+    realized_by_strategy_opportunity = [{"strategy_opportunity_id": k, "total_pnl": round(v["total_pnl"], 2), "commission": round(v["commission"], 2), "net_pnl": round(v["net_pnl"], 2), "fill_count": v["fill_count"]} for k, v in sorted(by_opp.items())]
+    realized_by_strategy_instance = [{"strategy_instance_id": k, "total_pnl": round(v["total_pnl"], 2), "commission": round(v["commission"], 2), "net_pnl": round(v["net_pnl"], 2), "fill_count": v["fill_count"]} for k, v in sorted(by_inst.items())]
     if capital_base and capital_base > 0:
         for row in realized_by_strategy_opportunity:
             row["return_pct"] = round(100.0 * row["net_pnl"] / capital_base, 4)
@@ -1611,7 +1614,7 @@ def get_performance_stats(
         start_ts, label = _period_key(ts, granularity)
         key = (start_ts, label)
         if key not in cal_map:
-            cal_map[key] = {"period_start_ts": start_ts, "period_label": label, "pnl": 0.0, "commission": 0.0, "net_pnl": 0.0, "trade_count": 0, "win_count": 0, "loss_count": 0}
+            cal_map[key] = {"period_start_ts": start_ts, "period_label": label, "pnl": 0.0, "commission": 0.0, "net_pnl": 0.0, "fill_count": 0, "win_count": 0, "loss_count": 0}
         rp_val = float(e["realized_pnl"]) if e.get("realized_pnl") is not None else 0.0
         comm_val = float(e["commission"]) if e.get("commission") is not None else 0.0
         if not math.isfinite(rp_val):
@@ -1623,7 +1626,7 @@ def get_performance_stats(
         cal_map[key]["pnl"] += rp_val
         cal_map[key]["commission"] += comm_val
         cal_map[key]["net_pnl"] += rp_val - comm_val
-        cal_map[key]["trade_count"] += 1
+        cal_map[key]["fill_count"] += 1
         if rp_val > 0:
             cal_map[key]["win_count"] += 1
         elif rp_val < 0:
@@ -1632,7 +1635,6 @@ def get_performance_stats(
     for _, v in sorted(cal_map.items(), key=lambda x: x[0][0]):
         wc, lc = v.get("win_count", 0), v.get("loss_count", 0)
         v["win_rate"] = (wc / (wc + lc)) if (wc + lc) > 0 else None
-        v["fill_count"] = v["trade_count"]
         calendar.append(v)
     if capital_base and capital_base > 0:
         for row in calendar:
@@ -1652,7 +1654,7 @@ def get_performance_stats(
         start_ts, label = _period_key(ts, granularity)
         key = (start_ts, label, st)
         if key not in cal_map_by_sec:
-            cal_map_by_sec[key] = {"period_start_ts": start_ts, "period_label": label, "sec_type": st, "pnl": 0.0, "commission": 0.0, "net_pnl": 0.0, "trade_count": 0, "win_count": 0, "loss_count": 0}
+            cal_map_by_sec[key] = {"period_start_ts": start_ts, "period_label": label, "sec_type": st, "pnl": 0.0, "commission": 0.0, "net_pnl": 0.0, "fill_count": 0, "win_count": 0, "loss_count": 0}
         rp_val = float(e["realized_pnl"]) if e.get("realized_pnl") is not None else 0.0
         comm_val = float(e["commission"]) if e.get("commission") is not None else 0.0
         if not math.isfinite(rp_val):
@@ -1664,7 +1666,7 @@ def get_performance_stats(
         cal_map_by_sec[key]["pnl"] += rp_val
         cal_map_by_sec[key]["commission"] += comm_val
         cal_map_by_sec[key]["net_pnl"] += rp_val - comm_val
-        cal_map_by_sec[key]["trade_count"] += 1
+        cal_map_by_sec[key]["fill_count"] += 1
         if rp_val > 0:
             cal_map_by_sec[key]["win_count"] += 1
         elif rp_val < 0:
@@ -1673,7 +1675,6 @@ def get_performance_stats(
     for k, v in sorted(cal_map_by_sec.items(), key=lambda x: (x[0][0], x[0][2])):
         wc, lc = v.get("win_count", 0), v.get("loss_count", 0)
         v["win_rate"] = (wc / (wc + lc)) if (wc + lc) > 0 else None
-        v["fill_count"] = v["trade_count"]
         calendar_by_sec_type.append(v)
     calendar_by_sec_type.sort(key=lambda x: (x["period_start_ts"], x["sec_type"]))
     if capital_base and capital_base > 0:
@@ -1731,8 +1732,7 @@ def get_performance_stats(
             "total_realized_pnl": round(total_realized_pnl, 2),
             "total_commission": round(total_commission, 2),
             "net_pnl": round(net_pnl, 2),
-            "trade_count": trade_count,
-            "fill_count": trade_count,
+            "fill_count": fill_count,
             "win_count": win_count,
             "loss_count": loss_count,
             "win_rate": round(win_rate, 4) if win_rate is not None else None,
@@ -1750,6 +1750,8 @@ def get_performance_stats(
         "realized_by_account_and_sec_type": realized_by_account_and_sec_type,
         "realized_by_strategy_opportunity": realized_by_strategy_opportunity,
         "realized_by_strategy_instance": realized_by_strategy_instance,
+        # The same rows under the trade name, each with trade_id (naming R1).
+        "realized_by_trade": realized_by_trade(realized_by_strategy_instance),
         "calendar": calendar,
         "calendar_by_sec_type": calendar_by_sec_type,
         "cumulative_curve": cumulative_curve,
@@ -2086,6 +2088,10 @@ def _make_attribution_row(
         "strategy_opportunity_id": strategy_opportunity_id,
         "strategy_opportunity_name": (strategy_opportunity_name or "").strip() if strategy_opportunity_name else None,
         "strategy_instance_opened_at_epoch": strategy_instance_opened_at_epoch,
+        # The trade names beside them (naming R1): trade_id / trade_label / trade_opened_at_epoch.
+        "trade_id": strategy_instance_id,
+        "trade_label": (strategy_instance_label or "").strip() if strategy_instance_label else None,
+        "trade_opened_at_epoch": strategy_instance_opened_at_epoch,
         # 'structure' is the strategy_structure row (debt TD-41): its name, and the
         # template it is built from. structure_type used to be the name here and the
         # template code on /strategies/structures; it stays one version as the name.

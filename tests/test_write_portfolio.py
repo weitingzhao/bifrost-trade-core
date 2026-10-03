@@ -184,6 +184,9 @@ def test_patch_execution_sets_direct_attribution_and_returns_it(two_dbs) -> None
         "strategy_opportunity_id": 5,
         "strategy_instance_id": 41,
         "instance_allocations": [],
+        # naming R1 (core 0.42.0): the trade names beside them
+        "trade_id": 41,
+        "fill_splits": [],
     }
     # TD-09: this env's table, keyed by the fill; Golden Source is only read.
     sql, params = env.statement("INSERT INTO strategy_instance_execution")
@@ -241,12 +244,12 @@ def test_patch_execution_refusals(two_dbs) -> None:
         accounts.patch_execution(CFG, 77, {"strategy_instance_id": 41})
 
     two_dbs(_env(instance=Reply(one=None)), _golden())
-    with pytest.raises(WriteInvalid, match="No strategy instance 41"):
+    with pytest.raises(WriteInvalid, match="No trade 41"):
         accounts.patch_execution(CFG, 77, {"strategy_instance_id": 41})
 
     env, golden = _env(splits=Reply(one=(2,))), _golden()
     two_dbs(env, golden)
-    with pytest.raises(WriteConflict, match="split across 2 instances"):
+    with pytest.raises(WriteConflict, match="split across 2 trades"):
         accounts.patch_execution(CFG, 77, {"strategy_instance_id": 41})
     assert not env.ran("INSERT") and golden.rollbacks == 1 and env.rollbacks == 1
 
@@ -296,7 +299,7 @@ def test_patch_execution_splits_replace_the_whole_fill_row(two_dbs) -> None:
 def test_patch_execution_bad_splits_are_invalid(two_dbs, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(accounts, "_apply_instance_allocations_on_cursor", lambda *a, **k: False)
     two_dbs(_env(), _golden())
-    with pytest.raises(WriteInvalid, match="adding up to the execution's quantity"):
+    with pytest.raises(WriteInvalid, match="adding up to the fill's quantity"):
         accounts.patch_execution(CFG, 77, {"instance_allocations": [{"strategy_instance_id": 41, "allocated_quantity": 3}]})
 
 

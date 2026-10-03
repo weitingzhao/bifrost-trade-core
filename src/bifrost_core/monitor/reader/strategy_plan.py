@@ -38,6 +38,7 @@ from typing import Any, Dict, List, Optional
 from psycopg2.extras import RealDictCursor
 
 from bifrost_core.monitor.reader import write_support as ws
+from bifrost_core.monitor.reader.trade_names import add_trade_names
 from bifrost_core.monitor.reader.errors import WriteConflict, WriteFailed, WriteInvalid, WriteNotFound
 
 logger = logging.getLogger(__name__)
@@ -200,7 +201,7 @@ def _row_out(row: Dict[str, Any]) -> Dict[str, Any]:
         elif raw is None:
             out[key] = []
     out["effective_status"] = plan_effective_status(out.get("status"), out.get("expires_at"))
-    return out
+    return add_trade_names(out)  # trade_id beside strategy_instance_id (naming R1)
 
 
 def list_plans(
@@ -424,7 +425,7 @@ def link_fill(
             )
             instance = cur.fetchone()
             if instance is None:
-                raise PlanRuleError(f"No strategy instance {strategy_instance_id}.")
+                raise PlanRuleError(f"No trade {strategy_instance_id}.")
             if str(instance["account_id"]) != str(row["account_id"]):
                 raise PlanRuleError(
                     f"That instance belongs to account {instance['account_id']}, "

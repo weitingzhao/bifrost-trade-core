@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Literal, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 PriceEffect = Literal["credit", "debit"]
 TargetKind = Literal["credit_pct", "option_price", "underlying_price"]
@@ -87,6 +87,20 @@ class PlanUpdateBody(BaseModel):
 
 
 class PlanLinkFillBody(BaseModel):
-    """Say which open instance this plan turned into. The fill happened in TWS."""
+    """Say which open trade this plan turned into. The fill happened in TWS.
 
-    strategy_instance_id: int
+    ``trade_id`` is the name (naming R1, core 0.42.0); ``strategy_instance_id`` is still
+    read for one release and loses when both are sent. Either way both are set after
+    validation, so a caller may read either."""
+
+    trade_id: Optional[int] = None
+    strategy_instance_id: Optional[int] = None
+
+    @model_validator(mode="after")
+    def _one_trade(self) -> "PlanLinkFillBody":
+        if self.trade_id is None:
+            self.trade_id = self.strategy_instance_id
+        if self.trade_id is None:
+            raise ValueError("trade_id is required")
+        self.strategy_instance_id = self.trade_id
+        return self
