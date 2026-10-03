@@ -11,6 +11,7 @@ from typing import Any, Dict, List, Optional
 from bifrost_core.monitor.reader import strategy as strategy_reader
 from bifrost_core.monitor.reader import write_support as ws
 from bifrost_core.monitor.reader.errors import WriteFailed, WriteInvalid, WriteNotFound
+from bifrost_core.monitor.schemas.strategies import SCOPE_TYPES
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +52,28 @@ def _normalize_entry_conditions(value: Any) -> List[Dict[str, Any]]:
     return out
 
 
+def normalize_scope_type(value: Any) -> Optional[str]:
+    """``scope_type`` as stored: one of ``SCOPE_TYPES`` or None (``''`` and null). Anything else is
+    WriteInvalid (TD-71, core 0.41.0); the table's CHECK holds the same set."""
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise WriteInvalid("scope_type must be text or null.")
+    text = value.strip()
+    if not text:
+        return None
+    if text not in SCOPE_TYPES:
+        raise WriteInvalid(f"scope_type must be one of {', '.join(SCOPE_TYPES)} (or null), not '{text}'.")
+    return text
+
+
+def check_scope_symbols(scope_type: Optional[str], symbols: Any) -> None:
+    """``symbols`` is what a rule covers; ``watchlist_stk`` with none would read as "the whole
+    watchlist" on one page and as "nothing" on another, so it needs at least one."""
+    if scope_type == "watchlist_stk" and not list(symbols or []):
+        raise WriteInvalid("scope_type watchlist_stk needs at least one symbol.")
+
+
 def _write_json_columns(
     cur: Any, strategy_opportunity_id: int, symbols: List[str], entry_conditions: List[Dict[str, Any]]
 ) -> None:
@@ -84,8 +107,9 @@ def create_opportunity(status_config: Optional[dict], payload: Dict[str, Any]) -
         payload.get("default_gate_safety_strategy_id"), "default_gate_safety_strategy_id", nullable=True
     )
 
-    scope_type = (payload.get("scope_type") or "").strip() or None
+    scope_type = normalize_scope_type(payload.get("scope_type"))
     symbols = _normalize_symbols(payload.get("symbols"))
+    check_scope_symbols(scope_type, symbols)
     entry_conditions = _normalize_entry_conditions(payload.get("entry_conditions"))
     is_active = bool(payload["is_active"]) if payload.get("is_active") is not None else True
 
@@ -150,7 +174,7 @@ def update_opportunity(
         payload.get("default_gate_safety_strategy_id"), "default_gate_safety_strategy_id", nullable=True
     )
 
-    scope_type = (payload.get("scope_type") or "").strip() or None
+    scope_type = normalize_scope_type(payload.get("scope_type"))
     symbols = _normalize_symbols(payload.get("symbols")) if "symbols" in payload else None
     entry_conditions = (
         _normalize_entry_conditions(payload.get("entry_conditions"))
@@ -205,6 +229,7 @@ def update_opportunity(
                             entry_conditions = json.loads(raw)
                         else:
                             entry_conditions = list(raw or [])
+            check_scope_symbols(scope_type, symbols)
             _write_json_columns(
                 cur,
                 strategy_opportunity_id,
@@ -277,11 +302,13 @@ def patch_opportunity(conn_or_config: Any, strategy_opportunity_id: int, fields:
     """Change the fields the client sent; return the row as ``strategy.get_opportunity_by_id`` reads it.
 
     ``name`` NOT NULL text · ``strategy_structure_id`` NOT NULL id · ``is_active`` boolean ·
-    ``default_gate_safety_strategy_id`` nullable id · ``scope_type`` nullable text ·
+    ``default_gate_safety_strategy_id`` nullable id · ``scope_type`` watchlist_stk / explicit_symbols
+    / null (``''`` reads as null; anything else WriteInvalid) ·
     ``symbols`` (list of text) and ``entry_conditions`` (list of {condition_type, value_text,
     value_numeric}) replace the stored list (``[]`` empties it; null is refused).
     A field left out keeps its value -- unlike PUT, which NULLs the gate and scope and
-    reactivates the rule. Raises WriteInvalid, WriteNotFound, WriteFailed.
+    reactivates the rule. The row as changed must keep a symbol when it is ``watchlist_stk``
+    (checked on the merged row). Raises WriteInvalid, WriteNotFound, WriteFailed.
     """
     what = f"opportunity {strategy_opportunity_id}"
     fields = ws.check_fields(fields, OPPORTUNITY_PATCHABLE, "opportunity")
@@ -297,7 +324,7 @@ def patch_opportunity(conn_or_config: Any, strategy_opportunity_id: int, fields:
             fields["default_gate_safety_strategy_id"], "default_gate_safety_strategy_id", nullable=True
         )
     if "scope_type" in fields:
-        columns["scope_type"] = ws.text(fields["scope_type"], "scope_type", nullable=True)
+        columns["scope_type"] = normalize_scope_type(fields["scope_type"])
     if "is_active" in fields:
         columns["is_active"] = ws.boolean(fields["is_active"], "is_active")
     if "symbols" in fields:
@@ -313,6 +340,15 @@ def patch_opportunity(conn_or_config: Any, strategy_opportunity_id: int, fields:
             )
             if cur.rowcount == 0:
                 raise WriteNotFound(f"No opportunity {strategy_opportunity_id}.")
+            if "scope_type" in columns or "symbols_json" in columns:
+                cur.execute(
+                    "SELECT scope_type, symbols_json FROM strategy_opportunity WHERE strategy_opportunity_id = %s",
+                    (strategy_opportunity_id,),
+                )
+                merged = cur.fetchone()
+                if merged is not None:
+                    stored = merged[1]
+                    check_scope_symbols(merged[0], json.loads(stored) if isinstance(stored, str) else stored)
         row = strategy_reader.get_opportunity_by_id(conn, strategy_opportunity_id)
         if row is None:
             raise WriteFailed(f"{what} was changed but could not be read back; nothing was saved.")

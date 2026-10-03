@@ -49,15 +49,19 @@ _LEG_SIDES = ("buy", "sell")
 _LEG_SEC_TYPES = ("OPT", "STK")
 _LEG_RIGHTS = ("C", "P")
 
+# `filled_at` is read, not stored (TD-43, core 0.41.0): the linked instance's `opened_at`,
+# so moving the instance's open moves it too. The column stays until the next DDL wave and
+# is no longer written. Plan `p` LEFT JOIN instance `i`; filters and order name `p.`.
 _PLAN_COLUMNS = """
-    strategy_plan_id, account_id, symbol, structure_label,
-    strategy_structure_id, strategy_opportunity_id,
-    legs_json, qty, price_effect, limit_price,
-    target_kind, target_value, stop_kind, stop_value, exit_by,
-    rationale, source_kind, source_ref, source_json,
-    status, expires_at, intended_at, filled_at, cancelled_at,
-    strategy_instance_id, parent_strategy_plan_id, created_at, updated_at
+    p.strategy_plan_id, p.account_id, p.symbol, p.structure_label,
+    p.strategy_structure_id, p.strategy_opportunity_id,
+    p.legs_json, p.qty, p.price_effect, p.limit_price,
+    p.target_kind, p.target_value, p.stop_kind, p.stop_value, p.exit_by,
+    p.rationale, p.source_kind, p.source_ref, p.source_json,
+    p.status, p.expires_at, p.intended_at, i.opened_at AS filled_at, p.cancelled_at,
+    p.strategy_instance_id, p.parent_strategy_plan_id, p.created_at, p.updated_at
 """
+_PLAN_FROM = "strategy_plan p LEFT JOIN strategy_instance i ON i.strategy_instance_id = p.strategy_instance_id"
 
 # Columns a draft may replace. `status` and the timestamps are the state
 # machine's, not the caller's.
@@ -217,13 +221,13 @@ def list_plans(
     conditions: List[str] = []
     values: List[Any] = []
     if status and str(status).strip():
-        conditions.append("status = %s")
+        conditions.append("p.status = %s")
         values.append(str(status).strip())
     if symbol and str(symbol).strip():
-        conditions.append("upper(symbol) = upper(%s)")
+        conditions.append("upper(p.symbol) = upper(%s)")
         values.append(str(symbol).strip())
     if account_id and str(account_id).strip():
-        conditions.append("account_id = %s")
+        conditions.append("p.account_id = %s")
         values.append(str(account_id).strip())
     where = (" WHERE " + " AND ".join(conditions)) if conditions else ""
     values.append(max(1, int(limit)))
@@ -233,8 +237,8 @@ def list_plans(
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(
-                f"SELECT {_PLAN_COLUMNS} FROM strategy_plan{where} "
-                "ORDER BY created_at DESC, strategy_plan_id DESC LIMIT %s",
+                f"SELECT {_PLAN_COLUMNS} FROM {_PLAN_FROM}{where} "
+                "ORDER BY p.created_at DESC, p.strategy_plan_id DESC LIMIT %s",
                 values,
             )
             rows = cur.fetchall()
@@ -257,7 +261,7 @@ def get_plan(status_config: Optional[dict], strategy_plan_id: int) -> Optional[D
 def _get_plan_on(conn: Any, strategy_plan_id: int) -> Optional[Dict[str, Any]]:
     with conn.cursor(cursor_factory=RealDictCursor) as cur:
         cur.execute(
-            f"SELECT {_PLAN_COLUMNS} FROM strategy_plan WHERE strategy_plan_id = %s",
+            f"SELECT {_PLAN_COLUMNS} FROM {_PLAN_FROM} WHERE p.strategy_plan_id = %s",
             (strategy_plan_id,),
         )
         row = cur.fetchone()
@@ -398,7 +402,8 @@ def intend_plan(status_config: Optional[dict], strategy_plan_id: int) -> bool:
 def link_fill(
     status_config: Optional[dict], strategy_plan_id: int, strategy_instance_id: int
 ) -> bool:
-    """Say which instance an intent turned into. `filled_at` is the instance's own open."""
+    """Say which instance an intent turned into. `filled_at` reads as the instance's own open
+    (not stored since core 0.41.0); the table's CHECK holds `filled` and the instance together."""
     conn = _conn_from_config(status_config)
     if conn is None:
         return False
@@ -418,7 +423,7 @@ def link_fill(
                     f"This plan is {row['status']}. Only an intended plan can be linked to a fill."
                 )
             cur.execute(
-                "SELECT account_id, opened_at FROM strategy_instance "
+                "SELECT account_id FROM strategy_instance "
                 "WHERE strategy_instance_id = %s",
                 (strategy_instance_id,),
             )
@@ -432,8 +437,8 @@ def link_fill(
                 )
             cur.execute(
                 "UPDATE strategy_plan SET status = 'filled', strategy_instance_id = %s, "
-                "filled_at = %s, updated_at = now() WHERE strategy_plan_id = %s",
-                (strategy_instance_id, instance["opened_at"], strategy_plan_id),
+                "updated_at = now() WHERE strategy_plan_id = %s",
+                (strategy_instance_id, strategy_plan_id),
             )
         conn.commit()
         return True

@@ -21,6 +21,7 @@ from bifrost_core.persistence.postgres.brokerage_tables import (
     POSITIONS,
 )
 from bifrost_core.monitor.reader import write_support as ws
+from bifrost_core.monitor.reader.instance_state import instance_states
 from bifrost_core.monitor.reader.errors import (
     ReadFailed,
     WriteConflict,
@@ -42,7 +43,10 @@ def list_instances(
     opened_at_from: Optional[float] = None,
     opened_at_until: Optional[float] = None,
 ) -> List[Dict[str, Any]]:
-    """List strategy instances, optionally filtered by account_id, strategy_opportunity_id, strategy_instance_ids, opened_at range (Unix seconds)."""
+    """List strategy instances, optionally filtered by account_id, strategy_opportunity_id, strategy_instance_ids, opened_at range (Unix seconds).
+
+    Each row carries ``state`` (no_fills / open / expired / closed) and ``closed_on`` (ISO date
+    or None), derived from its option fills by ``instance_state`` (TD-43, core 0.41.0)."""
     if conn is None:
         return []
     try:
@@ -106,6 +110,7 @@ def list_instances(
                 values,
             )
             rows = cur.fetchall()
+            states = instance_states(cur, [int(r["strategy_instance_id"]) for r in rows])
         out: List[Dict[str, Any]] = []
         for r in rows:
             d = dict(r)
@@ -115,6 +120,9 @@ def list_instances(
                 d["created_at_epoch"] = d["created_at"].timestamp()
             if d.get("executions_count") is not None:
                 d["executions_count"] = int(d["executions_count"])
+            state, closed_on = states.get(int(d["strategy_instance_id"]), ("no_fills", None))
+            d["state"] = state
+            d["closed_on"] = closed_on.isoformat() if closed_on is not None else None
             out.append(d)
         return out
     except Exception as e:
@@ -396,6 +404,17 @@ def _attributed_counts(cur: Any, strategy_instance_id: int) -> Tuple[int, int]:
     return int(row[0] or 0), int(row[1] or 0)
 
 
+def _plan_and_review_counts(cur: Any, strategy_instance_id: int) -> Tuple[int, int]:
+    """(plans filled by the instance, reviews of it): the two ON DELETE RESTRICT references (TD-43)."""
+    cur.execute(
+        "SELECT (SELECT count(*) FROM strategy_plan WHERE strategy_instance_id = %s), "
+        "(SELECT count(*) FROM trade_review WHERE strategy_instance_id = %s)",
+        (strategy_instance_id, strategy_instance_id),
+    )
+    row = cur.fetchone() or (0, 0)
+    return int(row[0] or 0), int(row[1] or 0)
+
+
 def count_attributed_executions(status_config: Any, strategy_instance_id: int) -> int:
     """Fills attributed whole to this instance (this env's strategy_instance_execution, TD-09).
 
@@ -421,8 +440,9 @@ def delete_instance_strict(status_config: Any, strategy_instance_id: int) -> Dic
 
     Refused (WriteConflict, nothing deleted) when fills are split-allocated to it or
     attributed to it whole in this env's ``strategy_instance_execution`` (TD-09; its
-    FK is ON DELETE RESTRICT as well). Its review (``trade_review``) goes with it
-    (CASCADE); a plan that pointed at it keeps its text (SET NULL).
+    FK is ON DELETE RESTRICT as well), and while a plan was filled by it or it has a
+    review: both FKs are ON DELETE RESTRICT since core 0.41.0 (TD-43), so a filled plan never
+    loses its instance and a review is never deleted with one.
     """
     what = f"strategy instance {strategy_instance_id}"
     if not isinstance(status_config, dict):
@@ -447,6 +467,11 @@ def delete_instance_strict(status_config: Any, strategy_instance_id: int) -> Dic
                 raise WriteConflict(
                     f"{ws.plural(n_direct, 'execution is', 'executions are')} attributed to this instance."
                 )
+            n_plans, n_reviews = _plan_and_review_counts(cur, strategy_instance_id)
+            if n_plans or n_reviews:
+                held = [ws.plural(n_plans, "plan was", "plans were") + " filled by it"] if n_plans else []
+                held += ["it has a review"] if n_reviews else []
+                raise WriteConflict(f"Cannot delete instance {strategy_instance_id}: {' and '.join(held)}.")
             cur.execute(
                 "DELETE FROM strategy_instance WHERE strategy_instance_id = %s",
                 (strategy_instance_id,),

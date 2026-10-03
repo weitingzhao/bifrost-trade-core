@@ -35,12 +35,49 @@ _CATEGORY = {"id": 3, "name": "Income", "description": None, "sort_order": 2, "c
 
 
 def test_position_category_patch_returns_the_row() -> None:
-    conn = FakeConn([("UPDATE preference_position_categories", Reply(one=_CATEGORY))])
+    conn = FakeConn(
+        [
+            ("SELECT name FROM preference_position_categories", Reply(one={"name": "Yield"})),
+            ("UPDATE preference_position_categories", Reply(one=_CATEGORY)),
+        ]
+    )
     assert position_categories.patch_position_category(conn, 3, {"name": " Income ", "description": None}) == _CATEGORY
     sql, params = conn.statement("UPDATE preference_position_categories")
     assert "RETURNING id, name, description, sort_order" in sql
     assert params == ["Income", None, 3]
+    # TD-56: the symbol order moves with the name, in the same transaction.
+    _, moved = conn.statement("UPDATE preference_market_streams_symbol_order")
+    assert moved == ("Income", "Yield")
     assert conn.commits == 1
+
+
+def test_position_category_patch_without_a_new_name_leaves_the_symbol_order() -> None:
+    conn = FakeConn(
+        [
+            ("SELECT name FROM preference_position_categories", Reply(one={"name": "Yield"})),
+            ("UPDATE preference_position_categories", Reply(one=_CATEGORY)),
+        ]
+    )
+    position_categories.patch_position_category(conn, 3, {"sort_order": 1})
+    assert not conn.ran("preference_market_streams_symbol_order")
+
+
+def test_position_category_names_uncategorized_is_reserved_and_a_taken_name_conflicts() -> None:
+    for name in ("Uncategorized", " uncategorized "):
+        with pytest.raises(WriteInvalid, match="reserved"):
+            position_categories.patch_position_category(FakeConn(), 3, {"name": name})
+        with pytest.raises(WriteInvalid, match="reserved"):
+            position_categories.create_position_category(FakeConn(), name)
+    taken = [
+        ("SELECT name FROM preference_position_categories", Reply(one={"name": "Yield"})),
+        ("SELECT 1 FROM preference_position_categories WHERE name", Reply(one=(1,))),
+    ]
+    with pytest.raises(WriteConflict, match="named 'Income' already exists"):
+        position_categories.patch_position_category(FakeConn(taken), 3, {"name": "Income"})
+    conn = FakeConn([("SELECT 1 FROM preference_position_categories WHERE name", Reply(one=(1,)))])
+    with pytest.raises(WriteConflict, match="already exists"):
+        position_categories.create_position_category(conn, "Income")
+    assert not conn.ran("INSERT")
 
 
 def test_position_category_patch_rules() -> None:
@@ -63,9 +100,10 @@ def test_position_category_patch_rules() -> None:
 def test_position_category_strict_delete_reports_what_went_with_it() -> None:
     conn = FakeConn(
         [
-            ("FOR UPDATE", Reply(one=(1,))),
+            ("FOR UPDATE", Reply(one=("Income",))),
             ("FROM preference_position_category_tags", Reply(one=(4,))),
             ("FROM watchlist", Reply(one=(2,))),
+            ("DELETE FROM preference_market_streams_symbol_order", Reply(rowcount=5)),
         ]
     )
     assert position_categories.delete_position_category_strict(conn, 3) == {
@@ -73,7 +111,9 @@ def test_position_category_strict_delete_reports_what_went_with_it() -> None:
         "id": 3,
         "tags_removed": 4,
         "watchlist_uncategorized": 2,
+        "symbol_order_removed": 5,
     }
+    assert conn.statement("DELETE FROM preference_market_streams_symbol_order")[1] == ("Income",)
     with pytest.raises(WriteNotFound):
         position_categories.delete_position_category_strict(FakeConn([("FOR UPDATE", Reply(one=None))]), 3)
     with pytest.raises(WriteFailed):

@@ -2,18 +2,64 @@
 
 ``patch_position_category`` and ``delete_position_category_strict`` (core 0.33.0,
 TD-15) check the row exists and raise ``Write*``; the older writers answer a bool
-(and ``True`` for a missing id) for one release."""
+(and ``True`` for a missing id) for one release.
+
+Names (TD-56, core 0.41.0): ``preference_market_streams_symbol_order`` keeps each category's
+symbol order under the category's *name*, so the name is a key -- UNIQUE in the table
+(``preference_position_categories_name_uq``) -- and every rename or delete carries the order
+along in the same transaction (rename moves the rows, delete removes them). ``Uncategorized``
+is the Live page's name for positions without a category; its order rows are stored under
+that name, so no category may take it (refused case-insensitively, WriteInvalid). A name
+already in use is WriteConflict."""
 
 import logging
 from typing import Any, Dict, List, Optional, Tuple
 
 import psycopg2
+import psycopg2.errors
 from psycopg2.extras import RealDictCursor
 
 from bifrost_core.monitor.reader import write_support as ws
-from bifrost_core.monitor.reader.errors import WriteNotFound
+from bifrost_core.monitor.reader.errors import WriteConflict, WriteInvalid, WriteNotFound
 
 logger = logging.getLogger(__name__)
+
+# The Live page's pseudo-category for positions without one (its symbol order is stored under it).
+UNCATEGORIZED = "Uncategorized"
+RESERVED_CATEGORY_NAMES = (UNCATEGORIZED,)
+
+
+def check_category_name(name: str) -> None:
+    """WriteInvalid when ``name`` is reserved (``Uncategorized``, in any case)."""
+    if name.strip().casefold() in {n.casefold() for n in RESERVED_CATEGORY_NAMES}:
+        raise WriteInvalid(f"'{name.strip()}' is reserved for positions without a category; choose another name.")
+
+
+def _refuse_taken_name(cur: Any, name: str, category_id: Optional[int] = None) -> None:
+    """WriteConflict when another category already has ``name`` (the UNIQUE says so too)."""
+    cur.execute(
+        "SELECT 1 FROM preference_position_categories WHERE name = %s AND id IS DISTINCT FROM %s",
+        (name, category_id),
+    )
+    if cur.fetchone() is not None:
+        raise WriteConflict(f"A position category named '{name}' already exists.")
+
+
+def _carry_symbol_order(cur: Any, old_name: Optional[str], new_name: Optional[str]) -> int:
+    """Move a category's symbol order to its new name, or drop it (``new_name`` None). Rows already
+    stored under the new name belong to no category (the name was free) and are replaced."""
+    if not old_name or old_name == new_name:
+        return 0
+    if new_name is None:
+        cur.execute("DELETE FROM preference_market_streams_symbol_order WHERE category_name = %s", (old_name,))
+        return int(cur.rowcount or 0)
+    cur.execute("DELETE FROM preference_market_streams_symbol_order WHERE category_name = %s", (new_name,))
+    cur.execute(
+        "UPDATE preference_market_streams_symbol_order SET category_name = %s, updated_at = now() "
+        "WHERE category_name = %s",
+        (new_name, old_name),
+    )
+    return int(cur.rowcount or 0)
 
 
 def _pg_exc_message(exc: BaseException) -> str:
@@ -51,11 +97,15 @@ def create_position_category(
     description: Optional[str] = None,
     sort_order: Optional[int] = None,
 ) -> Tuple[Optional[int], Optional[str]]:
-    """Returns (new_id, error_message). error_message is set only on failure."""
+    """Returns (new_id, error_message). error_message is set only on failure.
+
+    Raises WriteInvalid for the reserved name and WriteConflict for a name already in use."""
     if not name or not str(name).strip() or conn is None:
         return None, "Invalid name or no database connection."
+    check_category_name(str(name))
     try:
         with conn.cursor() as cur:
+            _refuse_taken_name(cur, str(name).strip())
             cur.execute(
                 """
                 INSERT INTO preference_position_categories (name, description, sort_order, updated_at)
@@ -69,6 +119,18 @@ def create_position_category(
         if row and row[0] is not None:
             return int(row[0]), None
         return None, "Insert returned no id."
+    except WriteConflict:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        raise
+    except psycopg2.errors.UniqueViolation:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        raise WriteConflict(f"A position category named '{str(name).strip()}' already exists.") from None
     except Exception as e:
         msg = _pg_exc_message(e)
         logger.warning("create_position_category failed: %s", msg)
@@ -88,12 +150,15 @@ def update_position_category(
 ) -> bool:
     if conn is None:
         return False
+    new_name = (str(name).strip() or None) if name is not None else None
+    if new_name is not None:
+        check_category_name(new_name)
     try:
         updates = ["updated_at = now()"]
         vals: List[Any] = []
         if name is not None:
             updates.append("name = %s")
-            vals.append(str(name).strip() if str(name).strip() else None)
+            vals.append(new_name)
         if description is not None:
             updates.append("description = %s")
             vals.append(str(description).strip() or None)
@@ -104,10 +169,14 @@ def update_position_category(
             return True
         vals.append(category_id)
         with conn.cursor() as cur:
+            cur.execute("SELECT name FROM preference_position_categories WHERE id = %s FOR UPDATE", (category_id,))
+            old = cur.fetchone()
             cur.execute(
                 f"UPDATE preference_position_categories SET {', '.join(updates)} WHERE id = %s",
                 tuple(vals),
             )
+            if old is not None and new_name is not None:
+                _carry_symbol_order(cur, old[0], new_name)
         conn.commit()
         return True
     except Exception as e:
@@ -124,7 +193,10 @@ def delete_position_category(conn: Any, category_id: int) -> bool:
         return False
     try:
         with conn.cursor() as cur:
-            cur.execute("DELETE FROM preference_position_categories WHERE id = %s", (category_id,))
+            cur.execute("DELETE FROM preference_position_categories WHERE id = %s RETURNING name", (category_id,))
+            gone = cur.fetchone()
+            if gone is not None:
+                _carry_symbol_order(cur, gone[0], None)
         conn.commit()
         return True
     except Exception as e:
@@ -250,13 +322,16 @@ def patch_position_category(conn_or_config: Any, category_id: int, fields: Dict[
 
     ``name`` NOT NULL text · ``description`` nullable text (null clears; blank is refused,
     where ``update_position_category`` stored it as NULL) · ``sort_order`` nullable whole
-    number. Raises WriteInvalid, WriteNotFound, WriteFailed.
+    number. A new name carries the category's symbol order with it, in the same transaction
+    (TD-56); the reserved ``Uncategorized`` is WriteInvalid, a name in use WriteConflict.
+    Raises WriteInvalid, WriteNotFound, WriteConflict, WriteFailed.
     """
     what = f"position category {category_id}"
     fields = ws.check_fields(fields, POSITION_CATEGORY_PATCHABLE, "position category")
     columns: Dict[str, Any] = {}
     if "name" in fields:
         columns["name"] = ws.text(fields["name"], "name", nullable=False)
+        check_category_name(columns["name"])
     if "description" in fields:
         columns["description"] = ws.text(fields["description"], "description", nullable=True)
     if "sort_order" in fields:
@@ -264,28 +339,38 @@ def patch_position_category(conn_or_config: Any, category_id: int, fields: Dict[
     assignments, values = ws.set_clause(columns)
     with ws.write_connection(conn_or_config, what) as conn, ws.write_transaction(conn, what):
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("SELECT name FROM preference_position_categories WHERE id = %s FOR UPDATE", (category_id,))
+            old = cur.fetchone()
+            if old is None:
+                raise WriteNotFound(f"No position category {category_id}.")
+            if "name" in columns:
+                _refuse_taken_name(cur, columns["name"], category_id)
             cur.execute(
                 f"UPDATE preference_position_categories SET {assignments} WHERE id = %s RETURNING {_CATEGORY_COLUMNS}",
                 [*values, category_id],
             )
             row = cur.fetchone()
-        if row is None:
-            raise WriteNotFound(f"No position category {category_id}.")
+            if row is None:
+                raise WriteNotFound(f"No position category {category_id}.")
+            if "name" in columns:
+                _carry_symbol_order(cur, old["name"], columns["name"])
     return dict(row)
 
 
 def delete_position_category_strict(conn_or_config: Any, category_id: int) -> Dict[str, Any]:
-    """Hard-delete a category. Returns ``{"deleted": "hard", "id", "tags_removed", "watchlist_uncategorized"}``.
+    """Hard-delete a category. Returns ``{"deleted": "hard", "id", "tags_removed", "watchlist_uncategorized",
+    "symbol_order_removed"}``.
 
-    Nothing refuses it: its position tags go with it (CASCADE) and watchlist rows in
-    it fall back to no category (SET NULL); the counts say how many. Raises
-    WriteNotFound, WriteFailed.
+    Nothing refuses it: its position tags go with it (CASCADE), watchlist rows in it fall
+    back to no category (SET NULL) and its symbol order rows are deleted in the same
+    transaction (TD-56); the counts say how many. Raises WriteNotFound, WriteFailed.
     """
     what = f"position category {category_id}"
     with ws.write_connection(conn_or_config, what) as conn, ws.write_transaction(conn, what, on_fk="conflict"):
         with conn.cursor() as cur:
-            cur.execute("SELECT 1 FROM preference_position_categories WHERE id = %s FOR UPDATE", (category_id,))
-            if cur.fetchone() is None:
+            cur.execute("SELECT name FROM preference_position_categories WHERE id = %s FOR UPDATE", (category_id,))
+            found = cur.fetchone()
+            if found is None:
                 raise WriteNotFound(f"No position category {category_id}.")
             cur.execute("SELECT count(*) FROM preference_position_category_tags WHERE category_id = %s", (category_id,))
             tags = int((cur.fetchone() or [0])[0] or 0)
@@ -294,4 +379,11 @@ def delete_position_category_strict(conn_or_config: Any, category_id: int) -> Di
             cur.execute("DELETE FROM preference_position_categories WHERE id = %s", (category_id,))
             if cur.rowcount == 0:
                 raise WriteNotFound(f"No position category {category_id}.")
-    return {"deleted": "hard", "id": category_id, "tags_removed": tags, "watchlist_uncategorized": watched}
+            ordered = _carry_symbol_order(cur, found[0], None)
+    return {
+        "deleted": "hard",
+        "id": category_id,
+        "tags_removed": tags,
+        "watchlist_uncategorized": watched,
+        "symbol_order_removed": ordered,
+    }

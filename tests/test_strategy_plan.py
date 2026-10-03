@@ -230,12 +230,14 @@ def test_link_fill_needs_an_instance_that_exists(conn) -> None:
         strategy_plan.link_fill(CFG, 1, 7)
 
 
-def test_link_fill_takes_the_instance_open_as_the_fill_time(conn) -> None:
-    fake = conn([{"status": "intended", "account_id": "U1"}, {"account_id": "U1", "opened_at": NOW}])
+def test_link_fill_sets_filled_and_the_instance_together(conn) -> None:
+    fake = conn([{"status": "intended", "account_id": "U1"}, {"account_id": "U1"}])
     assert strategy_plan.link_fill(CFG, 1, 7) is True
     sql, params = fake.cur.executed[-1]
-    assert "status = 'filled'" in sql
-    assert params == (7, NOW, 1)
+    assert "status = 'filled'" in sql and "strategy_instance_id = %s" in sql
+    # TD-43 (core 0.41.0): filled_at is no longer written; it reads as the instance's opened_at.
+    assert "filled_at" not in sql
+    assert params == (7, 1)
 
 
 def test_link_fill_only_follows_an_intent(conn) -> None:
@@ -301,7 +303,7 @@ def test_list_filters_and_caps(conn) -> None:
     fake = conn([[]])
     strategy_plan.list_plans(CFG, status="intended", symbol="nvda", account_id="U1", limit=50)
     sql, params = fake.cur.executed[0]
-    assert "status = %s" in sql and "upper(symbol) = upper(%s)" in sql and "account_id = %s" in sql
+    assert "p.status = %s" in sql and "upper(p.symbol) = upper(%s)" in sql and "p.account_id = %s" in sql
     assert params == ["intended", "nvda", "U1", 50]
 
 
@@ -317,9 +319,11 @@ def test_rows_carry_the_status_a_reader_should_see(conn) -> None:
     assert row["effective_status"] == "expired"
     assert row["status"] == "intended"
     assert row["legs_json"] == [] and row["source_json"] == []
-    # The list is one table: a plan says what it says on its own, and nothing
-    # about it is derived from an instance or an opportunity.
-    assert " JOIN " not in fake.cur.executed[0][0].upper()
+    # One join, for filled_at alone (TD-43): the instance's opened_at. Nothing else about
+    # a plan is derived from its instance or its opportunity.
+    sql = fake.cur.executed[0][0]
+    assert sql.upper().count(" JOIN ") == 1
+    assert "i.opened_at AS filled_at" in sql and "LEFT JOIN strategy_instance i" in sql
 
 
 def test_a_broken_read_is_an_error_not_an_empty_desk(conn, monkeypatch) -> None:
