@@ -1,5 +1,14 @@
 """Tests for OPT pair FIFO and _compute_opt_realized_calendar alignment."""
 
+import inspect
+from datetime import date, datetime
+from typing import Any, Dict, List
+from zoneinfo import ZoneInfo
+
+import pytest
+
+from bifrost_core.portfolio.reader import accounts as accounts_reader
+from bifrost_core.portfolio.reader import executions as executions_reader
 from bifrost_core.portfolio.reader.accounts_helpers import (
     _compute_opt_pair_map_and_pairs,
     _compute_opt_realized_calendar,
@@ -230,3 +239,78 @@ class TestIterativeFIFOEquivalence:
         assert pairs[0]["quantity"] == 1.0
         assert pairs[0]["leg_c_execution_id"] == 163
         assert pairs[0]["leg_p_execution_id"] == 160
+
+
+class TestOptRealizedCalendarRange:
+    """Legs may reach back before the range; only pairs closing inside it count."""
+
+    def _execs(self):
+        return [
+            _make_exec(1, side="SELL", quantity=1, price=5.0, commission=0.0, time=100, trade_date="2025-02-10"),
+            _make_exec(2, side="BUY", quantity=1, price=2.0, commission=0.0, time=200, trade_date="2025-02-20"),
+            _make_exec(3, side="SELL", quantity=1, price=4.0, commission=0.0, time=300, trade_date="2025-03-05"),
+            _make_exec(4, side="BUY", quantity=1, price=1.0, commission=0.0, time=400, trade_date="2025-03-10"),
+        ]
+
+    def test_pairs_closing_before_the_range_are_dropped(self):
+        calendar = _compute_opt_realized_calendar(self._execs(), "day", since_date=date(2025, 3, 1))
+        assert [(r["period_label"], r["net_pnl"]) for r in calendar] == [("2025-03-10", 300.0)]
+
+    def test_pairs_closing_after_the_range_are_dropped(self):
+        calendar = _compute_opt_realized_calendar(self._execs(), "day", until_date=date(2025, 2, 28))
+        assert [(r["period_label"], r["net_pnl"]) for r in calendar] == [("2025-02-20", 300.0)]
+
+    def test_month_bucket_keeps_only_in_range_pairs(self):
+        calendar = _compute_opt_realized_calendar(
+            self._execs(), "month", since_date=date(2025, 2, 15), until_date=date(2025, 3, 31)
+        )
+        assert [(r["period_label"], r["net_pnl"], r["pair_count"]) for r in calendar] == [
+            ("2025-02", 300.0, 1),
+            ("2025-03", 300.0, 1),
+        ]
+
+
+_CH = ZoneInfo("America/Chicago")
+
+
+def _ts(day: str, hour: int = 14) -> float:
+    return datetime.strptime(day, "%Y-%m-%d").replace(hour=hour, tzinfo=_CH).timestamp()
+
+
+def _perf_over(monkeypatch: pytest.MonkeyPatch, book: List[Dict[str, Any]], since: str, until: str) -> Dict[str, Any]:
+    """get_performance_stats with a fake get_executions that honours the trade_date range.
+
+    The fake binds every call to the real signature, so a renamed keyword fails here.
+    """
+    real_sig = inspect.signature(executions_reader.get_executions)
+
+    def fake_get_executions(*args: Any, **kwargs: Any) -> List[Dict[str, Any]]:
+        call = real_sig.bind(*args, **kwargs).arguments
+        since_ts, until_ts = call.get("since_ts"), call.get("until_ts")
+        lo = executions_reader._unix_ts_to_chicago_date(since_ts) if since_ts is not None else date.min
+        hi = executions_reader._unix_ts_to_chicago_date(until_ts) if until_ts is not None else date.max
+        return [dict(e) for e in book if lo <= date.fromisoformat(e["trade_date"]) <= hi]
+
+    monkeypatch.setattr(executions_reader, "get_executions", fake_get_executions)
+    monkeypatch.setattr(executions_reader, "_get_current_equity", lambda conn: 100_000.0)
+    monkeypatch.setattr(executions_reader, "get_net_cash_flow", lambda conn, **_: 0.0)
+    monkeypatch.setattr(executions_reader, "get_transactions", lambda conn, **_: [])
+    monkeypatch.setattr(accounts_reader, "get_accounts_from_tables", lambda conn: [])
+    return executions_reader.get_performance_stats(
+        object(), since_ts=_ts(since, 0), until_ts=_ts(until, 23), granularity="day"
+    )
+
+
+def test_performance_opt_calendar_pairs_a_close_with_an_open_before_the_range(monkeypatch):
+    """Sell to open in July, buy to close in August: August's OPT row carries the pair."""
+    book = [
+        _make_exec(1, strike="200", side="SELL", quantity=-2, price=6.0, commission=1.0, time=_ts("2026-07-22"), trade_date="2026-07-22"),
+        _make_exec(2, strike="200", side="BUY", quantity=2, price=1.0, commission=1.0, time=_ts("2026-08-24"), trade_date="2026-08-24"),
+        _make_exec(3, strike="210", side="BUY", quantity=1, price=3.0, commission=0.5, time=_ts("2026-08-03"), trade_date="2026-08-03"),
+        _make_exec(4, strike="210", side="SELL", quantity=-1, price=3.5, commission=0.5, time=_ts("2026-08-03"), trade_date="2026-08-03"),
+        _make_exec(5, strike="220", side="BUY", quantity=1, price=2.0, commission=0.0, time=_ts("2026-06-01"), trade_date="2026-06-01"),
+        _make_exec(6, strike="220", side="SELL", quantity=-1, price=2.5, commission=0.0, time=_ts("2026-07-01"), trade_date="2026-07-01"),
+    ]
+    out = _perf_over(monkeypatch, book, "2026-08-01", "2026-08-31")
+    opt = {r["period_label"]: (r["net_pnl"], r["pair_count"]) for r in out["calendar_by_sec_type"] if r["sec_type"] == "OPT"}
+    assert opt == {"2026-08-03": (49.0, 1), "2026-08-24": (998.0, 1)}

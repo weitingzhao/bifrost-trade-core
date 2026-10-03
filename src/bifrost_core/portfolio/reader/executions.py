@@ -37,6 +37,11 @@ logger = logging.getLogger(__name__)
 _CHICAGO = ZoneInfo("America/Chicago")
 
 
+# Option-pair calendar: how far back a close in the range looks for its opening leg.
+_OPT_PAIR_LOOKBACK_DAYS = 365
+_OPT_PAIR_LOOKBACK_LIMIT = 20000
+
+
 def _unix_ts_to_chicago_date(ts: float) -> date:
     """Map Unix instant to Chicago calendar date for `trade_date` (DATE) filters."""
     return datetime.fromtimestamp(float(ts), tz=timezone.utc).astimezone(_CHICAGO).date()
@@ -1359,7 +1364,37 @@ def get_performance_stats(
         for row in calendar:
             row["return_pct"] = round(100.0 * row["net_pnl"] / capital_base, 4)
 
-    opt_calendar = _compute_opt_realized_calendar(executions_sorted, granularity)
+    # A close in the range pairs with an open that may predate it: FIFO over the
+    # look-back legs, keep the pairs that close in the range (the FE bulk calendar
+    # uses the same 365 days, OPT_PAIR_LOOK_BACK_DAYS).
+    opt_legs = executions_sorted
+    opt_since_date: Optional[date] = None
+    opt_until_date: Optional[date] = None
+    if since_ts is not None:
+        lookback_execs = get_executions(
+            conn,
+            since_ts=float(since_ts) - _OPT_PAIR_LOOKBACK_DAYS * 86400,
+            until_ts=until_ts,
+            account_id=account_id,
+            limit=_OPT_PAIR_LOOKBACK_LIMIT,
+            strategy_opportunity_id=strategy_opportunity_id,
+            trade_id=trade_id,
+            source_scope=scope_norm,
+        )
+        opt_legs = sorted(
+            [
+                e
+                for e in lookback_execs
+                if e.get("time") is not None and (e.get("sec_type") or "").strip().upper() == "OPT"
+            ],
+            key=lambda e: float(e["time"]),
+        )
+        opt_since_date = _unix_ts_to_chicago_date(since_ts)
+        if until_ts is not None:
+            opt_until_date = _unix_ts_to_chicago_date(until_ts)
+    opt_calendar = _compute_opt_realized_calendar(
+        opt_legs, granularity, since_date=opt_since_date, until_date=opt_until_date
+    )
     cal_map_by_sec: Dict[Tuple[float, str, str], Dict[str, Any]] = {}
     for e in executions_sorted:
         wf = _perf_inst_weight(e)

@@ -308,12 +308,18 @@ def _get_current_equity(conn: Any) -> Optional[float]:
 def _compute_opt_realized_calendar(
     executions_sorted: List[Dict[str, Any]],
     granularity: str,
+    since_date: Optional[date] = None,
+    until_date: Optional[date] = None,
 ) -> List[Dict[str, Any]]:
     """Option Realized by period using the same FIFO as _compute_opt_pair_map_and_pairs.
 
     Runs FIFO across all legs globally, then attributes each pair's net_pnl to
     a period bucket based on the later leg's Chicago trade_date (the closing
     side determines when the P&L is realized).
+
+    ``executions_sorted`` may reach back before the reported range so a close
+    finds its opening leg; ``since_date`` / ``until_date`` then keep only the
+    pairs that close inside the range.
     """
     try:
         from zoneinfo import ZoneInfo
@@ -373,6 +379,10 @@ def _compute_opt_realized_calendar(
         dp = _leg_chicago_date(pid) if pid is not None else None
         attr_date = max(dc, dp) if dc is not None and dp is not None else (dc or dp)
         if attr_date is None:
+            continue
+        if since_date is not None and attr_date < since_date:
+            continue
+        if until_date is not None and attr_date > until_date:
             continue
         pk = _period_key_from_date(attr_date, granularity)
         if pk not in period_totals:
