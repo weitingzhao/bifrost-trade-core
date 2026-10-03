@@ -8,6 +8,7 @@ from bifrost_core.persistence.postgres.wave9_migrations import (
 )
 from bifrost_core.persistence.postgres.wave11_migrations import migrate_wave11_drop_flex_token_columns
 from bifrost_core.persistence.postgres.wave13_migrations import migrate_wave13_reconcile_legacy_schema
+from bifrost_core.persistence.postgres.wave14_migrations import migrate_wave14_trade_invariants
 
 # IB / brokerage tables live in bifrost_golden_source.raw_broker.* (see brokerage_ddl.py).
 # Per-env DBs expose them via postgres_fdw. Do not recreate in public.
@@ -338,7 +339,7 @@ def _ensure_tables(conn, log=None, log_table=None) -> None:
             """
             CREATE TABLE IF NOT EXISTS preference_position_categories (
                 id bigserial PRIMARY KEY,
-                name text NOT NULL,
+                name text NOT NULL CONSTRAINT preference_position_categories_name_uq UNIQUE,
                 description text,
                 sort_order integer,
                 created_at timestamptz DEFAULT now(),
@@ -368,7 +369,7 @@ def _ensure_tables(conn, log=None, log_table=None) -> None:
             CREATE TABLE IF NOT EXISTS preference_position_category_tags (
                 account_id text NOT NULL,
                 contract_key text NOT NULL,
-                category_id integer NOT NULL REFERENCES preference_position_categories(id) ON DELETE CASCADE,
+                category_id bigint NOT NULL REFERENCES preference_position_categories(id) ON DELETE CASCADE,
                 created_at timestamptz DEFAULT now(),
                 PRIMARY KEY (account_id, contract_key)
             )
@@ -516,7 +517,8 @@ def _ensure_tables(conn, log=None, log_table=None) -> None:
                 name text NOT NULL,
                 strategy_structure_id bigint NOT NULL REFERENCES strategy_structure(strategy_structure_id),
                 default_gate_safety_strategy_id bigint REFERENCES gate_safety_strategy(gate_safety_strategy_id),
-                scope_type text,
+                scope_type text CONSTRAINT strategy_opportunity_scope_type_ck
+                    CHECK (scope_type IS NULL OR scope_type IN ('watchlist_stk', 'explicit_symbols')),
                 is_active boolean NOT NULL DEFAULT true,
                 symbols_json jsonb NOT NULL DEFAULT '[]'::jsonb,
                 entry_conditions_json jsonb NOT NULL DEFAULT '[]'::jsonb,
@@ -526,7 +528,7 @@ def _ensure_tables(conn, log=None, log_table=None) -> None:
             """
         )
         _log_table(
-            "strategy_instance", "Strategy instance (one open per opportunity/account)"
+            "strategy_instance", "Strategy instance (a trade under an opportunity, one account)"
         )
         cur.execute(
             """
@@ -580,12 +582,14 @@ def _ensure_tables(conn, log=None, log_table=None) -> None:
                 intended_at             timestamptz,
                 filled_at               timestamptz,
                 cancelled_at            timestamptz,
-                strategy_instance_id    bigint      REFERENCES strategy_instance(strategy_instance_id) ON DELETE SET NULL,
+                strategy_instance_id    bigint      REFERENCES strategy_instance(strategy_instance_id) ON DELETE RESTRICT,
                 parent_strategy_plan_id bigint      REFERENCES strategy_plan(strategy_plan_id) ON DELETE SET NULL,
                 created_at              timestamptz NOT NULL DEFAULT now(),
                 updated_at              timestamptz NOT NULL DEFAULT now(),
                 CHECK ((target_kind IS NULL) = (target_value IS NULL)),
-                CHECK ((stop_kind IS NULL) = (stop_value IS NULL))
+                CHECK ((stop_kind IS NULL) = (stop_value IS NULL)),
+                CONSTRAINT strategy_plan_filled_instance_ck
+                    CHECK ((status = 'filled') = (strategy_instance_id IS NOT NULL))
             )
             """
         )
@@ -607,7 +611,7 @@ def _ensure_tables(conn, log=None, log_table=None) -> None:
             CREATE TABLE IF NOT EXISTS trade_review (
                 trade_review_id      bigserial   PRIMARY KEY,
                 strategy_instance_id bigint      NOT NULL UNIQUE
-                                                 REFERENCES strategy_instance(strategy_instance_id) ON DELETE CASCADE,
+                                                 REFERENCES strategy_instance(strategy_instance_id) ON DELETE RESTRICT,
                 tags_added           jsonb       NOT NULL DEFAULT '[]'::jsonb,
                 tags_dropped         jsonb       NOT NULL DEFAULT '[]'::jsonb,
                 note                 text,
@@ -667,11 +671,13 @@ def _ensure_tables(conn, log=None, log_table=None) -> None:
                 display_label text,
                 source text,
                 created_at timestamptz DEFAULT now(),
-                category_id integer REFERENCES preference_position_categories(id) ON DELETE SET NULL,
+                category_id bigint REFERENCES preference_position_categories(id) ON DELETE SET NULL,
                 optionable boolean DEFAULT false
             )
         """
         )
+        # TD-43 / TD-56 / TD-71 (core 0.41.0): existing databases converge on the declarations above.
+        migrate_wave14_trade_invariants(cur)
 
         _log("cache_stock_snapshot retired → market.stock_snapshot (Golden Source / Plugin)")
         cur.execute("DROP TABLE IF EXISTS public.cache_stock_snapshot CASCADE")
