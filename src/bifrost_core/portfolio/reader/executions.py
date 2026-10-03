@@ -10,6 +10,7 @@ from zoneinfo import ZoneInfo
 from psycopg2.extras import RealDictCursor
 
 from bifrost_core.portfolio.contract_key import opt_key, osi_local_symbol
+from bifrost_core.portfolio.reader import keyset
 from bifrost_core.portfolio.quote_freshness import fresh_quote_sql
 from bifrost_core.portfolio.signed_qty import signed_qty_sql
 
@@ -326,6 +327,13 @@ def _qty_expr_e_for_scope(source_scope: Optional[str]) -> str:
     return _QTY_NORM_E
 
 
+# The exact sort key of each row, read beside it for the next-page cursor and popped before
+# the row is returned (``time`` is an epoch float and cannot be compared exactly).
+_EXEC_KEY_COL = "_keyset_exec_time"
+_EXEC_KEY_SELECT_E = f"e.exec_time AS {_EXEC_KEY_COL}"
+_TXN_KEY_COL = "_keyset_ts"
+
+
 def get_executions(
     conn: Any,
     since_ts: Optional[float] = None,
@@ -336,6 +344,93 @@ def get_executions(
     strategy_instance_id: Optional[int] = None,
     source_scope: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
+    rows = _read_executions(
+        conn,
+        since_ts=since_ts,
+        until_ts=until_ts,
+        account_id=account_id,
+        limit=limit,
+        strategy_opportunity_id=strategy_opportunity_id,
+        strategy_instance_id=strategy_instance_id,
+        source_scope=source_scope,
+        after=None,
+    )
+    for r in rows:
+        r.pop(_EXEC_KEY_COL, None)
+    return rows
+
+
+def get_executions_page(
+    conn: Any,
+    since_ts: Optional[float] = None,
+    until_ts: Optional[float] = None,
+    account_id: Optional[str] = None,
+    limit: Optional[int] = 200,
+    strategy_opportunity_id: Optional[int] = None,
+    strategy_instance_id: Optional[int] = None,
+    source_scope: Optional[str] = None,
+    cursor: Optional[str] = None,
+) -> Dict[str, Any]:
+    """One page of :func:`get_executions` and the cursor of the next (TD-51, core 0.40.0).
+
+    Same filters, columns and order (``trade_date DESC NULLS LAST, exec_time DESC NULLS
+    LAST, account_executions_id DESC``). ``cursor`` (from a previous page's
+    ``next_cursor``) starts the page strictly after that row; without it the page is the
+    first, the same rows :func:`get_executions` returns for this ``limit``. ``limit`` None
+    or <= 0 reads every remaining row.
+
+    Returns ``{"items": [...], "next_cursor": str | None}``; ``next_cursor`` is None when
+    no row follows the page. Reads ``limit + 1`` rows to know. Raises
+    :class:`~bifrost_core.portfolio.reader.keyset.InvalidCursor` for a cursor it did not
+    issue (before touching the database); a database failure reads as an empty last page,
+    as :func:`get_executions` answers ``[]``.
+    """
+    after = keyset.decode_executions(cursor) if cursor is not None else None
+    page_limit = limit if limit is not None and limit > 0 else None
+    rows = _read_executions(
+        conn,
+        since_ts=since_ts,
+        until_ts=until_ts,
+        account_id=account_id,
+        limit=None if page_limit is None else page_limit + 1,
+        strategy_opportunity_id=strategy_opportunity_id,
+        strategy_instance_id=strategy_instance_id,
+        source_scope=source_scope,
+        after=after,
+    )
+    next_cursor: Optional[str] = None
+    if page_limit is not None and len(rows) > page_limit:
+        rows = rows[:page_limit]
+        last = rows[-1]
+        next_cursor = keyset.encode_executions(
+            _as_date(last.get("trade_date")), last.get(_EXEC_KEY_COL), int(last["account_executions_id"])
+        )
+    for r in rows:
+        r.pop(_EXEC_KEY_COL, None)
+    return {"items": rows, "next_cursor": next_cursor}
+
+
+def _as_date(v: Any) -> Optional[date]:
+    if v is None or (isinstance(v, date) and not isinstance(v, datetime)):
+        return v
+    if isinstance(v, datetime):
+        return v.date()
+    return date.fromisoformat(str(v)[:10])
+
+
+def _read_executions(
+    conn: Any,
+    *,
+    since_ts: Optional[float],
+    until_ts: Optional[float],
+    account_id: Optional[str],
+    limit: Optional[int],
+    strategy_opportunity_id: Optional[int],
+    strategy_instance_id: Optional[int],
+    source_scope: Optional[str],
+    after: Optional[Tuple[Optional[date], Optional[datetime], int]],
+) -> List[Dict[str, Any]]:
+    """The executions query; each row also carries ``_EXEC_KEY_COL`` (the raw exec_time)."""
     if conn is None:
         return []
     try:
@@ -364,6 +459,10 @@ def get_executions(
         pred_e = _source_scope_predicate_e(source_scope)
         if pred_e:
             conditions.append(pred_e)
+        if after is not None:
+            after_sql, after_params = keyset.executions_after_sql(after, "e")
+            conditions.append(after_sql)
+            values.extend(after_params)
         where = (" WHERE " + " AND ".join(conditions)) if conditions else ""
         use_limit = limit is not None and limit > 0
         if use_limit:
@@ -381,7 +480,7 @@ def get_executions(
                            e.expiry, e.strike, e.option_right, e.exchange, e.order_id, e.cum_qty,
                            {_REALIZED_PNL_COALESCE_E}, e.contract_key, c.currency, c.yield_, c.yield_redemption_date,
                            e.trade_date, e.report_date, e.settle_date_target, e.transaction_type, e.taxes, e.net_cash,
-                           e.raw_extra, {_CREATED_AT_E},
+                           e.raw_extra, {_CREATED_AT_E}, {_EXEC_KEY_SELECT_E},
                            e.strategy_opportunity_id, e.strategy_instance_id,
                            so.name AS strategy_opportunity_name, si.label AS strategy_instance_label,
                            EXTRACT(EPOCH FROM si.opened_at)::bigint AS strategy_instance_opened_at_epoch
@@ -404,7 +503,7 @@ def get_executions(
                                    {_COMM_NORM_E}, e.source,
                                    e.expiry, e.strike, e.option_right, e.exchange, e.order_id, e.cum_qty,
                                    {_REALIZED_PNL_COALESCE_E}, e.contract_key, c.currency, c.yield_, c.yield_redemption_date,
-                                   e.trade_date, e.raw_extra, {_CREATED_AT_E}
+                                   e.trade_date, e.raw_extra, {_CREATED_AT_E}, {_EXEC_KEY_SELECT_E}
                             FROM {from_table} e
                             LEFT JOIN {COMMISSIONS} c ON e.exec_id = c.exec_id
                             {where}
@@ -421,7 +520,7 @@ def get_executions(
                                            e.expiry, e.strike, e.option_right, e.exchange, e.order_id, e.cum_qty,
                                            e.fifo_pnl_realized AS realized_pnl, e.contract_key,
                                            NULL::text AS currency, NULL::double precision AS yield_, NULL::integer AS yield_redemption_date,
-                                           e.trade_date, e.raw_extra, {_CREATED_AT_E}
+                                           e.trade_date, e.raw_extra, {_CREATED_AT_E}, {_EXEC_KEY_SELECT_E}
                                     FROM {from_table} e
                                     {where}
                             ORDER BY e.trade_date DESC NULLS LAST, e.exec_time DESC NULLS LAST, e.account_executions_id DESC{limit_clause}
@@ -1054,21 +1153,77 @@ def get_transactions(
     account_id: Optional[str] = None,
     limit: int = 500,
 ) -> List[Dict[str, Any]]:
-    """Cash transactions (Flex), newest first.
+    """Cash transactions (Flex), newest first: ``ts DESC, account_transactions_id DESC``.
 
     ``symbol`` / ``conid`` are the security a row is about — a dividend, its
     withholding, a fee on a position — and are null for deposits and
     withdrawals. The Flex ingest has written both columns since 0.13; the reader
     dropped them until 0.25.3, so P&L Explain printed "no symbol" beside rows
     that had one.
+
+    The id tie-break (core 0.40.0) only fixes the order of rows with the same ``ts``,
+    which Postgres returned in any order before; the rows a limit selects can differ only
+    inside such a tie at the cut.
     """
+    rows = _read_transactions(conn, since_ts=since_ts, until_ts=until_ts, account_id=account_id, limit=limit, after=None)
+    for r in rows:
+        r.pop(_TXN_KEY_COL, None)
+    return rows
+
+
+def get_transactions_page(
+    conn: Any,
+    since_ts: Optional[float] = None,
+    until_ts: Optional[float] = None,
+    account_id: Optional[str] = None,
+    limit: int = 500,
+    cursor: Optional[str] = None,
+) -> Dict[str, Any]:
+    """One page of :func:`get_transactions` and the cursor of the next (TD-51, core 0.40.0).
+
+    ``cursor`` (a previous page's ``next_cursor``) starts strictly after that row. Reads
+    ``limit + 1`` rows; ``limit`` <= 0 is passed to SQL as :func:`get_transactions` does
+    (0 reads nothing). Returns ``{"items", "next_cursor"}``; raises
+    :class:`~bifrost_core.portfolio.reader.keyset.InvalidCursor` for a cursor it did not issue.
+    """
+    after = keyset.decode_transactions(cursor) if cursor is not None else None
+    if limit is None or limit <= 0:
+        rows = _read_transactions(
+            conn, since_ts=since_ts, until_ts=until_ts, account_id=account_id, limit=limit, after=after
+        )
+        for r in rows:
+            r.pop(_TXN_KEY_COL, None)
+        return {"items": rows, "next_cursor": None}
+    rows = _read_transactions(
+        conn, since_ts=since_ts, until_ts=until_ts, account_id=account_id, limit=limit + 1, after=after
+    )
+    next_cursor: Optional[str] = None
+    if len(rows) > limit:
+        rows = rows[:limit]
+        last = rows[-1]
+        next_cursor = keyset.encode_transactions(last[_TXN_KEY_COL], int(last["account_transactions_id"]))
+    for r in rows:
+        r.pop(_TXN_KEY_COL, None)
+    return {"items": rows, "next_cursor": next_cursor}
+
+
+def _read_transactions(
+    conn: Any,
+    *,
+    since_ts: Optional[float],
+    until_ts: Optional[float],
+    account_id: Optional[str],
+    limit: Optional[int],
+    after: Optional[Tuple[datetime, int]],
+) -> List[Dict[str, Any]]:
+    """The transactions query; each row also carries ``_TXN_KEY_COL`` (the raw ts)."""
     if conn is None:
         return []
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             q = f"""
                 SELECT account_transactions_id, account_id, extract(epoch from ts) AS ts, amount, type, currency, description, created_at,
-                       symbol, conid
+                       symbol, conid, ts AS {_TXN_KEY_COL}
                 FROM {TRANSACTIONS} WHERE 1=1
             """
             args: List[Any] = []
@@ -1081,7 +1236,13 @@ def get_transactions(
             if account_id is not None and str(account_id).strip():
                 q += " AND account_id = %s"
                 args.append(str(account_id).strip())
-            q += " ORDER BY ts DESC LIMIT %s"
+            if after is not None:
+                after_sql, after_params = keyset.transactions_after_sql(after)
+                q += f" AND {after_sql}"
+                args.extend(after_params)
+            # ``ts`` in ORDER BY would name the epoch output column; order by the stored
+            # timestamptz (same order, exact, and the one an index on ts can serve).
+            q += f" ORDER BY {_TXN_KEY_COL} DESC, account_transactions_id DESC LIMIT %s"
             args.append(limit)
             cur.execute(q, args)
             rows = cur.fetchall()

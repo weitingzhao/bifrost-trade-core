@@ -13,6 +13,7 @@ from bifrost_core.config.startup import get_effective_ib_config
 
 from bifrost_core.portfolio.reader import accounts as accounts_module
 from bifrost_core.portfolio.reader import executions as executions_module
+from bifrost_core.portfolio.reader import keyset as keyset_module
 from bifrost_core.portfolio.reader import option_stock_link as option_stock_link_module
 from bifrost_core.monitor.reader import gate_safety as gate_safety_module
 from bifrost_core.monitor.reader import market as market_module
@@ -670,6 +671,37 @@ class StatusReader:
         self._end_read_txn()
         return result
 
+    def get_executions_page(
+        self,
+        since_ts: Optional[float] = None,
+        until_ts: Optional[float] = None,
+        account_id: Optional[str] = None,
+        limit: Optional[int] = 200,
+        strategy_opportunity_id: Optional[int] = None,
+        strategy_instance_id: Optional[int] = None,
+        source_scope: Optional[str] = None,
+        cursor: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """``{"items", "next_cursor"}`` (core 0.40.0); raises ``keyset.InvalidCursor`` for a
+        cursor it did not issue, before connecting."""
+        if cursor is not None:
+            keyset_module.decode_executions(cursor)
+        if not self._connect():
+            return {"items": [], "next_cursor": None}
+        result = executions_module.get_executions_page(
+            self._conn,
+            since_ts=since_ts,
+            until_ts=until_ts,
+            account_id=account_id,
+            limit=limit,
+            strategy_opportunity_id=strategy_opportunity_id,
+            strategy_instance_id=strategy_instance_id,
+            source_scope=source_scope,
+            cursor=cursor,
+        )
+        self._end_read_txn()
+        return result
+
     def get_executions_freshness(self) -> List[Dict[str, Any]]:
         if not self._connect():
             return []
@@ -826,6 +858,26 @@ class StatusReader:
         if not self._connect():
             return []
         result = executions_module.get_transactions(self._conn, since_ts=since_ts, until_ts=until_ts, account_id=account_id, limit=limit)
+        self._end_read_txn()
+        return result
+
+    def get_transactions_page(
+        self,
+        since_ts: Optional[float] = None,
+        until_ts: Optional[float] = None,
+        account_id: Optional[str] = None,
+        limit: int = 500,
+        cursor: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """``{"items", "next_cursor"}`` (core 0.40.0); raises ``keyset.InvalidCursor`` for a
+        cursor it did not issue, before connecting."""
+        if cursor is not None:
+            keyset_module.decode_transactions(cursor)
+        if not self._connect():
+            return {"items": [], "next_cursor": None}
+        result = executions_module.get_transactions_page(
+            self._conn, since_ts=since_ts, until_ts=until_ts, account_id=account_id, limit=limit, cursor=cursor
+        )
         self._end_read_txn()
         return result
 
