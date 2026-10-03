@@ -188,7 +188,8 @@ def test_a_review_is_never_deleted_with_its_instance(db) -> None:
 
 def test_an_instance_nothing_points_at_is_still_deleted(db) -> None:
     inst = _instance(db, _opportunity(db))
-    assert strategy_instance.delete_instance_strict(CFG, inst) == {"deleted": "hard", "strategy_instance_id": inst}
+    # naming R1 (core 0.42.0): the answer carries trade_id beside strategy_instance_id
+    assert strategy_instance.delete_instance_strict(CFG, inst) == {"deleted": "hard", "strategy_instance_id": inst, "trade_id": inst}
 
 
 # --- TD-43: derived state ------------------------------------------------------------------
