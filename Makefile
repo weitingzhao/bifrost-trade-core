@@ -14,6 +14,7 @@ test-all:
 
 # db-marked tests against a throwaway postgres:16-alpine container (needs docker; removed on exit).
 # PYTEST_ARGS='-k ...' narrows the run; TEST_DB_IMAGE=postgres:17 picks another image.
+# CI (no docker) runs `bash scripts/test_db.sh --sidecar` against a postgres sidecar on 127.0.0.1.
 test-db:
 	bash scripts/test_db.sh
 

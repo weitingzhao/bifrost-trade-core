@@ -117,8 +117,11 @@ make db-init        # 初始化/刷新 PostgreSQL schema
 
 - `@pytest.mark.ib` — 需要 IB 实时连接
 - `@pytest.mark.db` — 需要 PostgreSQL 连接
-- 默认 CI 跑：`pytest -m 'not ib and not db'`（infra Tekton `pipeline-ci-python.yaml`；本 repo 没有自己的 CI）
+- 默认 CI 跑：`pytest -m 'not ib and not db'`（infra Tekton `pipeline-ci-python.yaml`；本 repo 没有自己的 CI）；
+  同一流水线的 `db-test` 任务另跑 `pytest -m db`：同 Pod 的 postgres sidecar（只听 127.0.0.1）+ `scripts/test_db.sh --sidecar`（TD-48）
 - db 测试本地跑：`make test-db`（`scripts/test_db.sh`）起一个只听 127.0.0.1 随机端口的一次性容器，
   设 `PGHOST/PGPORT/PGUSER/PGDATABASE` 后跑 `pytest -m db`，退出（含失败、Ctrl-C）即删容器。
   每个测试在 `pg_conn` 的事务里跑、结束回滚；只有 `_ensure_tables` 提交进这个一次性库。
   `PYTEST_ARGS='-k …'` 缩小范围，`TEST_DB_IMAGE=postgres:17` 换镜像。不要指向共享库。
+- 闸门：两种模式都要求服务器带 `bifrost.throwaway=on`（只有这两种一次性服务器用 `-c` 启动时带它），没有就在跑测试前拒绝；
+  `--sidecar` 另外只接受回环 PGHOST。回环不等于一次性：本机 127.0.0.1 可能是到共享库的 `kubectl port-forward`。
