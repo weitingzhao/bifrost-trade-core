@@ -266,12 +266,83 @@ def test_fixture_covers_the_grid(golden: Dict[str, Any]) -> None:
     assert any(isinstance(g, dict) for g in golden["oracle"]["grid"]["api_price"])
 
 
+# An implied vol is only defined up to the solver's stopping rule, and not at all where the
+# price is flat in sigma (at intrinsic, or ~0). There a last-bit libm difference (macOS vs the
+# Linux CI) moves the solver to a different, equally valid sigma -- or across its None/value
+# acceptance edge. So across machines IVs are compared by what they price, not by their digits.
+# The same-machine tests below stay bit-for-bit.
+#
+# Each solver stops once |price - market| < its tol (core model 1e-6, api copy 1e-8), so two
+# valid answers reprice up to 2 x tol apart.
+_REPRICE_TOL = {"model_iv": 2e-6, "api_iv": 2e-8}
+
+
+def _reprice(sigma: float, S_: float, K: float, T: float, r: float, right: str) -> float:
+    return model._bs_price(S_, K, T, r, sigma, right)
+
+
+def _flat_in_sigma(sigma: float, S_: float, K: float, T: float, r: float, right: str, tol: float) -> bool:
+    """Halving sigma does not move the price: no IV is identifiable at this point."""
+    return abs(_reprice(sigma, S_, K, T, r, right) - _reprice(sigma / 2, S_, K, T, r, right)) <= tol
+
+
+def _iv_equivalent(a: Any, b: Any, K: float, T: float, r: float, right: str, tol: float) -> bool:
+    if _same(a, b) or a == b:
+        return True
+    if _num(a) and _num(b):
+        if math.isclose(a, b, rel_tol=1e-9, abs_tol=1e-12):
+            return True
+        return abs(_reprice(a, S, K, T, r, right) - _reprice(b, S, K, T, r, right)) <= tol
+    if a is None and _num(b):
+        return _flat_in_sigma(b, S, K, T, r, right, tol)
+    if b is None and _num(a):
+        return _flat_in_sigma(a, S, K, T, r, right, tol)
+    return False
+
+
+def _split_ivs(actual: Dict[str, Any], expected: Dict[str, Any], grid_key: str) -> List[str]:
+    """Check the grid and iv-list IVs by price; drop them so _close sees everything else."""
+    bad: List[str] = []
+    tol = _REPRICE_TOL[grid_key]
+    for i, (K, T, _sigma, r, right) in enumerate(grid_points()):
+        a, b = actual["grid"][grid_key][i], expected["grid"][grid_key][i]
+        if not _iv_equivalent(a, b, K, T, r, right, tol):
+            bad.append(f"grid.{grid_key}[{i}]: {a!r} != {b!r}")
+    for i, (_p, K, T, r, right) in enumerate(iv_points()):
+        a, b = actual["iv"][i], expected["iv"][i]
+        if not _iv_equivalent(a, b, K, T, r, right, tol):
+            bad.append(f"iv[{i}]: {a!r} != {b!r}")
+    for d in (actual, expected):
+        d["grid"] = {k: v for k, v in d["grid"].items() if k != grid_key}
+        d.pop("iv")
+    return bad
+
+
+def _assert_matches_fixture(actual: Dict[str, Any], expected: Dict[str, Any], path: str, grid_key: str) -> None:
+    expected = json.loads(json.dumps(expected))
+    bad = [f"{path}.{x}" for x in _split_ivs(actual, expected, grid_key)]
+    _close(actual, expected, path, bad)
+    assert not bad, f"{len(bad)} differences, first: {bad[:5]}"
+
+
 def test_core_matches_the_fixture(golden: Dict[str, Any]) -> None:
-    _assert_close(build_core(), golden["core"], "core")
+    _assert_matches_fixture(build_core(), golden["core"], "core", "model_iv")
 
 
 def test_oracles_match_the_fixture(golden: Dict[str, Any]) -> None:
-    _assert_close(build_oracle(), golden["oracle"], "oracle")
+    _assert_matches_fixture(build_oracle(), golden["oracle"], "oracle", "api_iv")
+
+
+def test_iv_comparison_still_catches_a_real_change() -> None:
+    """The price-space rule must not wave through a moved IV at a well-conditioned point."""
+    K, T, r, right = 100.0, 30.0 / 365, 0.045, "C"
+    for tol in _REPRICE_TOL.values():
+        assert _iv_equivalent(0.30, 0.30 * (1 + 1e-12), K, T, r, right, tol)
+        assert not _iv_equivalent(0.30, 0.3001, K, T, r, right, tol)
+        assert not _iv_equivalent(0.30, 0.300001, K, T, r, right, tol)
+        assert not _iv_equivalent(None, 0.30, K, T, r, right, tol)
+        # Far OTM put with no time value: every small sigma prices ~0, so any answer is one.
+        assert _iv_equivalent(None, 0.04, 70.0, 1.0, 0.05, "P", tol)
 
 
 # --- live, bit for bit -----------------------------------------------------------------
