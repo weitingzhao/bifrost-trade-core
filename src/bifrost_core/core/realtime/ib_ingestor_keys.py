@@ -18,7 +18,8 @@ IB_INGESTER_ON_DEMAND_STK_TS = "ib:ingester:control:on_demand_stk_ts"
 # Default max age for on-demand heartbeats (Market Live polls ~8s; allow brief idle).
 ON_DEMAND_STK_DEFAULT_MAX_AGE_SEC = 120
 
-# OPT on-demand cache — must match bifrost-platform-plugin ib_gateway.redis_keys.
+# OPT on-demand cache. Every redis-ib name here is checked against the plugin's (the writer) through
+# tests/contracts/redis_ib_keys.json, which the plugin keeps a byte-identical copy of (TD-31).
 IB_OPTION_CACHE_PREFIX = "ib:option:cache:"
 IB_OPTION_CACHE_TTL_SEC = 300
 IB_OPTION_ON_DEMAND_SET = "ib:option:control:on_demand_opt"

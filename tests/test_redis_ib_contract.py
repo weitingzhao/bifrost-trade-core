@@ -2,18 +2,22 @@
 
 The plugin is the writer of record for redis-ib; core (api / worker) reads its ticks,
 option cache, account snapshot and health hashes, and sends Operator RPCs on its
-command stream. Core cannot import the plugin, so the plugin's values are pinned here.
+command stream. Core cannot import the plugin, so both repos test against one list:
 
-Source of the pinned table:
-    bifrost-platform-plugin  src/bifrost_plugin/ib_gateway/redis_keys.py
-    at origin/main 02a3d89 (plugin 0.3.0, 2026-10-02)
-If the plugin changes a name, update this table in the same change as core -- and the
-other way round. Strings are compared only: nothing here talks to Redis.
+    tests/contracts/redis_ib_keys.json   (this repo: the canonical copy)
+    bifrost-platform-plugin tests/contracts/redis_ib_keys.json   (byte-identical copy)
+
+Core's values are checked against it here. The plugin checks its redis_keys.py against its
+copy, and its copy against this one (that test fails, not skips, when this repo is not next
+to it). If a name changes, change both repos and both copies in one go. Strings are
+compared only: nothing here talks to Redis.
 """
 
 from __future__ import annotations
 
 import ast
+import json
+import os
 from pathlib import Path
 
 import pytest
@@ -25,39 +29,16 @@ from bifrost_core.core.realtime import ib_ingestor_keys as ingestor
 from bifrost_core.core.realtime import redis_keys as quote_keys
 from bifrost_core.ib_operator.config import effective_ib_operator_settings
 
-# --- pinned copy of the plugin's redis_keys.py ----------------------------------------
-PLUGIN = {
-    "IB_INGESTER_HEALTH_KEY": "bifrost:health:ws_ib_ingestor",
-    "IB_INGESTER_CHANNEL": "ib:ingester:channel",
-    "IB_INGESTER_TICK_PREFIX": "ib:ingester:tick:",
-    "IB_INGESTER_TICK_TTL_SEC": 300,
-    "IB_INGESTER_SUBSCRIPTIONS_KEY": "ib:ingester:meta:subscriptions",
-    "IB_INGESTER_ON_DEMAND_STK": "ib:ingester:control:on_demand_stk",
-    "IB_INGESTER_ON_DEMAND_STK_TS": "ib:ingester:control:on_demand_stk_ts",
-    "ON_DEMAND_STK_DEFAULT_MAX_AGE_SEC": 120,
-    "IB_OPTION_CACHE_PREFIX": "ib:option:cache:",
-    "IB_OPTION_CACHE_TTL_SEC": 300,
-    "IB_OPTION_ON_DEMAND_SET": "ib:option:control:on_demand_opt",
-    "IB_OPTION_ON_DEMAND_TS": "ib:option:control:on_demand_opt_ts",
-    "IB_OPTION_CACHE_META_REFRESH_TS": "ib:option:cache:meta:last_refresh_ts",
-    "ON_DEMAND_OPT_DEFAULT_MAX_AGE_SEC": 180,
-    "IB_ACCOUNT_AGENT_HEALTH_KEY": "bifrost:health:ws_ib_account_agent",
-    "IB_ACCOUNT_SNAPSHOT_KEY": "ib:account:snapshot:v1",
-    "IB_ACCOUNT_NOTIFY_CHANNEL": "ib:account:notify",
-    "IB_ACCOUNT_STREAM_KEY": "ib:account:stream:v1",
-    "IB_ACCOUNT_STREAM_MAXLEN": 1000,
-    "IB_OPERATOR_HEALTH_KEY": "bifrost:health:ws_ib_operator",
-    "IB_OPERATOR_CMD_STREAM": "ib:operator:cmd",
-    # Plugin 0.3.0 (TD-21): one command stream per non-production Trade env; the gateway
-    # answers only read ops there.
-    "IB_OPERATOR_ENV_CMD_STREAMS": ("ib:operator:cmd:dev", "ib:operator:cmd:stg"),
-    "IB_OPERATOR_CONSUMER_GROUP": "ib-gateway",
-    "IB_OPERATOR_RESULT_PREFIX": "ib:operator:result:",
-    "IB_OPERATOR_RESULT_TTL_SEC": 300,
-    "IB_GATEWAY_HEALTH_PREFIX": "ib:health:",
-    "IB_GATEWAY_SELF_HEAL_KEY": "ib:control:gateway_self_heal",
-    "STK_CONTRACT_KEY_SUFFIX": "|STK|||",
-}
+MANIFEST = Path(__file__).resolve().parent / "contracts" / "redis_ib_keys.json"
+
+
+def _load_manifest(path: Path) -> dict[str, object]:
+    keys = json.loads(path.read_text(encoding="utf-8"))["keys"]
+    return {k: tuple(v) if isinstance(v, list) else v for k, v in keys.items()}
+
+
+# --- the plugin's redis_keys.py, as the shared manifest records it -----------------------
+PLUGIN = _load_manifest(MANIFEST)
 
 # Plugin names core does not use (the gateway's own bookkeeping). Listed so a new plugin
 # name has to be placed here or in CORE_TO_PLUGIN on purpose.
@@ -196,3 +177,22 @@ def test_every_ib_literal_in_core_is_in_the_contract() -> None:
 def test_stk_contract_key_suffix_matches_plugin() -> None:
     fragments = {s for s in _core_string_constants() if s.startswith("|STK")}
     assert fragments == {PLUGIN["STK_CONTRACT_KEY_SUFFIX"]}
+
+
+# --- the plugin's copy of the manifest --------------------------------------------------
+# The plugin's own test is the hard check (it fails when core is not next to it). Here the
+# plugin is optional -- CI clones core alone -- so a missing sibling skips.
+def _plugin_root() -> Path:
+    env = os.environ.get("BIFROST_PLATFORM_PLUGIN_ROOT")
+    if env:
+        return Path(env)
+    return Path(__file__).resolve().parents[2] / "bifrost-platform-plugin"
+
+
+def test_manifest_matches_plugin_copy() -> None:
+    copy = _plugin_root() / "tests" / "contracts" / "redis_ib_keys.json"
+    if not copy.is_file():
+        pytest.skip(f"bifrost-platform-plugin not found at {copy.parents[2]}")
+    assert copy.read_bytes() == MANIFEST.read_bytes(), (
+        f"{copy} differs from {MANIFEST}: copy one onto the other and fix the code that breaks"
+    )
