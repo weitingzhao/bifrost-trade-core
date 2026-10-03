@@ -1,4 +1,10 @@
-"""Pydantic models for gate_safety_strategy.params_json (Wave 9).
+"""Pydantic models for gate_safety_strategy.params_json (Wave 9), and the leg models (TD-44).
+
+Two different jsonb columns are both called ``params_json``: here, a gate's
+``gate_safety_strategy.params_json`` is one GateParams *object*; a template's
+``strategy_template.params_json`` is an *array of parameter definitions*
+(``{meta_key, display_label, param_kind, default_value_text, sort_order}``), served by the
+API as ``meta_params``.
 
 params_json stores a gate's earnings dates at strategy.earnings.dates, which is where
 the daemon's config['gates'] reads them. Over the API they travel once, as the gate
@@ -9,9 +15,12 @@ default_gates() returns, has no `dates` key (split_earnings_dates).
 from __future__ import annotations
 
 import copy
-from typing import Any, Dict, List, Optional, Tuple
+from datetime import datetime
+from typing import Any, Dict, List, Literal, Optional, Tuple
 
 from pydantic import BaseModel, Field
+
+from bifrost_core.portfolio.contract_key import opt_key
 
 
 class GateStructureParams(BaseModel):
@@ -111,20 +120,96 @@ def default_gates() -> Dict[str, Any]:
     return gates
 
 
-class TemplateLeg(BaseModel):
-    role: Optional[str] = None
-    direction: Optional[str] = None
-    option_right: Optional[str] = None
-    quantity: int = 1
-    quantity_default: Optional[int] = None
+# --- legs (TD-44, core 0.41.0) ------------------------------------------------------------
+#
+# Two kinds of leg, not three copies of one:
+#
+# * AbstractLeg -- a slot of a template (strategy_template.legs_json) or a structure
+#   (strategy_structure.legs_json): a direction and a right, no contract.
+# * PlanLeg (schemas/strategy_plans.py) -- a concrete contract of a plan (strategy_plan.legs_json):
+#   side, sec_type, right, strike, expiry, ratio.
+#
+# abstract_leg_to_plan_leg is the one mapping between them (long -> buy, short -> sell,
+# option_right -> right, quantity -> ratio). No column is renamed (Owner 2026-10-03).
+
+LegRole = Literal["underlying", "call", "put"]
+LegDirection = Literal["long", "short"]
+# "" is a stock leg, as the structure form writes it.
+LegOptionRight = Literal["", "C", "P"]
+
+
+class AbstractLeg(BaseModel):
+    """One slot of a template or a structure. Writers of either jsonb go through it."""
+
+    role: Optional[LegRole] = None
+    direction: Optional[LegDirection] = None
+    option_right: Optional[LegOptionRight] = None
+    quantity: int = Field(1, ge=1)
+    # Templates only: the quantity a new structure starts with.
+    quantity_default: Optional[int] = Field(None, ge=1)
+    sort_order: Optional[int] = None
+    # Deprecated (structure legs): never filled on any env (read 2026-10-03); kept because the
+    # structure form still reads them for display. Do not write a contract here -- that is a plan.
     strike: Optional[float] = None
     expiration: Optional[str] = None
 
 
-class StructureLeg(BaseModel):
-    role: Optional[str] = None
-    direction: Optional[str] = None
-    option_right: Optional[str] = None
-    quantity: int = 1
-    strike: Optional[float] = None
-    expiration: Optional[str] = None
+# The names the writers used before 0.41.0; one model now.
+TemplateLeg = AbstractLeg
+StructureLeg = AbstractLeg
+
+_DIRECTION_TO_SIDE = {"long": "buy", "short": "sell"}
+
+
+def abstract_leg_to_plan_leg(
+    leg: Any,
+    *,
+    symbol: str,
+    expiry: Optional[str] = None,
+    strike: Optional[float] = None,
+) -> Dict[str, Any]:
+    """A concrete plan leg (the ``strategy_plan.legs_json`` shape) from a template / structure slot.
+
+    ``expiry`` is ``YYYY-MM-DD``; an option slot (option_right C/P) needs it and ``strike``,
+    a stock slot (``""`` / None) takes neither. ``contract_key`` is the positions format
+    (``SYM|OPT|YYYYMMDD|80.0|C``) for an option, None for stock. Raises ValueError when the
+    slot has no direction or an option slot lacks expiry / strike.
+    """
+    slot = leg if isinstance(leg, AbstractLeg) else AbstractLeg.model_validate(leg)
+    if slot.direction is None:
+        raise ValueError("leg has no direction (long / short)")
+    sym = (symbol or "").strip().upper()
+    if not sym:
+        raise ValueError("symbol is required")
+    right = slot.option_right or None
+    if right is None:
+        return {
+            "side": _DIRECTION_TO_SIDE[slot.direction],
+            "sec_type": "STK",
+            "right": None,
+            "strike": None,
+            "expiry": None,
+            "ratio": slot.quantity,
+            "contract_key": None,
+            "mid_at_plan": None,
+            "quote_asof": None,
+        }
+    if not expiry or strike is None:
+        raise ValueError("an option leg needs expiry and strike")
+    exp = str(expiry).strip()
+    try:
+        datetime.strptime(exp, "%Y-%m-%d")
+    except ValueError:
+        raise ValueError("expiry must be YYYY-MM-DD") from None
+    k = float(strike)
+    return {
+        "side": _DIRECTION_TO_SIDE[slot.direction],
+        "sec_type": "OPT",
+        "right": right,
+        "strike": k,
+        "expiry": exp,
+        "ratio": slot.quantity,
+        "contract_key": opt_key(sym, exp.replace("-", ""), k, right),
+        "mid_at_plan": None,
+        "quote_asof": None,
+    }

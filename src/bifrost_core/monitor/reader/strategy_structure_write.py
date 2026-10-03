@@ -14,6 +14,7 @@ from bifrost_core.monitor.reader import structure_type_schema
 from bifrost_core.monitor.reader import write_support as ws
 from bifrost_core.monitor.reader.errors import WriteFailed, WriteInvalid, WriteNotFound
 from bifrost_core.monitor.reader import template_config
+from bifrost_core.monitor.schemas.gate_params import AbstractLeg
 
 logger = logging.getLogger(__name__)
 
@@ -73,25 +74,28 @@ def _conn_from_config(status_config: Optional[dict]) -> Any:
 
 
 def _write_legs_json(cur: Any, strategy_structure_id: int, legs: List[Dict[str, Any]]) -> None:
+    """Replace the structure's legs. Each leg is checked against ``AbstractLeg`` (TD-44, core
+    0.41.0) as template legs are -- a bad role / direction / right / quantity is a ValueError;
+    the stored shape is unchanged."""
     legs_out: List[Dict[str, Any]] = []
     for i, leg in enumerate(legs):
         if not isinstance(leg, dict):
             continue
-        legs_out.append(
-            {
-                "role": leg.get("role"),
-                "direction": leg.get("direction"),
-                "option_right": leg.get("option_right"),
-                "quantity": int(leg["quantity"]) if leg.get("quantity") is not None else 1,
-                "strike": float(leg["strike"]) if leg.get("strike") is not None else None,
-                "expiration": (
-                    str(leg["expiration"]).strip()
-                    if leg.get("expiration") is not None
-                    else None
-                ),
-                "sort_order": i,
-            }
-        )
+        out = {
+            "role": leg.get("role"),
+            "direction": leg.get("direction"),
+            "option_right": leg.get("option_right"),
+            "quantity": int(leg["quantity"]) if leg.get("quantity") is not None else 1,
+            "strike": float(leg["strike"]) if leg.get("strike") is not None else None,
+            "expiration": (
+                str(leg["expiration"]).strip()
+                if leg.get("expiration") is not None
+                else None
+            ),
+            "sort_order": i,
+        }
+        AbstractLeg.model_validate(out)  # pydantic's ValidationError is a ValueError
+        legs_out.append(out)
     cur.execute(
         """
         UPDATE strategy_structure
