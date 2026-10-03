@@ -956,11 +956,17 @@ class StatusReader:
         contract_key: str,
         instrument_class: str,
         note: Optional[str] = None,
+        *,
+        keep_note: bool = True,
     ) -> Tuple[bool, Optional[str]]:
         if not self._connect():
             return False, "Database connection failed."
         return instrument_class_module.set_instrument_class(
-            self._conn, contract_key=contract_key, instrument_class=instrument_class, note=note
+            self._conn,
+            contract_key=contract_key,
+            instrument_class=instrument_class,
+            note=note,
+            keep_note=keep_note,
         )
 
     def delete_instrument_class(self, contract_key: str) -> bool:

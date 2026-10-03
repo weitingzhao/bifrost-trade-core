@@ -56,8 +56,14 @@ def set_instrument_class(
     contract_key: str,
     instrument_class: str,
     note: Optional[str] = None,
+    *,
+    keep_note: bool = True,
 ) -> Tuple[bool, Optional[str]]:
-    """Register or change one instrument's class. Returns (ok, error_message)."""
+    """Register or change one instrument's class. Returns (ok, error_message).
+
+    ``keep_note`` (the default) keeps a stored note when none is sent. ``False`` is a
+    full replace: the row becomes exactly what was sent, so no note clears it (TD-15,
+    PUT /instrument-classes since api 0.6.0)."""
     ck = str(contract_key or "").strip()
     cls = normalize_instrument_class(instrument_class)
     if not ck:
@@ -74,10 +80,11 @@ def set_instrument_class(
                 VALUES (%s, %s, %s, now())
                 ON CONFLICT (contract_key) DO UPDATE
                 SET instrument_class = EXCLUDED.instrument_class,
-                    note = COALESCE(EXCLUDED.note, preference_instrument_class.note),
+                    note = CASE WHEN %s THEN COALESCE(EXCLUDED.note, preference_instrument_class.note)
+                                ELSE EXCLUDED.note END,
                     updated_at = now()
                 """,
-                (ck, cls, (note or "").strip() or None),
+                (ck, cls, (note or "").strip() or None, bool(keep_note)),
             )
         conn.commit()
         return True, None

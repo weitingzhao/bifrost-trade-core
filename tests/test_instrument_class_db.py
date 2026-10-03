@@ -42,6 +42,19 @@ def test_register_change_and_drop(pg_conn):
     pg_conn.rollback()
 
 
+def test_a_full_replace_clears_the_note_it_was_not_given(pg_conn):
+    conn = _NoCommit(pg_conn)
+    assert ic.set_instrument_class(conn, "ZZFR", "fixed_income", note="bond fund") == (True, None)
+    # TD-15: PUT /instrument-classes is a full replace -- no note sent, no note kept.
+    assert ic.set_instrument_class(conn, "ZZFR", "cash_like", keep_note=False) == (True, None)
+    row = {r["contract_key"]: r for r in ic.list_instrument_classes(conn)}["ZZFR"]
+    assert (row["instrument_class"], row["note"]) == ("cash_like", None)
+    assert ic.set_instrument_class(conn, "ZZFR", "stock", note="core", keep_note=False) == (True, None)
+    row = {r["contract_key"]: r for r in ic.list_instrument_classes(conn)}["ZZFR"]
+    assert (row["instrument_class"], row["note"]) == ("stock", "core")
+    pg_conn.rollback()
+
+
 def test_the_table_refuses_a_fourth_class(pg_conn):
     import psycopg2
 
