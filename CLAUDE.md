@@ -1,5 +1,5 @@
 <!--
-parity-ids: core-versioning-v3
+parity-ids: core-versioning-v4
 对等文件: .cursor/rules/versioning.mdc
 改任一侧必须同步另一侧并 bump 两侧版本号；校验: bash ../scripts/check-agent-config-parity.sh
 -->
@@ -15,7 +15,7 @@ parity-ids: core-versioning-v3
 | 项 | 值 |
 |---|---|
 | 域 / 载荷 | Trade (OLTP) · Satellite 执行载荷 · **纯共享库**，无进程入口 |
-| 运行位置 | 被各 Trade 服务镜像安装（`BIFROST_CORE_REF` 钉 git ref）；改公开接口必须同 PR bump `pyproject.toml` |
+| 运行位置 | 被各 Trade 服务镜像安装：STG/PROD 由交付流水线与 api、worker 同一次克隆构建，**发布身份是 core 的 SHA**（`/health` 的 `core_sha`）；`BIFROST_CORE_REF` 只管本地 compose；改公开接口必须同 PR bump `pyproject.toml`（版本号是下游的兼容下限） |
 | 数据库权威 | `docs/DATABASE.md`（三环境 `bifrost_{dev,stg,prod}` @ CloudNativePG `data` NS 同步 DDL） |
 | 仓库可见性 | GitHub **PUBLIC**（12 个 repo 全部公开）—— `.env`、Secret YAML、dump、kubeconfig、账户内容永不入库 |
 | 硬边界 | D10 交易执行冻结（BLOCKED）· D13 三域边界 · 平台/业务解耦（Flywheel A/B） |
@@ -62,7 +62,8 @@ make db-init        # 初始化/刷新 PostgreSQL schema
 - 修改 `src/bifrost_core/` 中的共享库后，必须 bump `pyproject.toml` 中的 version（当前版本以 `pyproject.toml` 为准）
 - 下游与发布流程见 `.cursor/rules/versioning.mdc`
 - 下面是 0.20.2 及以前的版本说明，之后不再在此追加：新版本的说明在提交信息里，DDL 变更在 `docs/DATABASE.md` §6
-- 其他 repo 通过 git tag 安装：`pip install git+https://github.com/ORG/bifrost-trade-core.git@v0.x.x`
+- 发布身份是交付流水线克隆的 SHA，不是版本号；tag `v<version>` 只在 PROD 发布成功后由
+  `bifrost-trade-infra/scripts/release/tag_core_release.sh <core_sha>` 打（TD-37）。`BIFROST_CORE_REF` 只用于本地构建
 - 破坏性变更需要同步更新所有依赖 repo 的 pyproject.toml
 - **0.20.2**: `account_sync_heartbeat_from_state` returns `sync_failures` / `last_error` /
   `last_ok_ts`. `alive` alone could not tell "loop turning, sync working" from "loop

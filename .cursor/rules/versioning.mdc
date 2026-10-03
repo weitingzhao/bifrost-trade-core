@@ -1,21 +1,36 @@
 ---
-description: Core package versioning — bump, tag, and downstream notification rules
+description: Core package versioning — release identity (SHA), version floor, PROD tags, downstream rules
 alwaysApply: true
-parity-id: core-versioning-v3
+parity-id: core-versioning-v4
 ---
 
 # bifrost-core 版本管理规范
 
 `bifrost-core` 是 Trade Python 代码的共享库。当前版本以 `pyproject.toml` 的 `version` 为准。
 
-## 下游（2026-10-01 按 import 与构建文件核对）
+## 发布身份：SHA，不是版本号（TD-37，Owner 2026-10-03 选 B）
+
+- **core 的发布身份是与 api、worker 同一次交付里一起克隆、一起构建的 commit SHA。** `bifrost-deliver-stg` 按分支头、
+  `bifrost-deliver-prod`（钉版本的内联 run）按逐仓 SHA 克隆 core，`Dockerfile.api-stg` / `Dockerfile.worker-stg`
+  直接 `pip install` 那份克隆——不经 tag，也不读 `BIFROST_CORE_REF`。
+- 同一个版本号可能对应多个提交（例：0.28.0 先后被 395804c 与 0eb1735 用过），所以**不能凭版本号反推镜像里的 core**。
+  要查：clone-core 任务日志的 `=== HEAD <sha> ===`、镜像 label `io.bifrost.core.sha`、api 任一域 `GET /health` 的
+  `core_sha`（`core_version` 是 pip 版本）。
+- **`pyproject.toml` 的 version 是给下游的兼容下限**：下游 `bifrost-core>=X` 表示「至少要有 X 引入的接口/行为」。
+  改公开接口时照旧 bump（见下）。
+- **tag 只标记到达 PROD 的提交**：PROD 发布成功后，用 `bifrost-trade-infra/scripts/release/tag_core_release.sh <core_sha>`
+  打 `v<version>`（默认 dry-run，`--push` 才创建并推送）。若 `v<version>` 已指向另一个提交，脚本拒绝——那说明一个版本号
+  装了两份内容：给新内容 bump 版本再发，不要挪 tag。
+- **`BIFROST_CORE_REF` 只用于各 repo 自带的 `Dockerfile` 与本地 compose**（`bifrost-trade-infra/.env`），与 STG/PROD 发布无关。
+
+## 下游（2026-10-03 按 import 与构建文件核对）
 
 | 下游 | 怎么拿到 core | 用到什么 |
 |------|--------------|---------|
-| `bifrost-trade-api` | `pyproject.toml` 写下限；STG/PROD 镜像由 `bifrost-deliver-{stg,prod}` 把从 Gitea 克隆的 core 一起构建（`bifrost-trade-infra/k8s/cicd/docker/Dockerfile.api-stg`）；repo 自带 `Dockerfile` 用 `BIFROST_CORE_REF` | 读取层、写入函数、配置、DDL |
+| `bifrost-trade-api` | `pyproject.toml` 写下限；STG/PROD 镜像由 `bifrost-deliver-{stg,prod}` 把从 Gitea 克隆的 core 一起构建（`bifrost-trade-infra/k8s/cicd/docker/Dockerfile.api-stg`，core SHA 记入 `BIFROST_CORE_SHA`）；repo 自带 `Dockerfile` 用 `BIFROST_CORE_REF`（仅本地） | 读取层、写入函数、配置、DDL |
 | db-init Job | 跑在 `bifrost-api-monitor` 镜像里（`scripts/run_db_refresh_schema.py`），所以 core 的 DDL 随 api 镜像发布 | `_ensure_tables()`、`ensure_brokerage_schema()`、FDW setup |
-| `bifrost-trade-worker` | 同上（`Dockerfile.worker-stg`；repo `Dockerfile` 用 `BIFROST_CORE_REF`） | `PostgreSQLSink`、配置、组合模型、Redis 读写 |
-| `bifrost-platform-plugin-flex-query` | `[runtime]` extra `bifrost-core`；镜像以 `--build-context core=../bifrost-trade-core` 从兄弟目录安装 | `write_account_executions_to_db`、`upsert_account_transactions`、`brokerage_tables`、`connection`、`message_center`、`redis_url` |
+| `bifrost-trade-worker` | 同上（`Dockerfile.worker-stg`；repo `Dockerfile` 用 `BIFROST_CORE_REF`，仅本地）；下限 `>=0.35.0` | `PostgreSQLSink`、配置、组合模型、Redis 读写 |
+| `bifrost-platform-plugin-flex-query` | `[runtime]` extra `bifrost-core>=0.34.0`；镜像以 `--build-context core=../bifrost-trade-core` 从兄弟目录**按磁盘原样**安装（`make docker-build` 拒绝脏 checkout，core SHA 记入 label） | `write_account_executions_to_db`、`upsert_account_transactions`、`brokerage_tables`、`connection`、`message_center`、`redis_url` |
 
 不 import core、但复刻它的契约（改了要同步对方）：`bifrost-platform-plugin` 的 IB Gateway（`ib_gateway/redis_keys.py`、
 `on_demand*.py` 复刻 `bifrost_core.core.realtime` 的 Redis 键与 STK `contract_key`）。`bifrost-research` 不依赖 core（D13）。
@@ -39,9 +54,11 @@ parity-id: core-versioning-v3
 
 1. 在 core 的 PR 描述中**明确列出**受影响的下游（上表）：`bifrost-trade-api`（含 db-init Job）、`bifrost-trade-worker`、
    `bifrost-platform-plugin-flex-query`；改 Redis 键时加上 `bifrost-platform-plugin`
-2. Bump core 版本并打 tag（如 `v0.2.0`）
-3. 下游用到新接口时，在其 `pyproject.toml` 中抬高 `bifrost-core` 下限
-4. 用 repo 自带 `Dockerfile` 构建时同步 `BIFROST_CORE_REF`（`bifrost-trade-infra/.env`）；Flex 插件镜像从兄弟目录构建，发版前确认那份 checkout 的 core 版本
+2. Bump core 版本；不在这一步打 tag——tag 只在 PROD 发布成功后打（见上「发布身份」）
+3. 下游用到新接口时，在其 `pyproject.toml` 中抬高 `bifrost-core` 下限；下限按下游真正 import 的名字定
+   （`git log -S '<name>'` 找引入它的提交，取那之后的第一个版本）
+4. core、api、worker 在同一次交付里一起发（STG 同一分支头；PROD 的钉版本 run 三者都换成本次 STG 的 clone HEAD）；
+   Flex 插件镜像从兄弟目录构建，发版前确认那份 checkout 干净、在预期提交上
 
 ## DDL 变更附加规则
 
@@ -52,8 +69,9 @@ parity-id: core-versioning-v3
 
 ## Tag 与安装
 
-下游 repo 通过 git tag 安装 core：
-```
-pip install git+https://github.com/weitingzhao/bifrost-trade-core.git@v0.x.x
-```
-Docker 构建时通过 `BIFROST_CORE_REF` 变量控制版本。
+- **STG/PROD**：不经 tag 安装，见上「发布身份」。到达 PROD 的提交用 `tag_core_release.sh` 打 `v<version>`；
+  2026-10-03 时 tag 停在 `v0.24.0`；从下一次 PROD 发布起按此打。
+- **本地 / repo 自带 `Dockerfile`**：`BIFROST_CORE_REF` 选 git ref（`main` 或某个已有 tag）：
+  ```
+  pip install git+https://github.com/weitingzhao/bifrost-trade-core.git@<ref>
+  ```
