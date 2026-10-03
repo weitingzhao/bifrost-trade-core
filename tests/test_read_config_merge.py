@@ -82,7 +82,9 @@ def test_normalize_server_categorized_yaml() -> None:
     flat = normalize_server_config(raw)
     assert "architecture" not in flat
     assert flat["monitor_port"] == 8765
-    assert flat["massive_port"] == 8766
+    # Retired ports are accepted and dropped (TD-79); trading_port is now account_port.
+    assert "massive_port" not in flat and "docs_port" not in flat
+    assert flat["account_port"] == flat["trading_port"] == 8769
     assert flat["skip_monitor_ib"] is True
 
 
@@ -109,3 +111,48 @@ def test_normalize_server_empty_raises() -> None:
         normalize_server_config({})
     with pytest.raises(ValueError, match="Missing required"):
         normalize_server_config({"architecture": {}})
+
+
+def test_four_live_ports_are_enough() -> None:
+    """Only api-monitor, api-account, api-market and api-research listen (TD-79)."""
+    flat = normalize_server_config(
+        {
+            "architecture": {"monitor_port": 8765},
+            "account": {"account_port": 8769},
+            "research": {"research_port": 8773, "market_port": 8772},
+        }
+    )
+    assert (flat["monitor_port"], flat["account_port"], flat["market_port"], flat["research_port"]) == (
+        8765,
+        8769,
+        8772,
+        8773,
+    )
+    assert flat["trading_port"] == 8769
+
+
+def test_account_port_wins_over_the_legacy_name() -> None:
+    flat = normalize_server_config(
+        {
+            "architecture": {"monitor_port": 8765},
+            "account": {"account_port": 9000, "trading_port": 8769},
+            "research": {"research_port": 8773, "market_port": 8772},
+        }
+    )
+    assert flat["account_port"] == flat["trading_port"] == 9000
+
+
+def test_a_missing_live_port_still_raises() -> None:
+    with pytest.raises(ValueError, match="account_port"):
+        normalize_server_config({"architecture": {"monitor_port": 8765}, "research": {"research_port": 1, "market_port": 2}})
+
+
+def test_the_ib_block_is_optional() -> None:
+    """No Trade process opens an IB socket; monitor refused to boot without ib.host (TD-79)."""
+    from bifrost_core.config.yaml_config import get_effective_ib_config
+
+    eff = get_effective_ib_config({})
+    assert eff["ib2_host"] is None
+    eff = get_effective_ib_config({"ib": {"secondary": {"ip": "192.0.2.33"}}})
+    assert eff["ib2_host"] == "192.0.2.33"
+

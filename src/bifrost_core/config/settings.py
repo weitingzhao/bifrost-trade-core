@@ -1,59 +1,35 @@
 """Unified config: gates (strategy, state, intent, guard) for hedge logic and ExecutionGuard.
 
 Option 2 (gates): pipeline-aligned structure. Backward compat: top-level and state_space.
-Defaults: loaded from config/config.yaml.example (single source of truth, no code-level defaults).
+Defaults: ``GateParams`` (``monitor.schemas.gate_params``), the same model that validates a
+gate row. They used to come from a file named ``config.yaml.example`` found beside
+``BIFROST_CONFIG`` — mounted only on the daemon, so renaming a file called "example" would have
+crash-looped it (debt TD-53). The values are identical; the dependency on the file is gone.
 """
 
 import logging
-import os
-from pathlib import Path
 from typing import Any, Dict, Optional
-
-import yaml
 
 from bifrost_core.core.dict_merge import deep_merge
 
 logger = logging.getLogger(__name__)
 
-# Lazy-loaded example config (single source of truth for defaults)
-_EXAMPLE_CONFIG: Optional[Dict[str, Any]] = None
+_GATE_DEFAULTS: Optional[Dict[str, Any]] = None
 
 
-def _config_defaults_dir() -> Path:
-    """Directory holding config.yaml / config.yaml.example (Docker: /app/config)."""
-    env_cfg = (os.environ.get("BIFROST_CONFIG") or "").strip()
-    if env_cfg:
-        return Path(env_cfg).resolve().parent
-    return Path(__file__).resolve().parents[3] / "config"
+def _gate_defaults() -> Dict[str, Any]:
+    """Gate defaults in the runtime config's shape: ``{"gates": {...}}``."""
+    global _GATE_DEFAULTS
+    if _GATE_DEFAULTS is None:
+        from bifrost_core.monitor.schemas.gate_params import GateParams
 
-
-def _load_example_config() -> Dict[str, Any]:
-    """Load config.yaml.example as defaults. No code-level defaults."""
-    global _EXAMPLE_CONFIG
-    if _EXAMPLE_CONFIG is None:
-        cfg_dir = _config_defaults_dir()
-        example_path = cfg_dir / "config.yaml.example"
-        fallback_path = cfg_dir / "config.yaml"
-        path = example_path if example_path.is_file() else fallback_path
-        if not path.is_file():
-            raise FileNotFoundError(
-                f"Missing {example_path} (and no {fallback_path} to fall back). "
-                "Restore the tracked template config/config.yaml.example from the repository."
-            )
-        if path == fallback_path:
-            logger.warning(
-                "config/config.yaml.example missing; using %s as merge base for gate defaults. "
-                "Add config.yaml.example for consistent defaults across machines.",
-                fallback_path,
-            )
-        with open(path, encoding="utf-8") as f:
-            _EXAMPLE_CONFIG = yaml.safe_load(f) or {}
-    return _EXAMPLE_CONFIG
+        _GATE_DEFAULTS = {"gates": GateParams().model_dump(mode="json")}
+    return _GATE_DEFAULTS
 
 
 def _merged_config(cfg: Dict[str, Any]) -> Dict[str, Any]:
-    """Merge config with example so missing keys come from config file."""
-    return deep_merge(_load_example_config(), cfg)
+    """The runtime config over the gate defaults: a key the config sets wins."""
+    return deep_merge(_gate_defaults(), cfg)
 
 
 def _gates_section(cfg: Dict[str, Any], gate: str, section: str) -> Dict[str, Any]:
@@ -105,7 +81,7 @@ def get_hedge_config(config: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     Return unified hedge + guard config from config.yaml.
 
     Reads from gates (strategy, state, intent, guard); fallback: top-level, state_space.
-    Missing values from config/config.yaml.example. Returns flat dict for GsTrading, ExecutionGuard.
+    Missing values from the GateParams defaults. Returns flat dict for GsTrading, ExecutionGuard.
     """
     cfg = config or {}
     merged = _merged_config(cfg)
@@ -145,7 +121,7 @@ def get_hedge_config(config: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
 
 def get_state_space_config(config: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """Return state space config. Sections: delta, market, liquidity, system, hedge.
-    Reads from gates.state, gates.intent; missing values from config.yaml.example."""
+    Reads from gates.state, gates.intent; missing values from the GateParams defaults."""
     cfg = config or {}
     merged = _merged_config(cfg)
     out: Dict[str, Any] = {}

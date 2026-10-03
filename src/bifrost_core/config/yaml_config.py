@@ -79,56 +79,62 @@ def _required_listen_port(
     )
 
 
+_RETIRED_PORTS = (
+    ("architecture", "docs_port"),
+    ("architecture", "ops_port"),
+    ("account", "portfolio_port"),
+    ("research", "strategy_port"),
+    ("feed", "massive_port"),
+)
+
+
 def normalize_server_config(server: Optional[dict]) -> dict:
-    """Flatten ``server.{architecture,account,research,feed}`` into canonical port keys.
+    """Flatten ``server.{architecture,account,research,feed}`` into the ports the APIs listen on.
 
-    Categories align with API Health / Services Overview: Architecture, Account, Research, Feed.
+    Four processes listen in K3s, so four ports are required (debt TD-79):
 
-    - ``architecture``: ``monitor_port`` (legacy top-level ``port`` also accepted), ``docs_port``, ``ops_port``
-    - ``account``: ``trading_port``, ``portfolio_port``
-    - ``research``: ``research_port``, ``market_port``, ``strategy_port``
-    - ``feed``: ``massive_port``
+    - ``architecture.monitor_port`` (legacy top-level ``port``): api-monitor, which also
+      serves docs and ops
+    - ``account.account_port`` (legacy ``trading_port``): api-account, which serves
+      trading, strategy and portfolio
+    - ``research.research_port`` and ``research.market_port``
 
-    Nested values win over legacy flat keys. Category keys and legacy ``port`` are removed from the result.
+    ``trading_port`` stays in the result as an alias of ``account_port`` for one version.
+    The retired ports (``docs_port``, ``ops_port``, ``portfolio_port``, ``strategy_port``,
+    ``massive_port``) are accepted and dropped: nothing listens on them, and requiring them
+    made a retired service's port a condition of booting.
 
-    **All listen ports are required** — there are no code defaults; omitting a port raises ``ValueError``.
+    Nested values win over legacy flat keys. A missing required port raises ``ValueError``.
     """
     if not server or not isinstance(server, dict):
         raise ValueError(
-            "config['server'] must be a YAML object with all listen ports. "
-            "See config/config.yaml.example (server.architecture, server.account, "
-            "server.research, server.feed)."
+            "config['server'] must be a YAML object with the listen ports. "
+            "See config/config.yaml.example (server.architecture, server.account, server.research)."
         )
     srv = dict(server)
     arch = srv.get("architecture") if isinstance(srv.get("architecture"), dict) else {}
     acc = srv.get("account") if isinstance(srv.get("account"), dict) else {}
     res = srv.get("research") if isinstance(srv.get("research"), dict) else {}
-    feed = srv.get("feed") if isinstance(srv.get("feed"), dict) else {}
 
     monitor_port = _required_listen_port(arch, srv, "monitor_port", "port", "server.architecture.monitor_port")
-    docs_port = _required_listen_port(arch, srv, "docs_port", None, "server.architecture.docs_port")
-    ops_port = _required_listen_port(arch, srv, "ops_port", None, "server.architecture.ops_port")
-    trading_port = _required_listen_port(acc, srv, "trading_port", None, "server.account.trading_port")
-    portfolio_port = _required_listen_port(acc, srv, "portfolio_port", None, "server.account.portfolio_port")
+    if acc.get("account_port") is not None or srv.get("account_port") is not None:
+        account_port = _required_listen_port(acc, srv, "account_port", None, "server.account.account_port")
+    else:
+        account_port = _required_listen_port(acc, srv, "trading_port", None, "server.account.account_port")
     research_port = _required_listen_port(res, srv, "research_port", None, "server.research.research_port")
     market_port = _required_listen_port(res, srv, "market_port", None, "server.research.market_port")
-    strategy_port = _required_listen_port(res, srv, "strategy_port", None, "server.research.strategy_port")
-    massive_port = _required_listen_port(feed, srv, "massive_port", None, "server.feed.massive_port")
 
+    dropped = {key for _, key in _RETIRED_PORTS}
     out = {
         k: v
         for k, v in srv.items()
-        if k not in ("architecture", "account", "research", "feed", "port")
+        if k not in ("architecture", "account", "research", "feed", "port") and k not in dropped
     }
     out["monitor_port"] = monitor_port
-    out["docs_port"] = docs_port
-    out["ops_port"] = ops_port
-    out["trading_port"] = trading_port
-    out["portfolio_port"] = portfolio_port
+    out["account_port"] = account_port
+    out["trading_port"] = account_port
     out["research_port"] = research_port
     out["market_port"] = market_port
-    out["strategy_port"] = strategy_port
-    out["massive_port"] = massive_port
     return out
 
 
@@ -296,8 +302,10 @@ def read_config(config_path: Optional[str] = None) -> tuple[dict, str]:
 
     When the resolved file is ``config/config.dev.yaml`` or ``config/config.prod.yaml`` and
     ``config/config.yaml`` exists in the same directory, load ``config.yaml`` first and **deep-merge**
-    the env-specific file on top (overlay wins). This matches a split where shared keys live in
-    ``config.yaml`` and env overrides live in ``config.dev.yaml`` / ``config.prod.yaml``.
+    the env-specific file on top (overlay wins). That split is for local runs (docker-compose dev
+    keeps shared keys in ``config.yaml``). K3s never merges: every pod mounts its env's whole
+    overlay as ``runtime.yaml`` with nothing beside it, and that file is the env's only config
+    (TD-06, TD-53).
 
     After merge, ``server`` is passed through :func:`normalize_server_config` so categorized YAML
     (``architecture`` / ``account`` / ``research`` / ``feed``) becomes flat keys (``monitor_port``, …).
@@ -334,12 +342,11 @@ def _flatten_host_secondary_ib(ib: dict) -> Dict[str, Any]:
     Primary TWS: ``ib.host.ip``, ``ib.host.port_type``, ``ib.host.client_id.*``
     Optional second TWS: ``ib.secondary`` (ip, port_type, client_id.listener/operator).
     """
-    h = ib.get("host")
-    if not isinstance(h, dict):
-        raise ValueError(
-            "config['ib']['host'] is required (dict with ip, port_type, client_id). "
-            + _IB_YAML_EXAMPLE_HINT
-        )
+    # Optional (debt TD-79): no Trade process opens an IB socket — IB goes through the
+    # Platform gateway over Redis RPC — so the host block only labels status and the
+    # client-id defaults. ``ib.secondary.ip`` is what still matters: it enables the
+    # secondary-account RPCs.
+    h = ib.get("host") if isinstance(ib.get("host"), dict) else {}
     s = ib.get("secondary") if isinstance(ib.get("secondary"), dict) else {}
     hc = h.get("client_id") if isinstance(h.get("client_id"), dict) else {}
     sc = s.get("client_id") if isinstance(s.get("client_id"), dict) else {}
@@ -413,9 +420,7 @@ def get_effective_ib_config(config: dict) -> Dict[str, Any]:
     Monitor HTTP responses use ``src.monitor.reader.ib_config_public.ib_client_for_api`` (Settings-aligned names).
     """
     ib_raw = config.get("ib")
-    if not ib_raw or not isinstance(ib_raw, dict):
-        raise ValueError("config['ib'] is required in YAML. " + _IB_YAML_EXAMPLE_HINT)
-    ib = _flatten_host_secondary_ib(ib_raw)
+    ib = _flatten_host_secondary_ib(ib_raw if isinstance(ib_raw, dict) else {})
     host = str(ib.get("host") or "127.0.0.1").strip()
     port_type = str(ib.get("port_type") or "tws_paper").strip().lower()
     if port_type not in IB_PORT_MAP:

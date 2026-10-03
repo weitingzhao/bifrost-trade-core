@@ -25,60 +25,47 @@ def _pg_block_dbname(pg: dict) -> str | None:
     return db
 
 
+def _env(key: str) -> str:
+    return (os.environ.get(key) or "").strip()
+
+
+def _yaml(block: dict, key: str):
+    value = block.get(key)
+    return None if value is None or (isinstance(value, str) and not value.strip()) else value
+
+
 def _get_conn_params(config: dict) -> dict:
-    """Build connection params from root postgres config, with env overrides."""
+    """The Trade database: ``PG*`` env, then the ``postgres`` block, then defaults.
+
+    Env wins over YAML (debt TD-54, Owner 2026-10-03). The docstring said so before; the
+    code let YAML win, so an env value could never override a file. In K3s the overlay's
+    password fields are empty and the Secret supplies them either way.
+    """
     pg = config.get("postgres", {}) or {}
-    db = _pg_block_dbname(pg)
     return {
-        "host": pg.get("host") or os.environ.get("PGHOST", "127.0.0.1"),
-        "port": int(pg.get("port") or os.environ.get("PGPORT", "5432")),
-        "dbname": db or os.environ.get("PGDATABASE", "bifrost"),
-        "user": pg.get("user") or os.environ.get("PGUSER", "bifrost"),
-        "password": pg.get("password") or os.environ.get("PGPASSWORD", ""),
+        "host": _env("PGHOST") or _yaml(pg, "host") or "127.0.0.1",
+        "port": int(_env("PGPORT") or _yaml(pg, "port") or 5432),
+        "dbname": _env("PGDATABASE") or _pg_block_dbname(pg) or "bifrost",
+        "user": _env("PGUSER") or _yaml(pg, "user") or "bifrost",
+        "password": _env("PGPASSWORD") or _yaml(pg, "password") or "",
     }
 
 
 def _get_golden_source_conn_params(config: dict) -> dict:
-    """Build connection params for bifrost_golden_source (brokerage.* writes).
+    """bifrost_golden_source: per field ``GOLDEN_SOURCE_*`` env, then ``golden_source``,
+    then the Trade database's value (same CNPG cluster, different database).
 
-    Reads ``config.golden_source`` with env overrides:
-    GOLDEN_SOURCE_HOST / PORT / DATABASE / USER / PASSWORD.
-    Falls back to postgres host/port when golden_source host is omitted
-    (same CNPG cluster, different database).
+    Env wins over YAML (TD-54): ``GOLDEN_SOURCE_USER`` used to lose to a ``user:`` line in the
+    overlay. The database name never falls back to the Trade database.
     """
     gs = config.get("golden_source", {}) or {}
-    pg = config.get("postgres", {}) or {}
-    db = _pg_block_dbname(gs)
+    trade = _get_conn_params(config)
     return {
-        "host": (
-            gs.get("host")
-            or os.environ.get("GOLDEN_SOURCE_HOST")
-            or pg.get("host")
-            or os.environ.get("PGHOST", "127.0.0.1")
-        ),
-        "port": int(
-            gs.get("port")
-            or os.environ.get("GOLDEN_SOURCE_PORT")
-            or pg.get("port")
-            or os.environ.get("PGPORT", "5432")
-        ),
-        "dbname": (
-            db
-            or os.environ.get("GOLDEN_SOURCE_DATABASE")
-            or "bifrost_golden_source"
-        ),
-        "user": (
-            gs.get("user")
-            or os.environ.get("GOLDEN_SOURCE_USER")
-            or pg.get("user")
-            or os.environ.get("PGUSER", "bifrost")
-        ),
-        "password": (
-            gs.get("password")
-            or os.environ.get("GOLDEN_SOURCE_PASSWORD")
-            or pg.get("password")
-            or os.environ.get("PGPASSWORD", "")
-        ),
+        "host": _env("GOLDEN_SOURCE_HOST") or _yaml(gs, "host") or trade["host"],
+        "port": int(_env("GOLDEN_SOURCE_PORT") or _yaml(gs, "port") or trade["port"]),
+        "dbname": _env("GOLDEN_SOURCE_DATABASE") or _pg_block_dbname(gs) or "bifrost_golden_source",
+        "user": _env("GOLDEN_SOURCE_USER") or _yaml(gs, "user") or trade["user"],
+        "password": _env("GOLDEN_SOURCE_PASSWORD") or _yaml(gs, "password") or trade["password"],
     }
 
 

@@ -6,29 +6,37 @@ import os
 from typing import Any, Dict, Optional
 
 
+def _env(key: str) -> str:
+    return (os.environ.get(key) or "").strip()
+
+
+def _yaml(block: Dict[str, Any], key: str) -> Any:
+    value = block.get(key)
+    return None if value is None or (isinstance(value, str) and not value.strip()) else value
+
+
 def effective_redis_dict(
     config: Optional[Dict[str, Any]] = None,
     *,
     default_db: int = 0,
 ) -> Dict[str, Any]:
-    """Normalize redis block from merged config with REDIS_* env fallbacks.
+    """The live bus: ``REDIS_*`` env, then the ``redis`` block, then defaults.
 
-    ``default_db`` is used when neither config nor REDIS_DB is set (e.g. Celery uses 1, console uses 0).
+    Env wins over YAML everywhere (debt TD-54, Owner 2026-10-03). This bus had it the other
+    way round — YAML first, env as a fallback — while the IB bus let env win, and the Postgres
+    builders' docstrings claimed env won while their code let YAML win.
+
+    ``default_db`` is used when neither env nor config sets a db (Celery 1, console 0).
     """
-    config = config or {}
-    r = config.get("redis") or {}
-    host = (r.get("host") or os.environ.get("REDIS_HOST") or "127.0.0.1").strip()
-    port = int(r.get("port") or os.environ.get("REDIS_PORT") or 6379)
-    db_raw = r.get("db")
-    if db_raw is not None and db_raw != "":
-        db = int(db_raw)
-    elif os.environ.get("REDIS_DB", "").strip() != "":
-        db = int(os.environ["REDIS_DB"])
-    else:
-        db = default_db
-    password = (r.get("password") or os.environ.get("REDIS_PASSWORD") or "").strip()
-    username = (r.get("username") or os.environ.get("REDIS_USERNAME") or "").strip()
-    return {"host": host, "port": port, "db": db, "password": password, "username": username}
+    r = (config or {}).get("redis") or {}
+    db_raw = _env("REDIS_DB") or _yaml(r, "db")
+    return {
+        "host": str(_env("REDIS_HOST") or _yaml(r, "host") or "127.0.0.1").strip(),
+        "port": int(_env("REDIS_PORT") or _yaml(r, "port") or 6379),
+        "db": int(db_raw) if db_raw is not None and db_raw != "" else default_db,
+        "password": str(_env("REDIS_PASSWORD") or _yaml(r, "password") or "").strip(),
+        "username": str(_env("REDIS_USERNAME") or _yaml(r, "username") or "").strip(),
+    }
 
 
 def effective_ib_redis_dict(
@@ -36,26 +44,27 @@ def effective_ib_redis_dict(
     *,
     default_db: int = 0,
 ) -> Dict[str, Any]:
-    """Normalize IB bus redis — prefers ``redis_ib`` when host is set, else ``redis``."""
+    """The IB bus: per field ``REDIS_IB_*`` env, then ``redis_ib``, then the live bus's value.
+
+    With no IB host anywhere it is the live bus. Each field is resolved on its own, so a
+    ``REDIS_HOST`` meant for the live bus can never replace the IB host.
+    """
     config = config or {}
     ib = config.get("redis_ib") or {}
-    if not (ib.get("host") or os.environ.get("REDIS_IB_HOST") or "").strip():
+    if not (_env("REDIS_IB_HOST") or str(ib.get("host") or "").strip()):
         return effective_redis_dict(config, default_db=default_db)
-    base = dict(config.get("redis") or {})
-    for key in ("host", "port", "db", "password", "username", "enabled"):
-        if key in ib and ib[key] not in (None, ""):
-            base[key] = ib[key]
-    if (os.environ.get("REDIS_IB_HOST") or "").strip():
-        base["host"] = os.environ["REDIS_IB_HOST"].strip()
-    if (os.environ.get("REDIS_IB_PORT") or "").strip():
-        base["port"] = int(os.environ["REDIS_IB_PORT"])
-    if (os.environ.get("REDIS_IB_PASSWORD") or "").strip():
-        base["password"] = os.environ["REDIS_IB_PASSWORD"].strip()
-    if (os.environ.get("REDIS_IB_USERNAME") or "").strip():
-        base["username"] = os.environ["REDIS_IB_USERNAME"].strip()
-    if os.environ.get("REDIS_IB_DB", "").strip() != "":
-        base["db"] = int(os.environ["REDIS_IB_DB"])
-    return effective_redis_dict({"redis": base}, default_db=default_db)
+    live = effective_redis_dict(config, default_db=default_db)
+    out: Dict[str, Any] = {}
+    for key in ("host", "port", "db", "password", "username"):
+        env_value = _env(f"REDIS_IB_{key.upper()}")
+        yaml_value = _yaml(ib, key)
+        out[key] = env_value if env_value != "" else (yaml_value if yaml_value is not None else live[key])
+    out["host"] = str(out["host"]).strip()
+    out["port"] = int(out["port"])
+    out["db"] = int(out["db"])
+    out["password"] = str(out["password"] or "").strip()
+    out["username"] = str(out["username"] or "").strip()
+    return out
 
 
 def format_redis_url(effective: Dict[str, Any]) -> str:
