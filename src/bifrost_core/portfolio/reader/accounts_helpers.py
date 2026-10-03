@@ -404,6 +404,8 @@ def _compute_opt_realized_calendar(
     for _, v in sorted(period_totals.items(), key=lambda x: x[0][0]):
         wc, lc = v.get("win_count", 0), v.get("loss_count", 0)
         v["win_rate"] = (wc / (wc + lc)) if (wc + lc) > 0 else None
+        # trade_count here counts closed option pairs, not fills (TD-19): say so by name.
+        v["pair_count"] = v["trade_count"]
         v["pnl"] = round(v["pnl"], 2)
         v["commission"] = round(v["commission"], 2)
         v["net_pnl"] = round(v["net_pnl"], 2)

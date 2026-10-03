@@ -1105,7 +1105,10 @@ def _performance_response_summary_only(
     avg_loss: Optional[float] = None,
     profit_factor: Optional[float] = None,
 ) -> Dict[str, Any]:
-    win_rate = (win_count / trade_count) if trade_count else None
+    # Wins over the fills that realized a gain or a loss (TD-19): an opening fill realizes
+    # nothing and is not a loss. trade_count / fill_count still count every fill.
+    closed = win_count + loss_count
+    win_rate = (win_count / closed) if closed else None
     return {
         "transaction": {"net_cash_flow": 0.0, "start_equity": None, "capital_base": None},
         "transactions": [],
@@ -1115,6 +1118,7 @@ def _performance_response_summary_only(
             "total_commission": round(total_commission, 2),
             "net_pnl": round(net_pnl, 2),
             "trade_count": trade_count,
+            "fill_count": trade_count,
             "win_count": win_count,
             "loss_count": loss_count,
             "win_rate": round(win_rate, 4) if win_rate is not None else None,
@@ -1319,7 +1323,7 @@ def get_performance_stats(
     loss_count = len(losses)
     sum_wins = sum(wins)
     sum_losses_abs = abs(sum(losses)) if losses else 0.0
-    win_rate = (win_count / trade_count) if trade_count else None
+    win_rate = (win_count / (win_count + loss_count)) if (win_count + loss_count) else None  # TD-19: closing fills
     profit_factor = (sum_wins / sum_losses_abs) if sum_losses_abs > 0 else (None if not sum_wins else float("inf"))
     avg_win = (sum_wins / win_count) if win_count else None
     avg_loss = (sum(losses) / loss_count) if loss_count else None
@@ -1350,7 +1354,7 @@ def get_performance_stats(
         by_acc[acc]["commission"] += comm_val
         by_acc[acc]["net_pnl"] += rp_val - comm_val
         by_acc[acc]["trade_count"] += 1
-    realized_by_account = [{"account_id": acc, "total_pnl": round(v["total_pnl"], 2), "commission": round(v["commission"], 2), "net_pnl": round(v["net_pnl"], 2), "trade_count": v["trade_count"]} for acc, v in sorted(by_acc.items())]
+    realized_by_account = [{"account_id": acc, "total_pnl": round(v["total_pnl"], 2), "commission": round(v["commission"], 2), "net_pnl": round(v["net_pnl"], 2), "trade_count": v["trade_count"], "fill_count": v["trade_count"]} for acc, v in sorted(by_acc.items())]
     if capital_base and capital_base > 0:
         for row in realized_by_account:
             row["return_pct"] = round(100.0 * row["net_pnl"] / capital_base, 4)
@@ -1373,7 +1377,7 @@ def get_performance_stats(
         by_sec[st]["commission"] += comm_val
         by_sec[st]["net_pnl"] += rp_val - comm_val
         by_sec[st]["trade_count"] += 1
-    realized_by_sec_type = [{"sec_type": st, "total_pnl": round(v["total_pnl"], 2), "commission": round(v["commission"], 2), "net_pnl": round(v["net_pnl"], 2), "trade_count": v["trade_count"]} for st, v in sorted(by_sec.items())]
+    realized_by_sec_type = [{"sec_type": st, "total_pnl": round(v["total_pnl"], 2), "commission": round(v["commission"], 2), "net_pnl": round(v["net_pnl"], 2), "trade_count": v["trade_count"], "fill_count": v["trade_count"]} for st, v in sorted(by_sec.items())]
     if capital_base and capital_base > 0:
         for row in realized_by_sec_type:
             row["return_pct"] = round(100.0 * row["net_pnl"] / capital_base, 4)
@@ -1397,7 +1401,7 @@ def get_performance_stats(
         by_acc_sec[key]["commission"] += comm_val
         by_acc_sec[key]["net_pnl"] += rp_val - comm_val
         by_acc_sec[key]["trade_count"] += 1
-    realized_by_account_and_sec_type = [{"account_id": k[0], "sec_type": k[1], "total_pnl": round(v["total_pnl"], 2), "commission": round(v["commission"], 2), "net_pnl": round(v["net_pnl"], 2), "trade_count": v["trade_count"]} for k, v in sorted(by_acc_sec.items())]
+    realized_by_account_and_sec_type = [{"account_id": k[0], "sec_type": k[1], "total_pnl": round(v["total_pnl"], 2), "commission": round(v["commission"], 2), "net_pnl": round(v["net_pnl"], 2), "trade_count": v["trade_count"], "fill_count": v["trade_count"]} for k, v in sorted(by_acc_sec.items())]
     if capital_base and capital_base > 0:
         for row in realized_by_account_and_sec_type:
             row["return_pct"] = round(100.0 * row["net_pnl"] / capital_base, 4)
@@ -1411,8 +1415,8 @@ def get_performance_stats(
             by_inst,
             only_strategy_instance_id=strategy_instance_id,
         )
-    realized_by_strategy_opportunity = [{"strategy_opportunity_id": k, "total_pnl": round(v["total_pnl"], 2), "commission": round(v["commission"], 2), "net_pnl": round(v["net_pnl"], 2), "trade_count": v["trade_count"]} for k, v in sorted(by_opp.items())]
-    realized_by_strategy_instance = [{"strategy_instance_id": k, "total_pnl": round(v["total_pnl"], 2), "commission": round(v["commission"], 2), "net_pnl": round(v["net_pnl"], 2), "trade_count": v["trade_count"]} for k, v in sorted(by_inst.items())]
+    realized_by_strategy_opportunity = [{"strategy_opportunity_id": k, "total_pnl": round(v["total_pnl"], 2), "commission": round(v["commission"], 2), "net_pnl": round(v["net_pnl"], 2), "trade_count": v["trade_count"], "fill_count": v["trade_count"]} for k, v in sorted(by_opp.items())]
+    realized_by_strategy_instance = [{"strategy_instance_id": k, "total_pnl": round(v["total_pnl"], 2), "commission": round(v["commission"], 2), "net_pnl": round(v["net_pnl"], 2), "trade_count": v["trade_count"], "fill_count": v["trade_count"]} for k, v in sorted(by_inst.items())]
     if capital_base and capital_base > 0:
         for row in realized_by_strategy_opportunity:
             row["return_pct"] = round(100.0 * row["net_pnl"] / capital_base, 4)
@@ -1467,6 +1471,7 @@ def get_performance_stats(
     for _, v in sorted(cal_map.items(), key=lambda x: x[0][0]):
         wc, lc = v.get("win_count", 0), v.get("loss_count", 0)
         v["win_rate"] = (wc / (wc + lc)) if (wc + lc) > 0 else None
+        v["fill_count"] = v["trade_count"]
         calendar.append(v)
     if capital_base and capital_base > 0:
         for row in calendar:
@@ -1507,6 +1512,7 @@ def get_performance_stats(
     for k, v in sorted(cal_map_by_sec.items(), key=lambda x: (x[0][0], x[0][2])):
         wc, lc = v.get("win_count", 0), v.get("loss_count", 0)
         v["win_rate"] = (wc / (wc + lc)) if (wc + lc) > 0 else None
+        v["fill_count"] = v["trade_count"]
         calendar_by_sec_type.append(v)
     calendar_by_sec_type.sort(key=lambda x: (x["period_start_ts"], x["sec_type"]))
     if capital_base and capital_base > 0:
@@ -1565,6 +1571,7 @@ def get_performance_stats(
             "total_commission": round(total_commission, 2),
             "net_pnl": round(net_pnl, 2),
             "trade_count": trade_count,
+            "fill_count": trade_count,
             "win_count": win_count,
             "loss_count": loss_count,
             "win_rate": round(win_rate, 4) if win_rate is not None else None,

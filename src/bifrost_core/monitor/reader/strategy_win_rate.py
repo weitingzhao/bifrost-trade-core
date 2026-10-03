@@ -267,7 +267,8 @@ def _aggregate_win_rate_metrics(structure_name: str, rows: List[Dict[str, Any]])
 
     return {
         "structure_name": structure_name,
-        "total_instances": len(rows),
+        "total_trades": len(rows),  # TD-19: a trade is the instance
+        "total_instances": len(rows),  # kept one version beside total_trades
         "profit_trades": len(profit),
         "loss_trades": len(loss),
         "total_profit": total_profit,
