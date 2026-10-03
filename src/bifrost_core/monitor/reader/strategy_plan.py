@@ -51,8 +51,10 @@ _LEG_SEC_TYPES = ("OPT", "STK")
 _LEG_RIGHTS = ("C", "P")
 
 # `filled_at` is read, not stored (TD-43, core 0.41.0): the linked instance's `opened_at`,
-# so moving the instance's open moves it too. The column stays until the next DDL wave and
-# is no longer written. Plan `p` LEFT JOIN instance `i`; filters and order name `p.`.
+# so moving the instance's open moves it too. Only a filled plan has an instance (CHECK
+# strategy_plan_filled_instance_ck), so every other plan reads null. The column is not named
+# anywhere since core 0.43.0 and is dropped by an Owner db-step after that release.
+# Plan `p` LEFT JOIN instance `i`; filters and order name `p.`.
 _PLAN_COLUMNS = """
     p.strategy_plan_id, p.account_id, p.symbol, p.structure_label,
     p.strategy_structure_id, p.strategy_opportunity_id,

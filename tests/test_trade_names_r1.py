@@ -137,15 +137,15 @@ def test_review_rows_and_writes_take_the_json_names() -> None:
     row = trade_review._row_out({"strategy_instance_id": 41, "tags_added": '["a"]', "tags_dropped": [], "reviewed_at": None})
     assert row["tags_added_json"] == row["tags_added"] == ["a"]
     assert row["tags_dropped_json"] == [] and row["trade_id"] == 41
-    assert tn.review_fields_as_columns({"tags_added_json": ["b"], "tags_added": ["c"], "note": "x"}) == {
+    assert tn.review_fields_as_columns({"tags_added_json": ["b"], "tags_added": ["c"], "reviewed": True}) == {
         "tags_added": ["b"],
-        "note": "x",
+        "reviewed": True,
     }
 
 
 def test_review_patch_takes_tags_added_json() -> None:
     returned = {"trade_review_id": 1, "strategy_instance_id": 41, "tags_added": ["b"], "tags_dropped": [],
-                "note": None, "reviewed_at": None, "created_at": None, "updated_at": None}
+                "reviewed_at": None, "created_at": None, "updated_at": None}
     conn = FakeConn([("SELECT 1 FROM strategy_instance", Reply(one=(1,))), ("INSERT INTO trade_review", Reply(one=returned))])
     out = trade_review.patch_review(conn, 41, {"tags_added_json": ["b"]})
     sql, params = conn.statement("INSERT INTO trade_review")

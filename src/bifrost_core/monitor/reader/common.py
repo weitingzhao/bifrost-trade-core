@@ -535,9 +535,8 @@ class StatusReader:
         account_id: str,
         opened_at: Any,
         label: Optional[str] = None,
-        notes: Optional[str] = None,
     ) -> Optional[int]:
-        """Insert one strategy_instance. Returns strategy_instance_id or None."""
+        """Insert one strategy_instance. Returns strategy_instance_id or None (no notes since 0.43.0, TD-73)."""
         if not self._connect():
             return None
         return strategy_instance_module.create_instance(
@@ -546,22 +545,20 @@ class StatusReader:
             account_id=account_id,
             opened_at=opened_at,
             label=label,
-            notes=notes,
         )
 
     def update_strategy_instance(
         self,
         strategy_instance_id: int,
         label: Optional[str] = None,
-        notes: Optional[str] = None,
         created_at: Optional[Any] = None,
         opened_at: Optional[Any] = None,
     ) -> bool:
-        """Update label, notes, created_at, and/or opened_at of a strategy instance. Returns True if updated."""
+        """Update label, created_at, and/or opened_at of a strategy instance. Returns True if updated."""
         if not self._connect():
             return False
         return strategy_instance_module.update_instance(
-            self._conn, strategy_instance_id, label=label, notes=notes, created_at=created_at, opened_at=opened_at
+            self._conn, strategy_instance_id, label=label, created_at=created_at, opened_at=opened_at
         )
 
     def delete_strategy_instance(self, strategy_instance_id: int) -> bool:

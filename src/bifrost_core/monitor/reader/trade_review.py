@@ -9,8 +9,11 @@ caller decides when a review may be confirmed. This module only stores what
 the trader decided, and it never deletes: reopening a review clears the stamp
 and keeps the tags.
 
-``patch_review`` (core 0.33.0, TD-15) is the PATCH writer: an explicit null note
-clears it (``save_review`` keeps the note on null), and it raises ``Write*``.
+``patch_review`` (core 0.33.0, TD-15) is the PATCH writer; it raises ``Write*``.
+
+No ``note`` since core 0.43.0 (TD-73): a trade's notes live in the Research journal,
+and ``trade_review.note`` is dropped after this release. Neither writer reads or writes
+it, and both refuse a ``note`` key rather than drop it.
 """
 
 from __future__ import annotations
@@ -31,7 +34,7 @@ TAG_MAX = 40
 TAG_LEN_MAX = 60
 
 _COLUMNS = """
-    trade_review_id, strategy_instance_id, tags_added, tags_dropped, note,
+    trade_review_id, strategy_instance_id, tags_added, tags_dropped,
     reviewed_at, created_at, updated_at
 """
 
@@ -106,29 +109,28 @@ def save_review(
     None when Postgres is not configured; raises when the instance does not
     exist (foreign key) or the write fails.
     """
+    if "note" in payload:
+        raise WriteInvalid(NOTE_RETIRED)
     conn = _conn_from_config(status_config)
     if conn is None:
         return None
     added = clean_tags(payload.get("tags_added"))
     dropped = clean_tags(payload.get("tags_dropped"))
-    note = payload.get("note")
     reviewed = payload.get("reviewed")
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(
                 f"""
-                INSERT INTO trade_review (strategy_instance_id, tags_added, tags_dropped, note, reviewed_at)
+                INSERT INTO trade_review (strategy_instance_id, tags_added, tags_dropped, reviewed_at)
                 VALUES (
                     %(id)s,
                     COALESCE(%(added)s::jsonb, '[]'::jsonb),
                     COALESCE(%(dropped)s::jsonb, '[]'::jsonb),
-                    %(note)s,
                     CASE WHEN %(reviewed)s IS TRUE THEN now() ELSE NULL END
                 )
                 ON CONFLICT (strategy_instance_id) DO UPDATE SET
                     tags_added   = COALESCE(%(added)s::jsonb, trade_review.tags_added),
                     tags_dropped = COALESCE(%(dropped)s::jsonb, trade_review.tags_dropped),
-                    note         = CASE WHEN %(note_set)s THEN %(note)s ELSE trade_review.note END,
                     reviewed_at  = CASE
                         WHEN %(reviewed)s IS TRUE THEN COALESCE(trade_review.reviewed_at, now())
                         WHEN %(reviewed)s IS FALSE THEN NULL
@@ -141,8 +143,6 @@ def save_review(
                     "id": int(strategy_instance_id),
                     "added": None if added is None else json.dumps(added),
                     "dropped": None if dropped is None else json.dumps(dropped),
-                    "note": note,
-                    "note_set": "note" in payload and payload.get("note") is not None,
                     "reviewed": reviewed,
                 },
             )
@@ -161,7 +161,12 @@ def save_review(
 
 # --- TD-15 writer (core 0.33.0): return the row / raise Write* ----------------------
 
-REVIEW_PATCHABLE = ("tags_added", "tags_dropped", "note", "reviewed")
+REVIEW_PATCHABLE = ("tags_added", "tags_dropped", "reviewed")
+
+NOTE_RETIRED = (
+    "note was removed in core 0.43.0 (TD-73): a trade's notes live in the Research journal "
+    "(POST /research/journal/notes with a ref of type 'inst')."
+)
 
 
 def _patch_tags(value: Any, name: str) -> List[str]:
@@ -183,12 +188,14 @@ def patch_review(conn_or_config: Any, strategy_instance_id: int, fields: Dict[st
     write, so a missing review row is created; a missing *instance* is WriteNotFound.
     ``tags_added`` / ``tags_dropped``: lists of text (trimmed, at most 60 characters each
     and 40 tags; a repeat is kept once), replaced whole, ``[]`` empties, null refused.
-    ``note``: nullable text, null clears. ``reviewed``: true stamps ``reviewed_at`` (a
+    ``reviewed``: true stamps ``reviewed_at`` (a
     second true keeps the first stamp), false clears it. Raises WriteInvalid,
     WriteNotFound, WriteFailed.
     """
     what = f"the review of trade {strategy_instance_id}"
     # tags_added_json / tags_dropped_json are taken too; the new name wins (naming R1).
+    if isinstance(fields, dict) and "note" in fields:
+        raise WriteInvalid(NOTE_RETIRED)
     fields = ws.check_fields(review_fields_as_columns(fields), REVIEW_PATCHABLE, "review")
     insert_cols: Dict[str, Any] = {}
     updates: List[str] = []
@@ -198,10 +205,6 @@ def patch_review(conn_or_config: Any, strategy_instance_id: int, fields: Dict[st
             values[name] = json.dumps(_patch_tags(fields[name], name))
             insert_cols[name] = f"%({name})s::jsonb"
             updates.append(f"{name} = EXCLUDED.{name}")
-    if "note" in fields:
-        values["note"] = ws.text(fields["note"], "note", nullable=True)
-        insert_cols["note"] = "%(note)s"
-        updates.append("note = EXCLUDED.note")
     if "reviewed" in fields:
         values["reviewed"] = ws.boolean(fields["reviewed"], "reviewed")
         insert_cols["reviewed_at"] = "CASE WHEN %(reviewed)s THEN now() ELSE NULL END"

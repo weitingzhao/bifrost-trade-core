@@ -10,7 +10,8 @@ TD-43 (trade lifecycle):
   ``link_fill`` is the one writer of that column and sets both together.
 - ``trade_review.strategy_instance_id`` FK: ON DELETE CASCADE -> RESTRICT ("never deletes" is now true).
   ``strategy_plan.filled_at`` stays until the next wave: core stops writing it and reads the
-  instance's ``opened_at`` instead.
+  instance's ``opened_at`` instead. (core 0.43.0 stops naming it anywhere; the column is dropped
+  by an Owner db-step after that release, never by db-init.)
 
 TD-56 (position categories; table and ``id`` PK unchanged, Owner 2026-10-03):
 - ``preference_position_category_tags.category_id`` and ``watchlist.category_id``: int4 -> bigint,

@@ -87,8 +87,8 @@ def _seed_rule_chain(db: _Savepointed) -> dict:
     gate = _one(db, "INSERT INTO gate_safety_strategy (name) VALUES ('TD15 gate') RETURNING gate_safety_strategy_id")[0]
     opp = _one(db, "INSERT INTO strategy_opportunity (name, strategy_structure_id, default_gate_safety_strategy_id, scope_type) "
                    "VALUES ('TD15 opp', %s, %s, 'explicit_symbols') RETURNING strategy_opportunity_id", (struct, gate))[0]
-    inst = _one(db, "INSERT INTO strategy_instance (strategy_opportunity_id, account_id, opened_at, label, notes) "
-                    "VALUES (%s, %s, now(), 'L', 'N') RETURNING strategy_instance_id", (opp, ACCOUNT))[0]
+    inst = _one(db, "INSERT INTO strategy_instance (strategy_opportunity_id, account_id, opened_at, label) "
+                    "VALUES (%s, %s, now(), 'L') RETURNING strategy_instance_id", (opp, ACCOUNT))[0]
     alloc = _one(db, "INSERT INTO strategy_allocation (name, gate_safety_strategy_id, max_positions, max_bp_pct) "
                      "VALUES ('TD15 alloc', %s, 3, 20) RETURNING strategy_allocation_id", (gate,))[0]
     return {"tpl": tpl, "struct": struct, "gate": gate, "opp": opp, "inst": inst, "alloc": alloc}
@@ -118,8 +118,10 @@ def test_watchlist_re_add_keeps_category_and_label_in_postgres(db) -> None:
 
 def test_strategy_patches_in_postgres(db) -> None:
     ids = _seed_rule_chain(db)
-    row = strategy_instance.patch_instance(db, ids["inst"], {"label": "Roll A", "notes": None})
-    assert row["label"] == "Roll A" and row["notes"] is None
+    row = strategy_instance.patch_instance(db, ids["inst"], {"label": "Roll A"})
+    assert row["label"] == "Roll A" and "notes" not in row
+    row = strategy_instance.patch_instance(db, ids["inst"], {"label": None})
+    assert row["label"] is None
 
     row = allocation_write.patch_allocation(db, ids["alloc"], {"allocation_limits": {"max_bp_pct": 25}, "strategy_opportunity_ids": [ids["opp"]]})
     assert row["max_positions"] == 3 and row["max_bp_pct"] == 25.0 and row["strategy_opportunity_ids"] == [ids["opp"]]
@@ -163,10 +165,10 @@ def test_plan_patch_and_strict_delete_in_postgres(db) -> None:
 
 def test_review_patch_in_postgres(db) -> None:
     ids = _seed_rule_chain(db)
-    row = trade_review.patch_review(db, ids["inst"], {"tags_added": ["early exit"], "note": "First."})
-    assert row["tags_added"] == ["early exit"] and row["note"] == "First." and row["reviewed"] is False
-    row = trade_review.patch_review(db, ids["inst"], {"reviewed": True, "note": None})
-    assert row["tags_added"] == ["early exit"] and row["note"] is None and row["reviewed"] is True
+    row = trade_review.patch_review(db, ids["inst"], {"tags_added": ["early exit"]})
+    assert row["tags_added"] == ["early exit"] and "note" not in row and row["reviewed"] is False
+    row = trade_review.patch_review(db, ids["inst"], {"reviewed": True})
+    assert row["tags_added"] == ["early exit"] and row["reviewed"] is True
     with pytest.raises(WriteNotFound):
         trade_review.patch_review(db, 2_000_000_000, {"reviewed": True})
 

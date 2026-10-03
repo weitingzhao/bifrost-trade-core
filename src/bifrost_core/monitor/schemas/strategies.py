@@ -81,13 +81,12 @@ class StrategyInstanceCreateBody(BaseModel):
     account_id: str = Field(..., min_length=1, description="Account ID")
     opened_at: str = Field(..., description="Opened at (ISO 8601 or Unix timestamp string)")
     label: Optional[str] = Field(None, description="Optional label")
-    notes: Optional[str] = Field(None, description="Optional notes")
+    # No notes since core 0.43.0 (TD-73): a trade's notes live in the Research journal.
 
 
 class StrategyInstanceUpdateBody(BaseModel):
-    """Request body for PATCH strategy instance; label, notes, created_at, opened_at optional."""
+    """Request body for PATCH strategy instance; label, created_at, opened_at optional (no notes since 0.43.0)."""
 
     label: Optional[str] = None
-    notes: Optional[str] = None
     created_at: Optional[str] = None
     opened_at: Optional[str] = None

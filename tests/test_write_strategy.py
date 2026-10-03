@@ -82,7 +82,7 @@ class Case:
 
 CASES = [
     Case("instance", strategy_instance.patch_instance, strategy_instance, "get_instance_by_id",
-         "UPDATE strategy_instance", {"label": "Roll A"}, "notes", "opened_at"),
+         "UPDATE strategy_instance", {"opened_at": "2026-09-01T14:30:00Z"}, "label", "opened_at"),
     Case("allocation", allocation_write.patch_allocation, strategy_reader, "get_allocation_by_id",
          "UPDATE strategy_allocation", {"name": "Core book"}, "gate_safety_strategy_id", "name"),
     Case("opportunity", opportunity_write.patch_opportunity, strategy_reader, "get_opportunity_by_id",
@@ -426,7 +426,6 @@ _REVIEW_ROW = {
     "strategy_instance_id": 41,
     "tags_added": '["early exit"]',
     "tags_dropped": "[]",
-    "note": None,
     "reviewed_at": None,
     "created_at": None,
     "updated_at": None,
@@ -435,13 +434,13 @@ _REVIEW_ROW = {
 
 def test_review_patch_upserts_only_the_sent_fields_and_returns_the_row() -> None:
     conn = FakeConn([("FROM strategy_instance", Reply(one=(1,))), ("INSERT INTO trade_review", Reply(one=_REVIEW_ROW))])
-    row = trade_review.patch_review(conn, 41, {"note": None, "reviewed": True})
+    row = trade_review.patch_review(conn, 41, {"reviewed": True})
     assert row["tags_added"] == ["early exit"] and row["reviewed"] is False
     sql, params = conn.statement("INSERT INTO trade_review")
-    assert "note = EXCLUDED.note" in sql  # null clears (save_review keeps it)
     assert "reviewed_at = CASE" in sql
     assert "tags_added" not in sql.split("DO UPDATE SET")[1].split("RETURNING")[0]
-    assert params["note"] is None and params["reviewed"] is True
+    assert "note" not in sql and "note" not in params  # TD-73: the column is dropped after 0.43.0
+    assert params["reviewed"] is True
 
 
 def test_review_patch_rules() -> None:
@@ -453,6 +452,10 @@ def test_review_patch_rules() -> None:
         trade_review.patch_review(FakeConn(), 41, {"reviewed": None})
     with pytest.raises(WriteInvalid, match="Unknown review field"):
         trade_review.patch_review(FakeConn(), 41, {"score": 3})
+    # TD-73 (core 0.43.0): note is refused with where notes live now, null or not.
+    for value in ("x", None):
+        with pytest.raises(WriteInvalid, match="Research journal"):
+            trade_review.patch_review(FakeConn(), 41, {"note": value, "reviewed": True})
     conn = FakeConn([("FROM strategy_instance", Reply(one=None))])
     with pytest.raises(WriteNotFound, match="No trade 41"):
         trade_review.patch_review(conn, 41, {"reviewed": True})

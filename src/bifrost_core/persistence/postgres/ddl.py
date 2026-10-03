@@ -527,6 +527,8 @@ def _ensure_tables(conn, log=None, log_table=None) -> None:
             )
             """
         )
+        # Not created, never added back (core 0.43.0, TD-43 / TD-73): strategy_instance.notes,
+        # strategy_plan.filled_at, trade_review.note -- dropped by an Owner db-step, not here.
         _log_table(
             "strategy_instance", "Strategy instance (a trade under an opportunity, one account)"
         )
@@ -538,7 +540,6 @@ def _ensure_tables(conn, log=None, log_table=None) -> None:
                 account_id text NOT NULL,
                 opened_at timestamptz NOT NULL,
                 label text,
-                notes text,
                 created_at timestamptz NOT NULL DEFAULT now(),
                 updated_at timestamptz NOT NULL DEFAULT now()
             )
@@ -580,7 +581,6 @@ def _ensure_tables(conn, log=None, log_table=None) -> None:
                                                     CHECK (status IN ('draft', 'intended', 'filled', 'cancelled')),
                 expires_at              timestamptz,
                 intended_at             timestamptz,
-                filled_at               timestamptz,
                 cancelled_at            timestamptz,
                 strategy_instance_id    bigint      REFERENCES strategy_instance(strategy_instance_id) ON DELETE RESTRICT,
                 parent_strategy_plan_id bigint      REFERENCES strategy_plan(strategy_plan_id) ON DELETE SET NULL,
@@ -614,7 +614,6 @@ def _ensure_tables(conn, log=None, log_table=None) -> None:
                                                  REFERENCES strategy_instance(strategy_instance_id) ON DELETE RESTRICT,
                 tags_added           jsonb       NOT NULL DEFAULT '[]'::jsonb,
                 tags_dropped         jsonb       NOT NULL DEFAULT '[]'::jsonb,
-                note                 text,
                 reviewed_at          timestamptz,
                 created_at           timestamptz NOT NULL DEFAULT now(),
                 updated_at           timestamptz NOT NULL DEFAULT now()

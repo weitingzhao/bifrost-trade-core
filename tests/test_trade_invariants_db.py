@@ -160,7 +160,9 @@ def test_a_filled_plan_reads_its_instance_open_and_keeps_its_instance(db, monkey
     row = strategy_plan.get_plan(CFG, plan)
     assert row["status"] == "filled" and row["strategy_instance_id"] == inst
     assert row["filled_at"] == OPENED
-    assert _one(db, "SELECT filled_at FROM strategy_plan WHERE strategy_plan_id = %s", (plan,)) == (None,)
+    # Not stored at all since core 0.43.0: a fresh schema has no such column (TD-43).
+    assert _one(db, "SELECT count(*) FROM information_schema.columns WHERE table_schema = 'public' "
+                    "AND table_name = 'strategy_plan' AND column_name = 'filled_at'") == (0,)
     # Moving the instance's open moves the plan's fill time: one stored value, not two.
     moved = datetime(2026, 9, 2, 15, 0, tzinfo=timezone.utc)
     strategy_instance.patch_instance(CFG, inst, {"opened_at": moved.isoformat()})

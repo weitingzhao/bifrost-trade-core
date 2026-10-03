@@ -27,6 +27,7 @@ from bifrost_core.monitor.reader.errors import (
     ReadFailed,
     WriteConflict,
     WriteFailed,
+    WriteInvalid,
     WriteNotFound,
 )
 
@@ -97,7 +98,7 @@ def list_instances(
                     SELECT sid, COUNT(DISTINCT account_executions_id) AS n FROM linked GROUP BY sid
                 )
                 SELECT si.strategy_instance_id, si.strategy_opportunity_id, si.account_id,
-                       si.opened_at, si.label, si.notes, si.created_at, si.updated_at,
+                       si.opened_at, si.label, si.created_at, si.updated_at,
                        so.name AS strategy_opportunity_name,
                        ss.strategy_structure_id, ss.name AS strategy_structure_name,
                        COALESCE(c.n, 0) AS executions_count
@@ -140,7 +141,7 @@ def get_instance_by_id(conn: Any, strategy_instance_id: int) -> Optional[Dict[st
             cur.execute(
                 """
                 SELECT si.strategy_instance_id, si.strategy_opportunity_id, si.account_id,
-                       si.opened_at, si.label, si.notes, si.created_at, si.updated_at,
+                       si.opened_at, si.label, si.created_at, si.updated_at,
                        so.name AS strategy_opportunity_name,
                        ss.strategy_structure_id, ss.name AS strategy_structure_name
                 FROM strategy_instance si
@@ -170,9 +171,10 @@ def create_instance(
     account_id: str,
     opened_at: Any,
     label: Optional[str] = None,
-    notes: Optional[str] = None,
 ) -> Optional[int]:
-    """Insert one strategy_instance. opened_at: datetime or Unix timestamp. Returns strategy_instance_id or None."""
+    """Insert one strategy_instance. opened_at: datetime or Unix timestamp. Returns strategy_instance_id or None.
+
+    No ``notes`` since core 0.43.0 (TD-73): a trade's notes live in the Research journal."""
     if conn is None:
         return None
     account_id = (account_id or "").strip()
@@ -191,11 +193,11 @@ def create_instance(
         with conn.cursor() as cur:
             cur.execute(
                 """
-                INSERT INTO strategy_instance (strategy_opportunity_id, account_id, opened_at, label, notes, updated_at)
-                VALUES (%s, %s, %s, %s, %s, now())
+                INSERT INTO strategy_instance (strategy_opportunity_id, account_id, opened_at, label, updated_at)
+                VALUES (%s, %s, %s, %s, now())
                 RETURNING strategy_instance_id
                 """,
-                (strategy_opportunity_id, account_id, opened_dt, label or None, notes or None),
+                (strategy_opportunity_id, account_id, opened_dt, label or None),
             )
             row = cur.fetchone()
         conn.commit()
@@ -237,11 +239,10 @@ def update_instance(
     conn: Any,
     strategy_instance_id: int,
     label: Optional[str] = None,
-    notes: Optional[str] = None,
     created_at: Optional[Any] = None,
     opened_at: Optional[Any] = None,
 ) -> bool:
-    """Update label, notes, created_at, and/or opened_at of a strategy instance. created_at/opened_at: datetime or Unix timestamp. Returns True if a row was updated."""
+    """Update label, created_at, and/or opened_at of a strategy instance. created_at/opened_at: datetime or Unix timestamp. Returns True if a row was updated."""
     if conn is None:
         return False
     updates = []
@@ -249,9 +250,6 @@ def update_instance(
     if label is not None:
         updates.append("label = %s")
         values.append(label.strip() if isinstance(label, str) else label)
-    if notes is not None:
-        updates.append("notes = %s")
-        values.append(notes.strip() if isinstance(notes, str) else notes)
     if created_at is not None:
         if isinstance(created_at, (int, float)):
             try:
@@ -359,22 +357,31 @@ def get_instance_open_option_legs(conn: Any, strategy_instance_id: int) -> List[
 
 # --- TD-15 writers (core 0.33.0): return the row / raise Write* --------------------
 
-INSTANCE_PATCHABLE = ("label", "notes", "opened_at", "created_at")
+# No ``notes`` since core 0.43.0 (TD-73): a trade's notes live in the Research journal, and
+# the column is dropped after this release (infra db-steps 2026-10-03-td43-td73-drop-columns).
+# A ``notes`` key is refused (WriteInvalid) rather than dropped.
+INSTANCE_PATCHABLE = ("label", "opened_at", "created_at")
+
+NOTES_RETIRED = (
+    "notes was removed in core 0.43.0 (TD-73): a trade's notes live in the Research journal "
+    "(POST /research/journal/notes with a ref of type 'inst')."
+)
 
 
 def patch_instance(conn_or_config: Any, strategy_instance_id: int, fields: Dict[str, Any]) -> Dict[str, Any]:
     """Change the fields the client sent; return the row as ``get_instance_by_id`` reads it.
 
-    ``label`` / ``notes``: nullable text -- null clears, blank is refused.
+    ``label``: nullable text -- null clears, blank is refused.
     ``opened_at`` / ``created_at``: NOT NULL timestamps (datetime, Unix seconds or ISO 8601).
     Raises WriteInvalid (empty, unknown key, bad value), WriteNotFound, WriteFailed.
     """
     what = f"trade {strategy_instance_id}"
+    if isinstance(fields, dict) and "notes" in fields:
+        raise WriteInvalid(NOTES_RETIRED)
     fields = ws.check_fields(fields, INSTANCE_PATCHABLE, "trade")
     columns: Dict[str, Any] = {}
-    for name in ("label", "notes"):
-        if name in fields:
-            columns[name] = ws.text(fields[name], name, nullable=True)
+    if "label" in fields:
+        columns["label"] = ws.text(fields["label"], "label", nullable=True)
     for name in ("opened_at", "created_at"):
         if name in fields:
             columns[name] = ws.timestamp(fields[name], name, nullable=False)

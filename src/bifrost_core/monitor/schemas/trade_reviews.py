@@ -16,10 +16,10 @@ from pydantic import BaseModel, Field
 class TradeReviewBody(BaseModel):
     """Replace the review's tags; `reviewed` true stamps it done, false reopens it.
 
-    A field left out keeps what is stored.
+    A field left out keeps what is stored. No ``note`` since core 0.43.0 (TD-73): a trade's
+    notes live in the Research journal.
     """
 
     tags_added: Optional[List[str]] = Field(None, description="Tags the rules missed, as the trader wrote them")
     tags_dropped: Optional[List[str]] = Field(None, description="Keys of derived tags that do not apply")
-    note: Optional[str] = Field(None, max_length=4000)
     reviewed: Optional[bool] = Field(None, description="true stamps reviewed_at; false clears it")

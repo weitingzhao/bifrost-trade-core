@@ -134,7 +134,8 @@ it, plans that were filled point at it, and Review keeps one verdict per instanc
 | `strategy_opportunity_id` | NOT NULL, FK → `strategy_opportunity` **ON DELETE RESTRICT** (an opportunity with instances cannot be deleted) |
 | `account_id` | IB account. An execution can be allocated to the instance only when its account matches |
 | `opened_at` | When the position was opened (NOT NULL). A filled plan's `filled_at` reads as this value (not stored since 0.41.0) |
-| `label` / `notes` | Free text |
+| `label` | Free text |
+| ~~`notes`~~ | **Dropped (TD-73).** Not read or written since 0.43.0 and not created on a fresh database; existing databases lose it in the Owner db-step after that release (infra `scripts/release/db-steps.d/2026-10-03-td43-td73-drop-columns.md`). A trade's notes live in the Research journal (`journal.note`, ref `inst`) |
 | `created_at` / `updated_at` | Row timestamps |
 
 Indexes: `(strategy_opportunity_id)`, `(account_id, opened_at)`. Nothing in the schema limits an
@@ -197,7 +198,7 @@ it exists. Orders are placed in TWS.
 | `status` | `draft` → `intended` → `filled`, or `cancelled` from either of the first two. No delete |
 | `expires_at` | **`expired` is not a stored status**: `status='intended'` with `expires_at < now()` reads `effective_status='expired'` |
 | `strategy_instance_id` | The instance the plan turned into, FK ON DELETE RESTRICT. CHECK `strategy_plan_filled_instance_ck`: `(status = 'filled') = (strategy_instance_id IS NOT NULL)` — `link_fill` sets both |
-| `filled_at` | **Not written since 0.41.0** (TD-43): reads return the linked instance's `opened_at` (`LEFT JOIN strategy_instance`), so moving the open moves it. The column is dropped in the next DDL wave |
+| `filled_at` | **Not a column (TD-43).** Reads return the linked instance's `opened_at` (`LEFT JOIN strategy_instance`; only a filled plan has one, so every other plan reads null) and moving the open moves it. Not written since 0.41.0, not named at all since 0.43.0 and not created on a fresh database; existing databases lose the column in the Owner db-step after 0.43.0 (infra `scripts/release/db-steps.d/2026-10-03-td43-td73-drop-columns.md`) |
 | `parent_strategy_plan_id` | The plan this one rolls. An intended plan is frozen — roll it rather than edit it |
 
 State machine and reads: [`strategy_plan.py`](../src/bifrost_core/monitor/reader/strategy_plan.py).
@@ -218,7 +219,7 @@ stamp and keeps the tags.
 | `strategy_instance_id` | UNIQUE, FK → `strategy_instance` ON DELETE RESTRICT (CASCADE before 0.41.0: a review is never deleted with its instance) |
 | `tags_added` | Tags the rules missed, as the trader wrote them (jsonb string array) |
 | `tags_dropped` | Keys of derived tags the trader says do not apply (jsonb string array) |
-| `note` | Free text |
+| ~~`note`~~ | **Dropped (TD-73).** Not read or written since 0.43.0 (a `note` key is refused) and not created on a fresh database; existing databases lose it in the Owner db-step after that release. A trade's notes live in the Research journal |
 | `reviewed_at` | Stamped on confirm (a second confirm keeps the first stamp); NULL = awaiting |
 
 Reads and the upsert: [`trade_review.py`](../src/bifrost_core/monitor/reader/trade_review.py).
@@ -286,7 +287,7 @@ its scope. Reads guard on `to_regclass`, so an api ahead of the DDL lists none.
 
 Reads and writes: [`saved_search.py`](../src/bifrost_core/monitor/reader/saved_search.py).
 
-## §6 Schema changelog (Wave 1–14)
+## §6 Schema changelog (Wave 1–15)
 
 | Wave | Core version | Change |
 |------|--------------|--------|
@@ -324,6 +325,7 @@ Reads and writes: [`saved_search.py`](../src/bifrost_core/monitor/reader/saved_s
 | — | 0.40.1 | No DDL, no behaviour change. The execution view builders (`_EXEC_CANONICAL_COLS`, `_env_attributed`, `_create_brokerage_views`) moved to `persistence/postgres/brokerage_views.py`; `brokerage_ddl` re-exports them (code-health: files over 800 lines back to 4; generated SQL byte-identical). Tests: the IB Gateway Redis key list is `tests/contracts/redis_ib_keys.json`, shared byte-for-byte with bifrost-platform-plugin (TD-31); `scripts/test_db.sh --sidecar` runs the db tests against a CI postgres sidecar, accepted only on loopback with the `bifrost.throwaway=on` marker (TD-48). Affected downstreams: none |
 | Wave 14 | 0.41.0 | **DDL (TD-43 / TD-56 / TD-71), `migrate_wave14_trade_invariants()` in [`wave14_migrations.py`](../src/bifrost_core/persistence/postgres/wave14_migrations.py), run by `_ensure_tables`; idempotent, catalog-guarded (a non-owner on a converged DB changes nothing).** `strategy_plan.strategy_instance_id` FK SET NULL → **RESTRICT**; CHECK `strategy_plan_filled_instance_ck` `(status = 'filled') = (strategy_instance_id IS NOT NULL)`; `trade_review.strategy_instance_id` FK CASCADE → **RESTRICT**; `preference_position_category_tags.category_id` and `watchlist.category_id` int4 → **int8**; UNIQUE `preference_position_categories_name_uq (name)`; CHECK `strategy_opportunity_scope_type_ck` (NULL · watchlist_stk · explicit_symbols). A CHECK is added NOT VALID then validated — rows that break it leave it NOT VALID with a WARNING and the next refresh retries; the UNIQUE is skipped with a WARNING while a name is duplicated. 0 violating rows on DEV / STG / PROD (read 2026-10-03). The 3 orphan `Option Pool` symbol-order rows per env are deleted by an Owner step (infra `scripts/release/db-steps.d/`), not here. `strategy_plan.filled_at` is no longer written (reads join the instance's `opened_at`); the column is dropped next wave. Code: `instance_state` (derived `state` / `closed_on` on `list_instances`); `delete_instance_strict` refuses while a plan was filled by the instance or it has a review (409); category rename / delete carry `preference_market_streams_symbol_order` in the same transaction, a taken name is 409 (WriteConflict), `Uncategorized` reserved (400); `scope_type` validated (Literal `ScopeType`, `normalize_scope_type`), `watchlist_stk` needs ≥ 1 symbol; legs: `AbstractLeg` (= `TemplateLeg` = `StructureLeg`) validates structure writes, `abstract_leg_to_plan_leg` (TD-44, no rename). Affected downstreams: **api** 0.6.12 (`state` / `closed_on` on `InstanceRow`; category rows drop `id`), **frontend** (open / closed from `state`), **research** MCP `trade.strategy.instances` (reads `state`) |
 | — | 0.42.0 | No DDL. **Naming program R0 + R1 (decision pack 2026-10-03, D1–D11).** **R0, public response change (D9, TD-19):** the old keys go — `trade_count` from the performance summary, every `realized_by_*` row and the calendar rows (`fill_count` stays), `calendar_by_sec_type` OPT pair rows keep only `pair_count`, and the win-rate rows lose `total_instances` (`total_trades` stays). The writers' user-facing reasons say trade and fill instead of strategy instance / execution (`No trade 41.`, `3 fills are attributed to this trade.`, `This fill is split across 2 trades; send fill_splits: [] …`). **R1, additive:** new `monitor.reader.trade_names`; every reader row that carries an instance key now carries the trade name beside it with the same value — `trade_id` (= `strategy_instance_id`), `trade_label`, `trade_opened_at_epoch`, `fill_splits: [{trade_id, quantity, strategy_opportunity_id?, trade_label?}]` beside `instance_allocations`, `realized_by_trade` beside `realized_by_strategy_instance`, and on `trade_review` rows `tags_added_json` / `tags_dropped_json` beside `tags_added` / `tags_dropped`; strict deletes answer `trade_id` too. Writers (`insert_one_execution`, `update_one_execution`, `patch_execution`, `patch_review`, `PlanLinkFillBody`) take the new names as well; when both are sent the new one wins. IB's TradeID is not read by any Trade-side SQL, so `trade_id` in a reader row is always the Trade. New `monitor.reader.data_probe` + `StatusReader.get_data_probe()` (D8-A): activity per source, a sample count and the selective-clone groups (seed + FK closure from `pg_constraint`) so the Ops platform stops naming Trade tables. The tables keep their names until R3. Affected downstreams: **api** 0.7.0 (new routes and names, floor `bifrost-core>=0.42.0`); frontend — none required (it reads `fill_count` / `total_trades` since fe a25c2e8d); worker / Research / platform — none |
+| Wave 15 | 0.43.0 | **Column drops (TD-43 option B step 3/4, TD-73 option A; Owner-approved 2026-10-03).** `strategy_plan.filled_at`, `strategy_instance.notes` and `trade_review.note` leave `_ensure_tables` (a fresh database never has them) and core stops naming them: `filled_at` stays in plan reads as the instance's `opened_at` (unchanged since 0.41.0); `create_instance` / `update_instance` / `StatusReader.create_strategy_instance` / `update_strategy_instance` lose the `notes` parameter, `INSTANCE_PATCHABLE` loses `notes`, `REVIEW_PATCHABLE` and `_COLUMNS` lose `note`; `patch_instance` / `patch_review` / `save_review` refuse a `notes` / `note` key (WriteInvalid, naming the Research journal) rather than drop it; `StrategyInstanceCreateBody` / `StrategyInstanceUpdateBody` / `TradeReviewBody` lose the fields. Works with the columns present or absent, so the release goes first; **the DROP is not in db-init** — it is an Owner db-step run after the deliver (infra `scripts/release/db-steps.d/2026-10-03-td43-td73-drop-columns.md`: one transaction, refuses while any value is non-null; 0 non-null on DEV / STG / PROD, read 2026-10-03). Nothing in db-init adds them back (tested). Rollback after the drop: `ADD COLUMN` (and backfill `filled_at` from the instance's `opened_at` for filled plans), only needed below core 0.41.0. Affected downstreams: **api** 0.7.1 (floor `bifrost-core>=0.43.0`: `notes` / `note` leave the request bodies and `TradeRow`); frontend — none (reads `filled_at` from the API, sends no `notes` / `note`); worker / Research / platform — none |
 
 
 ## Brokerage tables
@@ -596,7 +598,7 @@ The one public view, `v_us_equity_universe`, is `market.v_us_equity_universe` (`
 | `account_id` | text | no | IB account the instance trades in; allocation rows must match it |
 | `opened_at` | timestamptz | no | when the position was opened; a filled `strategy_plan.filled_at` is this value |
 | `label` | text | yes |  |
-| `notes` | text | yes |  |
+| `notes` | text | yes | dropped after core 0.43.0 (TD-73); not on a fresh database |
 | `created_at` | timestamptz | no | `now()` |
 | `updated_at` | timestamptz | no | `now()` |
 
@@ -641,7 +643,7 @@ The one public view, `v_us_equity_universe`, is `market.v_us_equity_universe` (`
 | `status` | text | no | `'draft'`; CHECK ∈ draft · intended · filled · cancelled; `expired` is derived, never stored (see §strategy_plan) |
 | `expires_at` | timestamptz | yes |  |
 | `intended_at` | timestamptz | yes |  |
-| `filled_at` | timestamptz | yes | not written since 0.41.0 (reads take the instance's `opened_at`); dropped next wave |
+| `filled_at` | timestamptz | yes | not written since 0.41.0, not named since 0.43.0 (reads take the instance's `opened_at`); dropped after core 0.43.0 (TD-43); not on a fresh database |
 | `cancelled_at` | timestamptz | yes |  |
 | `strategy_instance_id` | int8 | yes | FK → `strategy_instance.strategy_instance_id` ON DELETE RESTRICT; CHECK `strategy_plan_filled_instance_ck` (set exactly when `status = 'filled'`) |
 | `parent_strategy_plan_id` | int8 | yes | FK → `strategy_plan.strategy_plan_id` ON DELETE SET NULL |
@@ -696,7 +698,7 @@ The one public view, `v_us_equity_universe`, is `market.v_us_equity_universe` (`
 | `strategy_instance_id` | int8 | no | FK → `strategy_instance.strategy_instance_id` ON DELETE RESTRICT; UNIQUE |
 | `tags_added` | jsonb | no | `'[]'` |
 | `tags_dropped` | jsonb | no | `'[]'` |
-| `note` | text | yes |  |
+| `note` | text | yes | dropped after core 0.43.0 (TD-73); not on a fresh database |
 | `reviewed_at` | timestamptz | yes | NULL = awaiting review |
 | `created_at` | timestamptz | no | `now()` |
 | `updated_at` | timestamptz | no | `now()` |

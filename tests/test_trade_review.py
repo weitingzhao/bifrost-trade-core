@@ -27,7 +27,6 @@ def test_row_out_decodes_json_and_says_whether_it_is_reviewed() -> None:
             "strategy_instance_id": 7,
             "tags_added": '["late exit"]',
             "tags_dropped": ["held_to_expiry"],
-            "note": None,
             "reviewed_at": datetime(2026, 9, 1, tzinfo=timezone.utc),
         }
     )
