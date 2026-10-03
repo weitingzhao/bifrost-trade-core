@@ -107,6 +107,22 @@ Every column is in the [appendix](#appendix--public-columns-bifrost_dev-2026-10-
 | `strategy_instance` | one traded instance of an opportunity in one account — see below |
 | `strategy_plan` | `legs_json`, `source_json`; structured trade plans — **advisory, no execution consumer (D10)** |
 
+**Legs and `params_json` (TD-44, core 0.41.0).** There are two kinds of leg, not three copies of one:
+`strategy_template.legs_json` and `strategy_structure.legs_json` hold **abstract slots**
+(`{role: underlying|call|put, direction: long|short, option_right: ''|C|P, quantity ≥ 1, quantity_default?, sort_order}`;
+a structure leg also carries `strike` / `expiration`, never filled on any env and deprecated), validated by
+`gate_params.AbstractLeg` on every write; `strategy_plan.legs_json` holds **concrete contracts** (`PlanLeg`, below).
+`gate_params.abstract_leg_to_plan_leg(leg, symbol=, expiry=, strike=)` is the one mapping (long → buy, short → sell,
+option_right → right, quantity → ratio; the option `contract_key` in the positions format). Two columns are named
+`params_json` and mean different things: `strategy_template.params_json` is an **array of parameter definitions**
+(`{meta_key, display_label, param_kind, default_value_text, sort_order}`, served by the API as `meta_params`);
+`gate_safety_strategy.params_json` is **one GateParams object**. No column is renamed (Owner 2026-10-03).
+
+**`strategy_opportunity.scope_type` (TD-71, core 0.41.0).** `watchlist_stk` · `explicit_symbols` · NULL, held by
+CHECK `strategy_opportunity_scope_type_ck` and by core (`''` is stored as NULL; anything else is 400).
+`symbols_json` is what the rule covers either way — `scope_type` only says where the symbols came from — and
+`watchlist_stk` needs at least one symbol (core refuses an empty one).
+
 ### `strategy_instance`
 
 One position the desk actually opened under an opportunity, in one IB account. Executions are attributed to
@@ -117,17 +133,27 @@ it, plans that were filled point at it, and Review keeps one verdict per instanc
 | `strategy_instance_id` | PK |
 | `strategy_opportunity_id` | NOT NULL, FK → `strategy_opportunity` **ON DELETE RESTRICT** (an opportunity with instances cannot be deleted) |
 | `account_id` | IB account. An execution can be allocated to the instance only when its account matches |
-| `opened_at` | When the position was opened (NOT NULL). A filled plan's `filled_at` is this value |
+| `opened_at` | When the position was opened (NOT NULL). A filled plan's `filled_at` reads as this value (not stored since 0.41.0) |
 | `label` / `notes` | Free text |
 | `created_at` / `updated_at` | Row timestamps |
 
 Indexes: `(strategy_opportunity_id)`, `(account_id, opened_at)`. Nothing in the schema limits an
-opportunity/account pair to one open instance.
+opportunity/account pair to one open instance, and nothing should: PROD has pairs with two open at once (rolls,
+parallel trades).
+
+**State is derived, not stored (TD-43, core 0.41.0).** `list_instances` (`GET /strategies/instances`) adds `state`
+and `closed_on`, computed by [`instance_state.py`](../src/bifrost_core/monitor/reader/instance_state.py) from the
+instance's OPT fills (whole fills their quantity, split fills the instance's share; grouped per `contract_key`):
+`no_fills` (no option fill attributed), `open` (a leg open and not past expiry), `expired` (every open leg past its
+expiry with no closing fill — counted as closed, `closed_on` = the last expiry), `closed` (every leg flat,
+`closed_on` = the last day a leg went flat). One rule for Rules, Review, Risk › Limits and the research MCP.
 
 Referenced by: `strategy_instance_execution (strategy_instance_id, account_id)` (ON DELETE RESTRICT; the
 UNIQUE `(strategy_instance_id, account_id)` constraint `strategy_instance_id_account_uq` exists for it),
-`strategy_plan.strategy_instance_id` (SET NULL), `trade_review.strategy_instance_id` (CASCADE, UNIQUE), and the
-frozen `account_execution_instance_allocation.strategy_instance_id` (ON DELETE RESTRICT).
+`strategy_plan.strategy_instance_id` (**RESTRICT** since 0.41.0; SET NULL before), `trade_review.strategy_instance_id`
+(**RESTRICT** since 0.41.0, CASCADE before; UNIQUE), and the frozen `account_execution_instance_allocation.strategy_instance_id`
+(ON DELETE RESTRICT). So an instance a plan was filled by, or one with a review, cannot be deleted
+(`delete_instance_strict` answers 409 naming which).
 
 ### `strategy_instance_execution` (core **0.37.0**)
 
@@ -170,7 +196,8 @@ it exists. Orders are placed in TWS.
 | `source_kind` / `source_ref` / `source_json` | Where the plan came from, and the provenance chain as it stood: `[{kind, text, ref?, to?}]` |
 | `status` | `draft` → `intended` → `filled`, or `cancelled` from either of the first two. No delete |
 | `expires_at` | **`expired` is not a stored status**: `status='intended'` with `expires_at < now()` reads `effective_status='expired'` |
-| `strategy_instance_id` | The instance the plan turned into; `filled_at` is that instance's `opened_at` |
+| `strategy_instance_id` | The instance the plan turned into, FK ON DELETE RESTRICT. CHECK `strategy_plan_filled_instance_ck`: `(status = 'filled') = (strategy_instance_id IS NOT NULL)` — `link_fill` sets both |
+| `filled_at` | **Not written since 0.41.0** (TD-43): reads return the linked instance's `opened_at` (`LEFT JOIN strategy_instance`), so moving the open moves it. The column is dropped in the next DDL wave |
 | `parent_strategy_plan_id` | The plan this one rolls. An intended plan is frozen — roll it rather than edit it |
 
 State machine and reads: [`strategy_plan.py`](../src/bifrost_core/monitor/reader/strategy_plan.py).
@@ -188,7 +215,7 @@ stamp and keeps the tags.
 
 | Column | Meaning |
 |--------|---------|
-| `strategy_instance_id` | UNIQUE, FK → `strategy_instance` ON DELETE CASCADE |
+| `strategy_instance_id` | UNIQUE, FK → `strategy_instance` ON DELETE RESTRICT (CASCADE before 0.41.0: a review is never deleted with its instance) |
 | `tags_added` | Tags the rules missed, as the trader wrote them (jsonb string array) |
 | `tags_dropped` | Keys of derived tags the trader says do not apply (jsonb string array) |
 | `note` | Free text |
@@ -259,7 +286,7 @@ its scope. Reads guard on `to_regclass`, so an api ahead of the DDL lists none.
 
 Reads and writes: [`saved_search.py`](../src/bifrost_core/monitor/reader/saved_search.py).
 
-## §6 Schema changelog (Wave 1–13)
+## §6 Schema changelog (Wave 1–14)
 
 | Wave | Core version | Change |
 |------|--------------|--------|
@@ -295,6 +322,7 @@ Reads and writes: [`saved_search.py`](../src/bifrost_core/monitor/reader/saved_s
 | — | 0.39.0 | No DDL, no Redis key or value change. **Daemon names (TD-75), Python identifiers only:** `redis_health_keys.BIFROST_HEALTH_DAEMON_STRATEGY_TRADING` (value `bifrost:health:daemon_strategy_trading`, unchanged — a live Redis key) replaces `BIFROST_HEALTH_DAEMON_TRADING_ENGINE`, and `postgres_sink.TradingDaemonSink` replaces `PostgreSQLSink`; both old names stay as aliases for this version only. Deleted (no reader in any repo): `BIFROST_OPS_TRADING_ENGINE_META` and `config.yaml_config.daemon_trading_console_stream_key` (with its `config.startup` re-export). **Flex range days (TD-74), public response change:** `get_ib_config` (settings reader and `StatusReader`) no longer reads or returns `flex_default_range_days` / `flex_init_range_days`; `ib_client_for_api` never output them, so no HTTP answer changes. The `settings` columns stay (see the `settings` table). Affected downstreams: api — none required (old names still import); worker — none required; Flex plugin — none (0.7.0 reads Golden Source) |
 | — | 0.40.0 | No DDL. **Keyset cursor for executions and cash transactions (TD-51), additive.** New `portfolio.reader.keyset` (opaque urlsafe-base64 JSON cursors, `InvalidCursor(ValueError)` for anything it did not issue) and `get_executions_page` / `get_transactions_page` (also on the monitor reader): the same filters, columns and order as `get_executions` / `get_transactions`, plus `cursor` in and `{"items", "next_cursor"}` out (`next_cursor` null on the last page; `limit + 1` is read to know). Executions key: `trade_date DESC NULLS LAST, exec_time DESC NULLS LAST, account_executions_id DESC` (the id is unique per view, so the key is total); the predicate treats a NULL cursor value as the last segment of its column and carries `exec_time` exactly (ISO with microseconds; the row's `time` epoch float cannot be compared). Transactions key: `ts DESC, account_transactions_id DESC`. **One order change:** `get_transactions` breaks `ts` ties by `account_transactions_id DESC` (before, Postgres returned tied rows in any order) and orders by the stored `ts`, not its epoch alias, so postgres_fdw now ships ORDER BY and LIMIT to Golden Source instead of pulling the whole table. Rows returned by `get_executions` / `get_transactions` are otherwise unchanged. Affected downstreams: **api** (0.6.9: `cursor` / `next_cursor` on GET /executions and /transactions, floor `bifrost-core>=0.40.0`), frontend / worker / Research (none) |
 | — | 0.40.1 | No DDL, no behaviour change. The execution view builders (`_EXEC_CANONICAL_COLS`, `_env_attributed`, `_create_brokerage_views`) moved to `persistence/postgres/brokerage_views.py`; `brokerage_ddl` re-exports them (code-health: files over 800 lines back to 4; generated SQL byte-identical). Tests: the IB Gateway Redis key list is `tests/contracts/redis_ib_keys.json`, shared byte-for-byte with bifrost-platform-plugin (TD-31); `scripts/test_db.sh --sidecar` runs the db tests against a CI postgres sidecar, accepted only on loopback with the `bifrost.throwaway=on` marker (TD-48). Affected downstreams: none |
+| Wave 14 | 0.41.0 | **DDL (TD-43 / TD-56 / TD-71), `migrate_wave14_trade_invariants()` in [`wave14_migrations.py`](../src/bifrost_core/persistence/postgres/wave14_migrations.py), run by `_ensure_tables`; idempotent, catalog-guarded (a non-owner on a converged DB changes nothing).** `strategy_plan.strategy_instance_id` FK SET NULL → **RESTRICT**; CHECK `strategy_plan_filled_instance_ck` `(status = 'filled') = (strategy_instance_id IS NOT NULL)`; `trade_review.strategy_instance_id` FK CASCADE → **RESTRICT**; `preference_position_category_tags.category_id` and `watchlist.category_id` int4 → **int8**; UNIQUE `preference_position_categories_name_uq (name)`; CHECK `strategy_opportunity_scope_type_ck` (NULL · watchlist_stk · explicit_symbols). A CHECK is added NOT VALID then validated — rows that break it leave it NOT VALID with a WARNING and the next refresh retries; the UNIQUE is skipped with a WARNING while a name is duplicated. 0 violating rows on DEV / STG / PROD (read 2026-10-03). The 3 orphan `Option Pool` symbol-order rows per env are deleted by an Owner step (infra `scripts/release/db-steps.d/`), not here. `strategy_plan.filled_at` is no longer written (reads join the instance's `opened_at`); the column is dropped next wave. Code: `instance_state` (derived `state` / `closed_on` on `list_instances`); `delete_instance_strict` refuses while a plan was filled by the instance or it has a review (409); category rename / delete carry `preference_market_streams_symbol_order` in the same transaction, a taken name is 409 (WriteConflict), `Uncategorized` reserved (400); `scope_type` validated (Literal `ScopeType`, `normalize_scope_type`), `watchlist_stk` needs ≥ 1 symbol; legs: `AbstractLeg` (= `TemplateLeg` = `StructureLeg`) validates structure writes, `abstract_leg_to_plan_leg` (TD-44, no rename). Affected downstreams: **api** 0.6.12 (`state` / `closed_on` on `InstanceRow`; category rows drop `id`), **frontend** (open / closed from `state`), **research** MCP `trade.strategy.instances` (reads `state`) |
 
 
 ## Brokerage tables
@@ -486,7 +514,7 @@ The one public view, `v_us_equity_universe`, is `market.v_us_equity_universe` (`
 
 | Column | Type | Null | Default / notes |
 |--------|------|------|-----------------|
-| `category_name` | text | no | PK (category_name, symbol); category by name, no FK |
+| `category_name` | text | no | PK (category_name, symbol); category by name, no FK — the name is UNIQUE and core carries a rename / delete to these rows in the same transaction (0.41.0); `Uncategorized` = positions without a category (a reserved category name) |
 | `symbol` | text | no | PK (category_name, symbol) |
 | `sort_order` | int4 | no | `0` |
 | `updated_at` | timestamptz | yes | `now()` |
@@ -496,7 +524,7 @@ The one public view, `v_us_equity_universe`, is `market.v_us_equity_universe` (`
 | Column | Type | Null | Default / notes |
 |--------|------|------|-----------------|
 | `id` | int8 | no | bigserial; PK; legacy name — not `<table>_id` |
-| `name` | text | no |  |
+| `name` | text | no | UNIQUE `preference_position_categories_name_uq` (0.41.0); `Uncategorized` reserved by core |
 | `description` | text | yes |  |
 | `sort_order` | int4 | yes |  |
 | `created_at` | timestamptz | yes | `now()` |
@@ -508,7 +536,7 @@ The one public view, `v_us_equity_universe`, is `market.v_us_equity_universe` (`
 |--------|------|------|-----------------|
 | `account_id` | text | no | PK (account_id, contract_key) |
 | `contract_key` | text | no | PK (account_id, contract_key); one category per (account, contract) |
-| `category_id` | int4 | no | FK → `preference_position_categories.id` ON DELETE CASCADE; int4 referencing a bigint PK |
+| `category_id` | int8 | no | FK → `preference_position_categories.id` ON DELETE CASCADE (int4 before 0.41.0) |
 | `created_at` | timestamptz | yes | `now()` |
 
 #### `preference_saved_search`
@@ -579,7 +607,7 @@ The one public view, `v_us_equity_universe`, is `market.v_us_equity_universe` (`
 | `name` | text | no |  |
 | `strategy_structure_id` | int8 | no | FK → `strategy_structure.strategy_structure_id` |
 | `default_gate_safety_strategy_id` | int8 | yes | FK → `gate_safety_strategy.gate_safety_strategy_id` |
-| `scope_type` | text | yes | free text, no CHECK |
+| `scope_type` | text | yes | CHECK `strategy_opportunity_scope_type_ck` ∈ watchlist_stk · explicit_symbols (0.41.0) |
 | `is_active` | bool | no | `true` |
 | `created_at` | timestamptz | no | `now()` |
 | `updated_at` | timestamptz | no | `now()` |
@@ -612,9 +640,9 @@ The one public view, `v_us_equity_universe`, is `market.v_us_equity_universe` (`
 | `status` | text | no | `'draft'`; CHECK ∈ draft · intended · filled · cancelled; `expired` is derived, never stored (see §strategy_plan) |
 | `expires_at` | timestamptz | yes |  |
 | `intended_at` | timestamptz | yes |  |
-| `filled_at` | timestamptz | yes |  |
+| `filled_at` | timestamptz | yes | not written since 0.41.0 (reads take the instance's `opened_at`); dropped next wave |
 | `cancelled_at` | timestamptz | yes |  |
-| `strategy_instance_id` | int8 | yes | FK → `strategy_instance.strategy_instance_id` ON DELETE SET NULL |
+| `strategy_instance_id` | int8 | yes | FK → `strategy_instance.strategy_instance_id` ON DELETE RESTRICT; CHECK `strategy_plan_filled_instance_ck` (set exactly when `status = 'filled'`) |
 | `parent_strategy_plan_id` | int8 | yes | FK → `strategy_plan.strategy_plan_id` ON DELETE SET NULL |
 | `created_at` | timestamptz | no | `now()` |
 | `updated_at` | timestamptz | no | `now()` |
@@ -664,7 +692,7 @@ The one public view, `v_us_equity_universe`, is `market.v_us_equity_universe` (`
 | Column | Type | Null | Default / notes |
 |--------|------|------|-----------------|
 | `trade_review_id` | int8 | no | bigserial; PK |
-| `strategy_instance_id` | int8 | no | FK → `strategy_instance.strategy_instance_id` ON DELETE CASCADE; UNIQUE |
+| `strategy_instance_id` | int8 | no | FK → `strategy_instance.strategy_instance_id` ON DELETE RESTRICT; UNIQUE |
 | `tags_added` | jsonb | no | `'[]'` |
 | `tags_dropped` | jsonb | no | `'[]'` |
 | `note` | text | yes |  |
@@ -685,5 +713,5 @@ The one public view, `v_us_equity_universe`, is `market.v_us_equity_universe` (`
 | `display_label` | text | yes |  |
 | `source` | text | yes | writer passes `'manual'` unless told otherwise |
 | `created_at` | timestamptz | yes | `now()` |
-| `category_id` | int4 | yes | FK → `preference_position_categories.id` ON DELETE SET NULL |
+| `category_id` | int8 | yes | FK → `preference_position_categories.id` ON DELETE SET NULL (int4 before 0.41.0) |
 | `optionable` | bool | yes | `false`; NULL reads as false; an update without the field keeps the stored value |

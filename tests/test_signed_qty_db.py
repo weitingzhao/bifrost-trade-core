@@ -129,7 +129,7 @@ def book(pg_conn: Any) -> Dict[str, Any]:
                     "RETURNING strategy_structure_id", (tpl,))
         struct = cur.fetchone()[0]
         cur.execute("INSERT INTO strategy_opportunity (name, strategy_structure_id, scope_type) "
-                    "VALUES ('TD30', %s, 'symbols') RETURNING strategy_opportunity_id", (struct,))
+                    "VALUES ('TD30', %s, 'explicit_symbols') RETURNING strategy_opportunity_id", (struct,))
         opp = cur.fetchone()[0]
         for si in (11, 12):
             cur.execute("INSERT INTO strategy_instance (strategy_instance_id, strategy_opportunity_id, account_id, opened_at) "

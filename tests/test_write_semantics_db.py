@@ -86,7 +86,7 @@ def _seed_rule_chain(db: _Savepointed) -> dict:
                       "RETURNING strategy_structure_id", (tpl,))[0]
     gate = _one(db, "INSERT INTO gate_safety_strategy (name) VALUES ('TD15 gate') RETURNING gate_safety_strategy_id")[0]
     opp = _one(db, "INSERT INTO strategy_opportunity (name, strategy_structure_id, default_gate_safety_strategy_id, scope_type) "
-                   "VALUES ('TD15 opp', %s, %s, 'symbols') RETURNING strategy_opportunity_id", (struct, gate))[0]
+                   "VALUES ('TD15 opp', %s, %s, 'explicit_symbols') RETURNING strategy_opportunity_id", (struct, gate))[0]
     inst = _one(db, "INSERT INTO strategy_instance (strategy_opportunity_id, account_id, opened_at, label, notes) "
                     "VALUES (%s, %s, now(), 'L', 'N') RETURNING strategy_instance_id", (opp, ACCOUNT))[0]
     alloc = _one(db, "INSERT INTO strategy_allocation (name, gate_safety_strategy_id, max_positions, max_bp_pct) "
@@ -126,7 +126,7 @@ def test_strategy_patches_in_postgres(db) -> None:
 
     row = opportunity_write.patch_opportunity(db, ids["opp"], {"is_active": False, "symbols": ["TDXV"]})
     assert row["is_active"] is False and row["symbols"] == ["TDXV"]
-    assert row["default_gate_safety_strategy_id"] == ids["gate"] and row["scope_type"] == "symbols"
+    assert row["default_gate_safety_strategy_id"] == ids["gate"] and row["scope_type"] == "explicit_symbols"
 
     row = template_write.patch_template(db, ids["tpl"], {"explanation": "Why.", "dim_risk": None})
     assert row["explanation"] == "Why." and row["legs"] == []

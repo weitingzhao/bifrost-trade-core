@@ -89,7 +89,7 @@ def _opportunity(db: _Savepointed, name: str) -> int:
     struct = _one(db, "INSERT INTO strategy_structure (name, strategy_template_id) VALUES (%s, %s) "
                       "RETURNING strategy_structure_id", (f"TD09 {name}", tpl))[0]
     return _one(db, "INSERT INTO strategy_opportunity (name, strategy_structure_id, scope_type) "
-                    "VALUES (%s, %s, 'symbols') RETURNING strategy_opportunity_id", (f"TD09 {name}", struct))[0]
+                    "VALUES (%s, %s, 'explicit_symbols') RETURNING strategy_opportunity_id", (f"TD09 {name}", struct))[0]
 
 
 def _instance(db: _Savepointed, opp: int, account: str = ACCT, iid: int | None = None) -> int:
