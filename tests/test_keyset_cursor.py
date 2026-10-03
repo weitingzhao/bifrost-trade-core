@@ -286,3 +286,30 @@ def test_executions_page_bad_cursor_raises_before_reading() -> None:
     with pytest.raises(InvalidCursor):
         ex.get_executions_page(conn, cursor=keyset.encode_transactions(TS, 1))
     assert conn.sql == []
+
+
+# --- the StatusReader facade the API calls --------------------------------------------
+
+
+def test_status_reader_refuses_a_bad_cursor_before_connecting(monkeypatch: pytest.MonkeyPatch) -> None:
+    from bifrost_core.monitor.reader import StatusReader
+
+    reader = StatusReader({"sink": "postgres"})
+
+    def _no_connect() -> bool:
+        raise AssertionError("connected for a cursor it should have refused")
+
+    monkeypatch.setattr(reader, "_connect", _no_connect)
+    with pytest.raises(InvalidCursor):
+        reader.get_executions_page(cursor="garbage")
+    with pytest.raises(InvalidCursor):
+        reader.get_transactions_page(cursor=keyset.encode_executions(None, None, 1))
+
+
+def test_status_reader_without_a_database_answers_an_empty_last_page(monkeypatch: pytest.MonkeyPatch) -> None:
+    from bifrost_core.monitor.reader import StatusReader
+
+    reader = StatusReader({"sink": "postgres"})
+    monkeypatch.setattr(reader, "_connect", lambda: False)
+    assert reader.get_executions_page(cursor=keyset.encode_executions(None, TS, 3)) == {"items": [], "next_cursor": None}
+    assert reader.get_transactions_page(cursor=keyset.encode_transactions(TS, 3)) == {"items": [], "next_cursor": None}
