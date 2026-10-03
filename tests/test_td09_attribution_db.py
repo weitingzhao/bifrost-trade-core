@@ -280,6 +280,10 @@ def test_migration_sql_is_one_transaction_that_rolls_back_by_default() -> None:
     assert sql.startswith("BEGIN;") and sql.rstrip().endswith("ROLLBACK;")
     assert "SET LOCAL ROLE bifrost" in sql and ";;" not in sql
     assert td09.migration_sql(commit=True, views=True).rstrip().endswith("COMMIT;")
-    assert "CREATE OR REPLACE VIEW brokerage.instance_allocations" in td09.migration_sql(views=True)
+    with_views = td09.migration_sql(views=True)
+    assert "CREATE OR REPLACE VIEW brokerage.instance_allocations" in with_views
+    # the views are rebuilt as their current owner (postgres on DEV), then granted to the app role
+    assert with_views.index("SET LOCAL ROLE %I") < with_views.index("DROP VIEW IF EXISTS brokerage.executions_tws")
+    assert "GRANT SELECT ON ALL TABLES IN SCHEMA brokerage TO bifrost" in with_views
     with pytest.raises(ValueError):
         td09.migration_sql(role="bifrost; DROP")

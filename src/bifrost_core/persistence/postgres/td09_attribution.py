@@ -213,7 +213,17 @@ def migration_sql(
     parts += [s.strip() for s in STRATEGY_INSTANCE_EXECUTION_DDL]
     parts += [s.strip() for s in load_statements(schema)]
     if views:
+        # The views keep their owner: rebuild them as whoever owns them now (bifrost on
+        # STG / PROD, postgres on DEV), then grant the app role as setup_fdw does.
+        parts.append(
+            "DO $own$ BEGIN EXECUTE format('SET LOCAL ROLE %I', "
+            f"(SELECT pg_get_userbyid(relowner) FROM pg_class WHERE oid = to_regclass('{schema}.executions')))"
+            "; END $own$"
+        )
         parts += [s.strip() for s in view_statements(schema)]
+        if role:
+            parts.append(f"GRANT SELECT ON ALL TABLES IN SCHEMA {schema} TO {role}")
+            parts.append(f"SET LOCAL ROLE {role}")
     parts += [s.strip() for s in report_statements()]
     parts.append("COMMIT" if commit else "ROLLBACK")
     return ";\n\n".join(p.rstrip().rstrip(";") for p in parts) + ";\n"
