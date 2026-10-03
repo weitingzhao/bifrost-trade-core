@@ -152,13 +152,10 @@ def _resolve_template_id(
             pass
     if not st:
         raise ValueError("strategy_template_id or structure_type is required")
-    sub = (payload.get("structure_subtype") or "").strip().lower() or None
-    if st == "covered_call" and sub in ("otm", "atm", "itm", "deep_otm"):
-        code = f"covered_call_{sub}"
-    elif st == "covered_call":
-        code = "covered_call_otm"
-    else:
-        code = st
+    # No template is coded `covered_call`: the bare name means the OTM template. The
+    # structure_subtype that used to pick ATM / ITM / deep OTM is gone (TD-41, 0.36.0);
+    # a client names the template by strategy_template_id.
+    code = "covered_call_otm" if st == "covered_call" else st
     row = template_config.get_template_by_code(conn, code)
     if not row:
         raise ValueError(f"Unknown template for structure_type={st!r}")

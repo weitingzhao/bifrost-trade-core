@@ -41,7 +41,6 @@ def get_structure_by_id(conn: Any, strategy_structure_id: int) -> Optional[Dict[
                 """
                 SELECT s.strategy_structure_id, s.name,
                        t.template_code AS structure_type,
-                       CAST(NULL AS text) AS structure_subtype,
                        s.strategy_template_id,
                        t.dim_direction, t.dim_structure, t.dim_coverage,
                        t.dim_risk, t.dim_volatility, t.dim_time,
@@ -73,8 +72,6 @@ def get_structure_by_id(conn: Any, strategy_structure_id: int) -> Optional[Dict[
 _LIST_STRUCTURES_SELECT = """
     SELECT s.strategy_structure_id, s.name,
            t.template_code AS structure_type,
-           CAST(NULL AS text) AS structure_subtype,
-           t.display_name AS structure_subtype_label,
            s.strategy_template_id,
            t.dim_direction, t.dim_structure, t.dim_coverage,
            t.dim_risk, t.dim_volatility, t.dim_time,
