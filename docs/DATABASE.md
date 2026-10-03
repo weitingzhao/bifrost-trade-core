@@ -386,7 +386,7 @@ Retired (core **0.15.0** / Wave 6): `public.ops_audit_log` — actuation audit r
 
 `ops_feedback.*` lives in `bifrost_golden_source` (installation-keyed: one report
 stream across dev/stg/prod), written and read by **trade-api** over its
-analytics_reader connection — the `ops_jobs.*` precedent for non-Research schemas
+Golden Source connection as `analytics_writer` — the `ops_jobs.*` precedent for non-Research schemas
 in Golden Source. Research never writes this schema; Trade never writes
 `journal.*` (the mirror rule, spine `D-Journal-Stores`).
 
@@ -395,8 +395,10 @@ in Golden Source. Research never writes this schema; Trade never writes
 | `ops_feedback.report` | `report_id` (identity; shown as `FB-%04d`) | One feedback report: `kind` bug·data·idea·howto, `title`/`body_md`, page route+label, `blocks_trading` (reporter-set at submit), `context` jsonb (shell-collected), `status` new·triaged·progress·fixed·answered·wontfix, `reply_md`/`replied_at`, `unread_reply` (a reply or status move sets it; the My-reports pane on screen clears it) |
 | `ops_feedback.report_image` | `report_image_id` | ≤4 images per report (design cap), `bytes` bytea ≤2 MB each, `ON DELETE CASCADE` |
 
-DDL is idempotent, ensured lazily by `bifrost_api.research.feedback_store`
-(trade-api has no migration job against Golden Source). Behaviour contracts:
+DDL is idempotent and runs in trade-api's db-init (`bifrost_api.research.feedback_schema`,
+called by `scripts/run_db_refresh_schema.py`, api 0.6.8, TD-77) — never on a request; a
+missing schema answers 503. Objects are owned by `bifrost` (the db-init role); changes
+are additive only, since all three environments share the schema. Behaviour contracts:
 design `Shell Spec §20`; API under trade-api `/research/feedback/*`.
 
 ## Commands
