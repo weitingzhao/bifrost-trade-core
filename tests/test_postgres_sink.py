@@ -1,18 +1,34 @@
-"""StatusSink PostgreSQL implementation smoke tests."""
+"""TradingDaemonSink (the daemon's StatusSink) smoke tests."""
 
 from __future__ import annotations
 
 
 from bifrost_core.persistence.status_sink import StatusSink
-from bifrost_core.persistence.postgres.postgres_sink import PostgreSQLSink
+from bifrost_core.persistence.postgres.postgres_sink import TradingDaemonSink
 
 
 def test_postgres_sink_implements_status_sink():
-    assert issubclass(PostgreSQLSink, StatusSink)
+    assert issubclass(TradingDaemonSink, StatusSink)
 
 
 def test_postgres_sink_has_write_snapshot():
-    assert hasattr(PostgreSQLSink, "write_snapshot")
+    assert hasattr(TradingDaemonSink, "write_snapshot")
+
+
+def test_old_sink_name_is_an_alias_for_one_version():
+    """TD-75 (0.39.0): PostgreSQLSink stays importable until api / worker use the new name."""
+    from bifrost_core.persistence.postgres.postgres_sink import PostgreSQLSink
+
+    assert PostgreSQLSink is TradingDaemonSink
+
+
+def test_daemon_health_key_renamed_not_revalued():
+    """TD-75 (0.39.0): only the Python name changed; the value is a live Redis key."""
+    from bifrost_core.core import redis_health_keys as k
+
+    assert k.BIFROST_HEALTH_DAEMON_STRATEGY_TRADING == "bifrost:health:daemon_strategy_trading"
+    assert k.BIFROST_HEALTH_DAEMON_TRADING_ENGINE is k.BIFROST_HEALTH_DAEMON_STRATEGY_TRADING
+    assert not hasattr(k, "BIFROST_OPS_TRADING_ENGINE_META")
 
 
 # --- TD-45 (core 0.35.0): connecting runs no DDL and terminates nothing ---------------
@@ -86,7 +102,7 @@ def conns(monkeypatch: pytest.MonkeyPatch) -> List[_Conn]:
 
 
 def test_connect_sets_timeouts_and_nothing_else(conns: List[_Conn]) -> None:
-    sink = PostgreSQLSink(CFG)
+    sink = TradingDaemonSink(CFG)
     assert len(conns) == 2 and sink._conn is conns[0] and sink._golden_conn is conns[1]
     for conn in conns:
         assert conn.executed == [
@@ -96,7 +112,7 @@ def test_connect_sets_timeouts_and_nothing_else(conns: List[_Conn]) -> None:
 
 
 def test_reconnect_runs_no_ddl_either(conns: List[_Conn]) -> None:
-    sink = PostgreSQLSink(CFG)
+    sink = TradingDaemonSink(CFG)
     sink._conn = None
     sink._golden_conn = None
     assert sink._ensure_conn() and sink._ensure_golden_conn()
@@ -124,7 +140,7 @@ def test_sink_source_has_no_schema_apply_or_backend_termination() -> None:
 def test_missing_table_fails_the_write_with_an_error(
     conns: List[_Conn], caplog: pytest.LogCaptureFixture
 ) -> None:
-    sink = PostgreSQLSink(CFG)
+    sink = TradingDaemonSink(CFG)
     golden = conns[1]
     golden.raises = _UndefinedTable('relation "raw_broker.executions_raw_tws" does not exist')
     with caplog.at_level(logging.WARNING, logger=sink_mod.logger.name):

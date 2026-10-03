@@ -288,15 +288,6 @@ def market_api_console_stream_key(profile: Optional[str]) -> str:
     return f"bifrost:console:{suffix}:api_market"
 
 
-def daemon_trading_console_stream_key(profile: Optional[str]) -> str:
-    """Redis Stream for Strategy Trading Daemon console (``run_engine.py`` → Monitor ``/api/daemon/logs*``).
-
-    Same dev|prod split as API monitor/ops logs so Dev and Prod engines sharing one Redis do not
-    overwrite each other's lines. Non-``prod`` profiles map to the ``dev`` stream."""
-    suffix = "prod" if profile == "prod" else "dev"
-    return f"bifrost:console:{suffix}:daemon_trading"
-
-
 def read_config(config_path: Optional[str] = None) -> tuple[dict, str]:
     """Load YAML. Returns (config, resolved_path).
 

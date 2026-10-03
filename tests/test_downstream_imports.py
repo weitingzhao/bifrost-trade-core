@@ -91,7 +91,8 @@ _NAMES: dict[str, tuple[str, ...]] = {
     ),
     # trade-api, trade-worker
     "bifrost_core.core.redis_health_keys": (
-        "BIFROST_HEALTH_DAEMON_TRADING_ENGINE",
+        "BIFROST_HEALTH_DAEMON_STRATEGY_TRADING",  # 0.39.0 (TD-75)
+        "BIFROST_HEALTH_DAEMON_TRADING_ENGINE",  # deprecated alias of the above, one version
         "BIFROST_HEALTH_IB_ACCOUNT_AGENT",
         "BIFROST_HEALTH_IB_INGESTOR",
         "BIFROST_HEALTH_IB_OPERATOR",
@@ -301,7 +302,8 @@ _NAMES: dict[str, tuple[str, ...]] = {
     ),
     # trade-worker
     "bifrost_core.persistence.postgres.postgres_sink": (
-        "PostgreSQLSink",
+        "PostgreSQLSink",  # deprecated alias of TradingDaemonSink, one version
+        "TradingDaemonSink",  # 0.39.0 (TD-75)
     ),
     # trade-worker
     "bifrost_core.persistence.status_sink": (

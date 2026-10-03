@@ -3,7 +3,6 @@
 from bifrost_core.config.yaml_config import (
     IB_PORT_MAP,
     config_profile_from_resolved_path,
-    daemon_trading_console_stream_key,
     docs_api_console_stream_key,
     get_effective_ib_config,
     market_api_console_stream_key,
@@ -21,7 +20,6 @@ from bifrost_core.config.yaml_config import (
 __all__ = [
     "IB_PORT_MAP",
     "config_profile_from_resolved_path",
-    "daemon_trading_console_stream_key",
     "docs_api_console_stream_key",
     "get_effective_ib_config",
     "market_api_console_stream_key",

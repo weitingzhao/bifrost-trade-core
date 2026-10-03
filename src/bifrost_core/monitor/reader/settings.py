@@ -33,36 +33,24 @@ def validate_settings_active_refs(cur: Any, payload: Dict[str, Any]) -> None:
 # ----- Conn-based (for common.StatusReader delegation) -----
 
 def get_ib_config(conn: Any) -> Optional[Dict[str, Any]]:
-    """Return settings row id=1: ib_host_account_id, flex ranges, stream account IDs.
+    """Return settings row id=1: ib_host_account_id and stream account IDs.
 
     IB host/port/client IDs come from config YAML (see get_effective_ib_config), not from DB.
-    Flex range days remain here because they share the settings row; Flex token/query
-    R/W lives in the Flex Query Plugin.
+    The Flex range days are not read here since core 0.39.0: nothing used them (the HTTP
+    boundary never output them) and the Flex Query plugin keeps them in Golden Source
+    ``ops_jobs.flex_settings`` from 0.7.0 (TD-74). The ``settings.flex_*_range_days``
+    columns stay until a later version drops them.
     """
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(
-                "SELECT ib_host_account_id, flex_default_range_days, flex_init_range_days, "
+                "SELECT ib_host_account_id, "
                 "stream_host_account_id, stream_secondary_account_id FROM settings WHERE id = 1"
             )
             row = cur.fetchone()
         if row is None:
             return None
         out: Dict[str, Any] = {}
-        if row.get("flex_default_range_days") is not None:
-            try:
-                out["flex_default_range_days"] = max(1, int(row["flex_default_range_days"]))
-            except (TypeError, ValueError):
-                out["flex_default_range_days"] = 30
-        else:
-            out["flex_default_range_days"] = 30
-        if row.get("flex_init_range_days") is not None:
-            try:
-                out["flex_init_range_days"] = max(1, int(row["flex_init_range_days"]))
-            except (TypeError, ValueError):
-                out["flex_init_range_days"] = 360
-        else:
-            out["flex_init_range_days"] = 360
         if row.get("ib_host_account_id") is not None and str(row.get("ib_host_account_id")).strip():
             out["ib_host_account_id"] = str(row["ib_host_account_id"]).strip()
         else:

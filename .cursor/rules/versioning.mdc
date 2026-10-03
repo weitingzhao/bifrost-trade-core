@@ -1,7 +1,7 @@
 ---
 description: Core package versioning — release identity (SHA), version floor, PROD tags, downstream rules
 alwaysApply: true
-parity-id: core-versioning-v4
+parity-id: core-versioning-v5
 ---
 
 # bifrost-core 版本管理规范
@@ -29,7 +29,7 @@ parity-id: core-versioning-v4
 |------|--------------|---------|
 | `bifrost-trade-api` | `pyproject.toml` 写下限；STG/PROD 镜像由 `bifrost-deliver-{stg,prod}` 把从 Gitea 克隆的 core 一起构建（`bifrost-trade-infra/k8s/cicd/docker/Dockerfile.api-stg`，core SHA 记入 `BIFROST_CORE_SHA`）；repo 自带 `Dockerfile` 用 `BIFROST_CORE_REF`（仅本地） | 读取层、写入函数、配置、DDL |
 | db-init Job | 跑在 `bifrost-api-monitor` 镜像里（`scripts/run_db_refresh_schema.py`），所以 core 的 DDL 随 api 镜像发布 | `_ensure_tables()`、`ensure_brokerage_schema()`、FDW setup |
-| `bifrost-trade-worker` | 同上（`Dockerfile.worker-stg`；repo `Dockerfile` 用 `BIFROST_CORE_REF`，仅本地）；下限 `>=0.35.0` | `PostgreSQLSink`、配置、组合模型、Redis 读写 |
+| `bifrost-trade-worker` | 同上（`Dockerfile.worker-stg`；repo `Dockerfile` 用 `BIFROST_CORE_REF`，仅本地）；下限 `>=0.35.0` | `TradingDaemonSink`（旧名 `PostgreSQLSink` 为一版别名，TD-75）、配置、组合模型、Redis 读写 |
 | `bifrost-platform-plugin-flex-query` | `[runtime]` extra `bifrost-core>=0.34.0`；镜像以 `--build-context core=../bifrost-trade-core` 从兄弟目录**按磁盘原样**安装（`make docker-build` 拒绝脏 checkout，core SHA 记入 label） | `write_account_executions_to_db`、`upsert_account_transactions`、`brokerage_tables`、`connection`、`message_center`、`redis_url` |
 
 不 import core、但复刻它的契约（改了要同步对方）：`bifrost-platform-plugin` 的 IB Gateway（`ib_gateway/redis_keys.py`、
@@ -65,7 +65,7 @@ parity-id: core-versioning-v4
 修改 `src/bifrost_core/persistence/postgres/ddl.py` 时：
 - 同步更新数据库文档
 - 确认 `bifrost-trade-api` 中相关 reader 模块兼容新 schema
-- 确认 `bifrost-trade-worker`（daemon 经 `PostgreSQLSink` 写入）与 Flex 插件（`raw_broker` 写入）兼容新 schema
+- 确认 `bifrost-trade-worker`（daemon 经 `TradingDaemonSink` 写入）与 Flex 插件（`raw_broker` 写入）兼容新 schema
 
 ## Tag 与安装
 

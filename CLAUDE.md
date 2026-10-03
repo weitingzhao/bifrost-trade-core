@@ -1,5 +1,5 @@
 <!--
-parity-ids: core-versioning-v4
+parity-ids: core-versioning-v5
 对等文件: .cursor/rules/versioning.mdc
 改任一侧必须同步另一侧并 bump 两侧版本号；校验: bash ../scripts/check-agent-config-parity.sh
 -->
@@ -29,7 +29,7 @@ parity-ids: core-versioning-v4
 
 - `config/` — YAML 配置加载（Settings、环境合并）
 - `core/` — 工具函数（日志、Redis URL 解析、`realtime/` Redis 行情 / 账户键）
-- `persistence/` — `postgres/`（DDL、Golden Source `raw_broker` DDL 与 FDW、`PostgreSQLSink`、账户同步）、`redis_daemon_state.py`（daemon IPC）
+- `persistence/` — `postgres/`（DDL、Golden Source `raw_broker` DDL 与 FDW、`TradingDaemonSink`、账户同步）、`redis_daemon_state.py`（daemon IPC）
 - `portfolio/` — 持仓模型、Greeks 聚合、多账户、`ib_edge.py`（从 Redis 读账户快照）
 - `ib_operator/` — IB Operator RPC 客户端（client 侧）
 - `monitor/` — 读取层与写入函数（供 API 后端与 daemon 使用）
@@ -50,7 +50,7 @@ make db-init        # 初始化/刷新 PostgreSQL schema
 
 ## 架构关键点
 
-- `persistence/postgres/postgres_sink.py` — `PostgreSQLSink`，`StatusSink` 的唯一实现：daemon 状态快照写 per-env Redis，
+- `persistence/postgres/postgres_sink.py` — `TradingDaemonSink`（0.39.0 前叫 `PostgreSQLSink`，旧名保留一版作别名，TD-75），`StatusSink` 的唯一实现：daemon 状态快照写 per-env Redis，
   账户 / 持仓 / 成交 / `contract_quote_live` 写 Golden Source `raw_broker.*`。连接时不跑 DDL、不终止别的 backend
   （TD-45，0.35.0）；表只由发布的 db-init Job 建，缺表时写入失败并记 error
 - `portfolio/` 的模型被 API 后端 (`bifrost-trade-api`) 直接 import

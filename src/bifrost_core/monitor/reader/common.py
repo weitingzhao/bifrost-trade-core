@@ -70,7 +70,7 @@ class StatusReader:
         self._local.conn = value
 
     def _ensure_conn(self) -> bool:
-        """Compat helper mirroring PostgreSQLSink._ensure_conn()."""
+        """Compat helper mirroring TradingDaemonSink._ensure_conn()."""
         return self._connect()
 
     def _drop_conn(self) -> None:
@@ -328,7 +328,7 @@ class StatusReader:
 
     # --- Settings domain (delegate to settings module) ---
     def get_ib_config(self) -> Optional[Dict[str, Any]]:
-        """Return merged IB config: host/port/client IDs from config.yaml; DB supplies ib_host_account_id, flex_*, stream_*."""
+        """Return merged IB config: host/port/client IDs from config.yaml; DB supplies ib_host_account_id, stream_*."""
         ib_eff = get_effective_ib_config(self._config)
         db_cfg: Optional[Dict[str, Any]] = None
         if self._connect():
@@ -338,8 +338,6 @@ class StatusReader:
         if db_cfg:
             for key in (
                 "ib_host_account_id",
-                "flex_default_range_days",
-                "flex_init_range_days",
                 "stream_host_account_id",
                 "stream_secondary_account_id",
             ):
@@ -347,8 +345,6 @@ class StatusReader:
                     merged[key] = db_cfg[key]
         else:
             merged.setdefault("ib_host_account_id", None)
-            merged.setdefault("flex_default_range_days", 30)
-            merged.setdefault("flex_init_range_days", 360)
             merged.setdefault("stream_host_account_id", None)
             merged.setdefault("stream_secondary_account_id", None)
         return merged

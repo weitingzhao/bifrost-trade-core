@@ -1,4 +1,8 @@
-"""PostgreSQL implementation of StatusSink. See docs/DATABASE.md."""
+"""The trading daemon's StatusSink (``TradingDaemonSink``). See docs/DATABASE.md.
+
+Named ``PostgreSQLSink`` until core 0.39.0 (TD-75); the old name stays as an alias for one
+version. The module path is unchanged.
+"""
 
 import logging
 import math
@@ -56,8 +60,12 @@ def _log_write_failure(what: str, exc: Exception) -> None:
     logger.warning("%s failed: %s", what, exc, exc_info=True)
 
 
-class PostgreSQLSink(StatusSink):
-    """Daemon IPC state in Redis; PG still used for brokerage / settings.
+class TradingDaemonSink(StatusSink):
+    """The trading daemon's sink: where ``GsTrading`` writes everything it reports.
+
+    - Daemon IPC (state, control, heartbeat, shutdown) → per-env Redis (``redis_daemon_state``).
+    - Accounts / executions / commissions / quotes / open orders → Golden Source ``raw_broker``.
+    - The per-env Trade database is only read (settings, contract quotes through the FDW).
 
     Connecting runs no DDL and never terminates other backends (TD-45, core 0.35.0).
     Before 0.35.0 every connect ran ``_ensure_tables`` (and ``ensure_brokerage_schema`` on
@@ -819,3 +827,8 @@ class PostgreSQLSink(StatusSink):
                 pass
             self._golden_conn = None
         self._redis = None
+
+
+# Deprecated alias (0.39.0, TD-75): the class was named for Postgres while most of what it
+# writes goes to Redis. Removed in the next core version once api / worker import the new name.
+PostgreSQLSink = TradingDaemonSink

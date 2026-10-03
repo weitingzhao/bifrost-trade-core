@@ -1,6 +1,6 @@
 """Normalize and write accounts_snapshot into brokerage.account / brokerage.positions.
 
-Used by PostgreSQLSink (write_snapshot) and by the legacy reader. See docs/DATABASE.md.
+Used by TradingDaemonSink (write_snapshot) and by the legacy reader. See docs/DATABASE.md.
 Writers must pass a connection to bifrost_golden_source (not per-env FDW).
 """
 

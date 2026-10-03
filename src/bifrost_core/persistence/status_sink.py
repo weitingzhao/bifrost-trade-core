@@ -38,7 +38,7 @@ ACCOUNTS_SNAPSHOT_KEY = "accounts_snapshot"
 class StatusSink(ABC):
     """Abstract sink for writing current state snapshot.
 
-    Implementations (e.g. PostgreSQLSink) persist to backend; caller (GsTrading)
+    Implementations (e.g. TradingDaemonSink) persist to backend; caller (GsTrading)
     decides when to write.
     """
 
@@ -55,7 +55,7 @@ class StatusSink(ABC):
         return
 
     # 可选：按合约写入 contract_quote_live（R-M6，多标的按 contract_key 逐标的拉价 + 写库）
-    # 默认实现为空，具体 sink（如 PostgreSQLSink）可选择性实现。
+    # 默认实现为空，具体 sink（如 TradingDaemonSink）可选择性实现。
     def write_contract_quote_live(self, rows: Any) -> None:  # rows: Iterable[Dict[str, Any]]
         return
 
@@ -68,7 +68,7 @@ class StatusSink(ABC):
         self, _exec_id: str, _commission: Any, _realized_pnl: Any, _currency: Any,
         _yield_: Any = None, _yield_redemption_date: Any = None,
     ) -> None:
-        """Default no-op; PostgreSQLSink implements UPDATE by exec_id."""
+        """Default no-op; TradingDaemonSink implements UPDATE by exec_id."""
         return
 
     # 可选：写入 K 线/OHLC（R-A3）。默认实现为空。

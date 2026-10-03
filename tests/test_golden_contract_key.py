@@ -30,7 +30,7 @@ from golden_oracles import contract_key_legacy as legacy
 from write_fakes import FakeConn
 
 from bifrost_core.persistence.postgres import accounts_sync
-from bifrost_core.persistence.postgres.postgres_sink import PostgreSQLSink
+from bifrost_core.persistence.postgres.postgres_sink import TradingDaemonSink
 from bifrost_core.portfolio import contract_key
 from bifrost_core.portfolio.reader import accounts, accounts_helpers, executions
 
@@ -301,9 +301,9 @@ def _written_keys(conn: FakeConn) -> Dict[str, Any]:
 
 def test_daemon_sink_writes_the_legacy_keys(monkeypatch: pytest.MonkeyPatch) -> None:
     rows = _exec_rows()
-    sink = PostgreSQLSink.__new__(PostgreSQLSink)
+    sink = TradingDaemonSink.__new__(TradingDaemonSink)
     sink._golden_conn = FakeConn()
-    monkeypatch.setattr(PostgreSQLSink, "_ensure_golden_conn", lambda self: True)
+    monkeypatch.setattr(TradingDaemonSink, "_ensure_golden_conn", lambda self: True)
     sink.write_account_executions(rows)
     written = _written_keys(sink._golden_conn)
     assert len(written) == len(rows)

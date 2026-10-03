@@ -1,11 +1,12 @@
-"""Canonical Redis keys for Socket ingest health under ``bifrost:health:*``.
+"""Canonical Redis keys for service health under ``bifrost:health:*``.
 
-Service **ids** in Ops YAML: ``ib_ingestor`` / ``ib_operator`` / ``ib_account_agent``.
-Redis **health** hashes use the ``ws_*`` suffix names below — **string values are stable**
-(do not rename keys). Strategy Trading Daemon health + Ops lease use
+The IB hashes (``ws_*`` names) were written by the retired Socket services and are now
+written by the IB Gateway plugin; service **ids** in Ops YAML are ``ib_ingestor`` /
+``ib_operator`` / ``ib_account_agent``. The trading daemon (Deployment ``daemon``) writes
 ``bifrost:health:daemon_strategy_trading``.
 
-Readers fall back to prior bifrost key names when the canonical hash is empty.
+**String values are live Redis keys and are never renamed** — only the Python names are
+(TD-75). Readers fall back to prior key names when the canonical hash is empty.
 """
 
 from __future__ import annotations
@@ -40,14 +41,18 @@ BIFROST_HEALTH_IB_ACCOUNT_AGENT = "bifrost:health:ws_ib_account_agent"
 # Account Sync Daemon: independent process that consumes ib:account:stream:v1 and
 # persists Account / Position / Execution data to PostgreSQL.
 
-# Strategy Trading Daemon: health hash + Ops Dev/Prod lease fields (``bifrost_ops_control_*``,
-# ``engine_ops_active``) on the same key — NOT migrated to separate lease key (different lifecycle).
-BIFROST_HEALTH_DAEMON_TRADING_ENGINE = "bifrost:health:daemon_strategy_trading"
+# Strategy Trading Daemon (Deployment ``daemon``, class ``GsTrading``): health hash + Ops
+# Dev/Prod lease fields (``bifrost_ops_control_*``, ``engine_ops_active``) on the same key —
+# NOT migrated to a separate lease key (different lifecycle).
+# The value is a live Redis key (redis-ib ACL allows ``~bifrost:health:daemon_*``): do not change it.
+BIFROST_HEALTH_DAEMON_STRATEGY_TRADING = "bifrost:health:daemon_strategy_trading"
+# Deprecated alias (0.39.0, TD-75): the old name said trading_engine while the value says
+# strategy_trading. Kept for one core version so api / worker can switch; then removed.
+BIFROST_HEALTH_DAEMON_TRADING_ENGINE = BIFROST_HEALTH_DAEMON_STRATEGY_TRADING
+# Earlier key names, only normalized away in api ``market_ingest_config`` (Ops YAML meta_key).
+# Neither key exists in redis-dev / redis-live-stg / redis-live-prod (checked 2026-10-03).
 LEGACY_BIFROST_HEALTH_DAEMON_TRADING_ENGINE = "bifrost:health:daemon_trading_engine"
-# Previous key (YAML / Redis migration); normalized in ``market_ingest_config``.
 LEGACY_BIFROST_OPS_TRADING_ENGINE_META = "bifrost:ops:trading_engine"
-# Deprecated alias — prefer ``BIFROST_HEALTH_DAEMON_TRADING_ENGINE``.
-BIFROST_OPS_TRADING_ENGINE_META = BIFROST_HEALTH_DAEMON_TRADING_ENGINE
 ENGINE_OPS_ACTIVE_REDIS_FIELD = "engine_ops_active"
 
 # Previous bifrost names (read / YAML normalization fallback).
