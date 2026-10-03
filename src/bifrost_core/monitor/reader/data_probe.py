@@ -3,14 +3,18 @@
 The platform's freshness panel and data clone used to name Trade tables themselves
 (``strategy_instance``, ``strategy_opportunity``, ``watchlist`` …). Trade renames its
 tables (naming program R3), and the platform must not learn Trade concepts (D13), so
-Trade answers the three questions the platform asks, by role rather than by table:
+Trade answers the questions the platform asks, by role rather than by table:
 
 - ``activity``: when this database last changed, one row per source;
 - ``sample``: a row count that says the database holds the book (clone verification);
 - ``clone_groups``: the tables a selective clone must take together. Each group is its
   seed tables plus every table that references them, transitively -- exactly what
   ``TRUNCATE … CASCADE`` on the seeds would empty -- read from ``pg_constraint`` at
-  request time, so a new child table is never left out.
+  request time, so a new child table is never left out;
+- ``watchlist``: the optionable stocks this env watches (``sec_type = 'STK'`` and
+  ``optionable``), trimmed, upper-cased, distinct and sorted. The platform unions them
+  across envs for the market-data plugin (``GET /api/v1/watchlist/union``) instead of
+  selecting from ``public.watchlist`` itself (core 0.44.0).
 
 The seeds below are Trade's own names; R3 renames them here and nowhere else. A source
 whose table is missing is reported with ``last_ts: null`` and a ``detail``, never dropped.
@@ -34,6 +38,16 @@ ACTIVITY_SOURCES: Tuple[Tuple[str, str, str], ...] = (
 
 # (label, table) counted for clone verification.
 SAMPLE: Tuple[str, str] = ("trades", "strategy_instance")
+
+# (label, table) whose optionable stocks the platform unions across envs.
+WATCHLIST: Tuple[str, str] = ("optionable_stocks", "watchlist")
+
+_WATCHLIST_SQL = """
+SELECT DISTINCT upper(trim(symbol)) AS symbol
+FROM {table}
+WHERE sec_type = 'STK' AND optionable = true AND symbol IS NOT NULL AND trim(symbol) <> ''
+ORDER BY 1
+"""
 
 # (group name, seed tables, note)
 CLONE_GROUPS: Tuple[Tuple[str, Tuple[str, ...], str], ...] = (
@@ -106,6 +120,17 @@ def _sample(cur: Any) -> Dict[str, Any]:
     return {"label": label, "rows": int(row[0]) if row and row[0] is not None else 0}
 
 
+def _watchlist(cur: Any) -> Dict[str, Any]:
+    """``{label, symbols, count}``; a missing table is ``symbols: null`` with a ``detail``,
+    never an empty list -- an empty list means the env watches no optionable stock."""
+    label, table = WATCHLIST
+    if not _existing(cur, [table]):
+        return {"label": label, "symbols": None, "count": None, "detail": "missing"}
+    cur.execute(_WATCHLIST_SQL.format(table=table))
+    symbols = [str(r[0]) for r in cur.fetchall() or [] if r and r[0]]
+    return {"label": label, "symbols": symbols, "count": len(symbols)}
+
+
 def _clone_groups(cur: Any) -> List[Dict[str, Any]]:
     out: List[Dict[str, Any]] = []
     for name, seeds, note in CLONE_GROUPS:
@@ -125,16 +150,18 @@ def _clone_groups(cur: Any) -> List[Dict[str, Any]]:
 
 
 def read_data_probe(conn: Any) -> Dict[str, Any]:
-    """``{generated_at, activity, sample, clone_groups}`` for the database ``conn`` is on.
+    """``{generated_at, activity, sample, clone_groups, watchlist}`` for the database ``conn`` is on.
 
     Raises whatever the database raises; the caller decides how a failed read answers."""
     with conn.cursor() as cur:
         activity = _activity(cur)
         sample = _sample(cur)
         groups = _clone_groups(cur)
+        watchlist = _watchlist(cur)
     return {
         "generated_at": _iso(datetime.now(timezone.utc)),
         "activity": activity,
         "sample": sample,
         "clone_groups": groups,
+        "watchlist": watchlist,
     }

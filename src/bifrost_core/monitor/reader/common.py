@@ -155,8 +155,8 @@ class StatusReader:
         )
 
     def get_data_probe(self) -> Dict[str, Any]:
-        """Activity, a sample count and the clone groups of this env's database, for the
-        Ops platform (``data_probe``, D8-A). A read that cannot happen raises ReadFailed."""
+        """Activity, a sample count, the clone groups and the optionable watchlist of this
+        env's database, for the Ops platform (``data_probe``, D8-A). A read that cannot happen raises ReadFailed."""
         if not self._connect():
             raise ReadFailed("data_probe: database unavailable")
         try:

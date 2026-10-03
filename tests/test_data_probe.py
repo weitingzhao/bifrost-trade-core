@@ -28,6 +28,7 @@ def _scripted(missing: str = "") -> FakeConn:
         ("SELECT max(", Reply(one=(STAMP,))),
         ("SELECT count(*) FROM strategy_instance", Reply(one=(12,))),
         ("WITH RECURSIVE closure", Reply(all=[("strategy_instance",), ("strategy_plan",), ("trade_review",)])),
+        ("SELECT DISTINCT upper(trim(symbol))", Reply(all=[("QQAA",), ("QQBB",)])),
     ]
     return FakeConn(rules)
 
@@ -46,6 +47,23 @@ def test_the_probe_answers_by_role() -> None:
     # the seed first, then what references it
     assert trades["tables"] == ["strategy_instance", "strategy_plan", "trade_review"]
     assert [g["name"] for g in out["clone_groups"]] == ["trades", "rules", "position_categories", "watchlist"]
+    assert out["watchlist"] == {"label": "optionable_stocks", "symbols": ["QQAA", "QQBB"], "count": 2}
+
+
+def test_the_watchlist_filter_is_the_platforms_old_select() -> None:
+    conn = _scripted()
+    data_probe.read_data_probe(conn)
+    sql = next(text for text, _ in conn.executed if "upper(trim(symbol))" in text)
+    for clause in ("FROM watchlist", "sec_type = 'STK'", "optionable = true", "symbol IS NOT NULL", "trim(symbol) <> ''"):
+        assert clause in sql
+    assert "ORDER BY 1" in sql
+
+
+def test_a_missing_watchlist_is_null_not_an_empty_list() -> None:
+    conn = FakeConn([("SELECT to_regclass(%s) IS NOT NULL", Reply(one=(False,)))])
+    with conn.cursor() as cur:
+        out = data_probe._watchlist(cur)
+    assert out == {"label": "optionable_stocks", "symbols": None, "count": None, "detail": "missing"}
 
 
 def test_a_missing_source_is_reported_not_dropped() -> None:
@@ -77,3 +95,30 @@ def test_the_trades_group_is_what_truncate_cascade_would_empty(pg_conn) -> None:
     assert groups["watchlist"]["tables"][0] == "watchlist"
     assert isinstance(out["sample"]["rows"], int)
     assert {a["source"] for a in out["activity"]} == {"trades", "opportunities", "watchlist"}
+
+
+@pytest.mark.db
+def test_the_watchlist_is_the_optionable_stocks_trimmed_and_distinct(pg_conn) -> None:
+    rows = [
+        # (contract_key, symbol, sec_type, optionable) -- invented symbols
+        ("LANE-R:QZAA:1", "qzaa ", "STK", True),
+        ("LANE-R:QZAA:2", "QZAA", "STK", True),
+        ("LANE-R:QZBB", "QZBB", "STK", False),
+        ("LANE-R:QZCC", "QZCC", "OPT", True),
+        ("LANE-R:QZDD", "   ", "STK", True),
+        ("LANE-R:QZEE", None, "STK", True),
+        ("LANE-R:QZFF", "QZFF", "STK", True),
+    ]
+    with pg_conn.cursor() as cur:
+        for key, symbol, sec_type, optionable in rows:
+            cur.execute(
+                "INSERT INTO watchlist (contract_key, symbol, sec_type, optionable) VALUES (%s, %s, %s, %s)",
+                (key, symbol, sec_type, optionable),
+            )
+    # the fixture rolls the inserts back
+    out = data_probe.read_data_probe(pg_conn)["watchlist"]
+    symbols = out["symbols"]
+    assert out["label"] == "optionable_stocks"
+    assert out["count"] == len(symbols)
+    assert symbols == sorted(set(symbols))
+    assert [s for s in symbols if s.startswith("QZ")] == ["QZAA", "QZFF"]
