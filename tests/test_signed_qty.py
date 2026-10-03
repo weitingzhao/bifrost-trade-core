@@ -277,7 +277,7 @@ def test_performance_is_unchanged(monkeypatch: pytest.MonkeyPatch, kw: Dict[str,
     old = _perf(monkeypatch, OLD_BOOK, **kw)
     new = _perf(monkeypatch, NEW_BOOK, **kw)
     assert new == old
-    assert old["summary"]["trade_count"] > 0
+    assert old["summary"]["fill_count"] > 0
 
 
 def test_performance_instance_summary_is_unchanged(monkeypatch: pytest.MonkeyPatch) -> None:

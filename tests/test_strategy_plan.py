@@ -226,7 +226,7 @@ def test_link_fill_refuses_another_account(conn) -> None:
 
 def test_link_fill_needs_an_instance_that_exists(conn) -> None:
     conn([{"status": "intended", "account_id": "U1"}])
-    with pytest.raises(PlanRuleError, match="No strategy instance 7"):
+    with pytest.raises(PlanRuleError, match="No trade 7"):
         strategy_plan.link_fill(CFG, 1, 7)
 
 

@@ -7,6 +7,7 @@ import math
 from collections import defaultdict
 from typing import Any, Dict, List, Optional, Tuple
 
+from bifrost_core.monitor.reader.trade_names import add_trade_names
 from bifrost_core.portfolio.reader.executions import get_executions
 from bifrost_core.portfolio.reader.option_stock_link import get_option_stock_links_bulk
 
@@ -103,7 +104,7 @@ def slice_execution_for_instance_opt_view(ex: Dict[str, Any], instance_id: int) 
         if lbl is not None and str(lbl).strip():
             out["strategy_instance_label"] = str(lbl).strip()
         out["instance_allocations"] = None
-        return out
+        return add_trade_names(out)
     si = ex.get("strategy_instance_id")
     if si is not None:
         try:

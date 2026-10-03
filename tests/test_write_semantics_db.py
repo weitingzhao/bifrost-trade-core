@@ -194,7 +194,7 @@ def test_instance_delete_reads_this_envs_attribution(db) -> None:
     _one(db, "INSERT INTO strategy_instance_execution (account_id, exec_id, strategy_instance_id) "
              "VALUES (%s, 'td15.e1', %s), (%s, 'td15.e2', %s)", (ACCOUNT, ids["inst"], ACCOUNT, ids["inst"]))
     assert strategy_instance.count_attributed_executions(CFG, ids["inst"]) == 2
-    with pytest.raises(WriteConflict, match="^2 executions are attributed to this instance.$"):
+    with pytest.raises(WriteConflict, match="^2 fills are attributed to this trade.$"):
         strategy_instance.delete_instance_strict(CFG, ids["inst"])
     assert _one(db, "SELECT 1 FROM strategy_instance WHERE strategy_instance_id = %s", (ids["inst"],)) == (1,)
     _one(db, "DELETE FROM strategy_instance_execution WHERE exec_id LIKE 'td15.%%'")
@@ -211,7 +211,7 @@ def test_execution_patch_and_strict_delete_in_postgres(db) -> None:
         CFG, raw_id, {"instance_allocations": [{"strategy_instance_id": ids["inst"], "allocated_quantity": 2}]}
     )
     assert out["strategy_instance_id"] is None and out["instance_allocations"][0]["allocated_quantity"] == 2.0
-    with pytest.raises(WriteConflict, match="split across 1 instance"):
+    with pytest.raises(WriteConflict, match="split across 1 trade"):
         accounts.patch_execution(CFG, raw_id, {"strategy_instance_id": ids["inst"]})
     _one(db, "INSERT INTO raw_broker.commissions (exec_id, commission) VALUES ('td15.e3', 1)")
     out = accounts.delete_execution_strict(CFG, raw_id)

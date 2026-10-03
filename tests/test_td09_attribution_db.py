@@ -169,7 +169,7 @@ def test_split_rows_reach_every_representation_of_the_fill(db) -> None:
     assert got == [(-tws, a, 1.0), (-tws, b, 2.0), (flex, a, 1.0), (flex, b, 2.0)]
     assert _all(db, "SELECT strategy_instance_id FROM brokerage.executions WHERE exec_id = 'td09.s1'") == [(None,)]
     # a whole-fill instance on a split fill is refused until the splits are cleared
-    with pytest.raises(WriteConflict, match="split across 2 instances"):
+    with pytest.raises(WriteConflict, match="split across 2 trades"):
         accounts.patch_execution(CFG, flex, {"strategy_instance_id": a})
     out = accounts.patch_execution(CFG, flex, {"instance_allocations": [], "strategy_instance_id": a})
     assert out["strategy_instance_id"] == a and out["instance_allocations"] == []
@@ -208,7 +208,7 @@ def test_instance_delete_counts_this_env(db) -> None:
     _fill(db, "executions_raw_tws", "td09.d1")
     accounts.patch_execution(CFG, flex, {"strategy_instance_id": inst})
     assert strategy_instance.count_attributed_executions(CFG, inst) == 1  # the twins are one fill
-    with pytest.raises(WriteConflict, match="^1 execution is attributed to this instance.$"):
+    with pytest.raises(WriteConflict, match="^1 fill is attributed to this trade.$"):
         strategy_instance.delete_instance_strict(CFG, inst)
     accounts.patch_execution(CFG, flex, {"strategy_instance_id": None})
     assert strategy_instance.delete_instance_strict(CFG, inst)["deleted"] == "hard"

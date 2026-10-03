@@ -5,7 +5,10 @@ the realized_by_* breakdowns, the calendar rows), ``pair_count`` on the option
 calendar rows (they count closed option pairs, not fills) and ``total_trades`` beside
 ``total_instances`` on the win rate. ``win_rate`` now divides wins by the fills that
 realized a gain or a loss: an opening fill realizes nothing and is not a loss.
-The old keys stay one version. Uses the invented book of test_signed_qty.
+The old keys stayed one version: core 0.42.0 drops ``trade_count`` and
+``total_instances`` (naming program R0, D9), so a fill count is only ever
+``fill_count`` and an option calendar row counts only ``pair_count``.
+Uses the invented book of test_signed_qty.
 """
 
 from __future__ import annotations
@@ -25,6 +28,7 @@ _FILL_LISTS = (
     "realized_by_account_and_sec_type",
     "realized_by_strategy_opportunity",
     "realized_by_strategy_instance",
+    "realized_by_trade",
     "calendar",
 )
 
@@ -42,13 +46,13 @@ def test_every_fill_count_is_named(monkeypatch: pytest.MonkeyPatch, kw: Dict[str
     rows = list(_rows(perf))
     assert len(rows) > 3
     for row in rows:
-        assert row["fill_count"] == row["trade_count"]
+        assert isinstance(row["fill_count"], int) and "trade_count" not in row
 
 
 def test_option_calendar_rows_count_pairs(monkeypatch: pytest.MonkeyPatch) -> None:
     perf = _perf(monkeypatch, NEW_BOOK)
     for row in (r for r in perf["calendar_by_sec_type"] if r["sec_type"] == "OPT"):
-        assert row["pair_count"] == row["trade_count"] and "fill_count" not in row
+        assert row["pair_count"] > 0 and "fill_count" not in row and "trade_count" not in row
 
 
 def test_win_rate_is_over_closing_fills(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -62,7 +66,7 @@ def test_win_rate_is_over_closing_fills(monkeypatch: pytest.MonkeyPatch) -> None
 def test_instance_summary_counts_fills_and_closing_win_rate(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(executions_reader, "get_executions", lambda conn, **_: copy.deepcopy(NEW_BOOK))
     s = executions_reader.get_performance_instance_summary_only(object(), 11)["summary"]
-    assert s["fill_count"] == s["trade_count"] > 0
+    assert s["fill_count"] > 0 and "trade_count" not in s
     closing = s["win_count"] + s["loss_count"]
     assert s["win_rate"] == (round(s["win_count"] / closing, 4) if closing else None)
 
@@ -70,4 +74,4 @@ def test_instance_summary_counts_fills_and_closing_win_rate(monkeypatch: pytest.
 def test_win_rate_names_trades() -> None:
     rows = [{"net_pnl": 10.0, "underlying_cost": 1.0}, {"net_pnl": -5.0, "underlying_cost": 1.0}]
     r = _aggregate_win_rate_metrics("Any", rows)
-    assert r["total_trades"] == r["total_instances"] == 2
+    assert r["total_trades"] == 2 and "total_instances" not in r

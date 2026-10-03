@@ -22,6 +22,7 @@ from bifrost_core.persistence.postgres.brokerage_tables import (
 )
 from bifrost_core.monitor.reader import write_support as ws
 from bifrost_core.monitor.reader.instance_state import instance_states
+from bifrost_core.monitor.reader.trade_names import add_trade_names
 from bifrost_core.monitor.reader.errors import (
     ReadFailed,
     WriteConflict,
@@ -123,7 +124,7 @@ def list_instances(
             state, closed_on = states.get(int(d["strategy_instance_id"]), ("no_fills", None))
             d["state"] = state
             d["closed_on"] = closed_on.isoformat() if closed_on is not None else None
-            out.append(d)
+            out.append(add_trade_names(d))  # trade_id beside strategy_instance_id (naming R1)
         return out
     except Exception as e:
         # A failed read is not an empty one: raise, so the API answers 503 (TD-08).
@@ -157,7 +158,7 @@ def get_instance_by_id(conn: Any, strategy_instance_id: int) -> Optional[Dict[st
             d["opened_at_epoch"] = d["opened_at"].timestamp()
         if d.get("created_at") is not None and hasattr(d["created_at"], "timestamp"):
             d["created_at_epoch"] = d["created_at"].timestamp()
-        return d
+        return add_trade_names(d)
     except Exception as e:
         logger.debug("get_instance_by_id failed: %s", e)
         return None
@@ -368,8 +369,8 @@ def patch_instance(conn_or_config: Any, strategy_instance_id: int, fields: Dict[
     ``opened_at`` / ``created_at``: NOT NULL timestamps (datetime, Unix seconds or ISO 8601).
     Raises WriteInvalid (empty, unknown key, bad value), WriteNotFound, WriteFailed.
     """
-    what = f"strategy instance {strategy_instance_id}"
-    fields = ws.check_fields(fields, INSTANCE_PATCHABLE, "strategy instance")
+    what = f"trade {strategy_instance_id}"
+    fields = ws.check_fields(fields, INSTANCE_PATCHABLE, "trade")
     columns: Dict[str, Any] = {}
     for name in ("label", "notes"):
         if name in fields:
@@ -385,7 +386,7 @@ def patch_instance(conn_or_config: Any, strategy_instance_id: int, fields: Dict[
                 [*values, strategy_instance_id],
             )
             if cur.rowcount == 0:
-                raise WriteNotFound(f"No strategy instance {strategy_instance_id}.")
+                raise WriteNotFound(f"No trade {strategy_instance_id}.")
         row = get_instance_by_id(conn, strategy_instance_id)
         if row is None:
             raise WriteFailed(f"{what} was changed but could not be read back; nothing was saved.")
@@ -422,7 +423,7 @@ def count_attributed_executions(status_config: Any, strategy_instance_id: int) -
     Before core 0.37.0 this read Golden Source's raw columns, shared by all three envs.
     Raises WriteFailed when the env database cannot be read.
     """
-    what = f"the executions attributed to strategy instance {strategy_instance_id}"
+    what = f"the fills attributed to trade {strategy_instance_id}"
     with ws.write_connection(status_config, what) as conn:
         try:
             with conn.cursor() as cur:
@@ -436,7 +437,7 @@ def count_attributed_executions(status_config: Any, strategy_instance_id: int) -
 
 
 def delete_instance_strict(status_config: Any, strategy_instance_id: int) -> Dict[str, Any]:
-    """Delete an instance nothing is attributed to. Returns ``{"deleted": "hard", "strategy_instance_id"}``.
+    """Delete an instance nothing is attributed to. Returns ``{"deleted": "hard", "strategy_instance_id", "trade_id"}``.
 
     Refused (WriteConflict, nothing deleted) when fills are split-allocated to it or
     attributed to it whole in this env's ``strategy_instance_execution`` (TD-09; its
@@ -444,7 +445,7 @@ def delete_instance_strict(status_config: Any, strategy_instance_id: int) -> Dic
     review: both FKs are ON DELETE RESTRICT since core 0.41.0 (TD-43), so a filled plan never
     loses its instance and a review is never deleted with one.
     """
-    what = f"strategy instance {strategy_instance_id}"
+    what = f"trade {strategy_instance_id}"
     if not isinstance(status_config, dict):
         raise WriteFailed(
             f"Cannot delete {what}: the status config is needed to open its database."
@@ -456,16 +457,16 @@ def delete_instance_strict(status_config: Any, strategy_instance_id: int) -> Dic
                 (strategy_instance_id,),
             )
             if cur.fetchone() is None:
-                raise WriteNotFound(f"No strategy instance {strategy_instance_id}.")
+                raise WriteNotFound(f"No trade {strategy_instance_id}.")
             n_direct, n_split = _attributed_counts(cur, strategy_instance_id)
             if n_split:
                 raise WriteConflict(
-                    f"{ws.plural(n_split, 'execution is', 'executions are')} split-allocated to this instance; "
-                    "move or clear those allocations first."
+                    f"{ws.plural(n_split, 'fill is', 'fills are')} split to this trade; "
+                    "move or clear those splits first."
                 )
             if n_direct:
                 raise WriteConflict(
-                    f"{ws.plural(n_direct, 'execution is', 'executions are')} attributed to this instance."
+                    f"{ws.plural(n_direct, 'fill is', 'fills are')} attributed to this trade."
                 )
             n_plans, n_reviews = _plan_and_review_counts(cur, strategy_instance_id)
             if n_plans or n_reviews:
@@ -477,5 +478,5 @@ def delete_instance_strict(status_config: Any, strategy_instance_id: int) -> Dic
                 (strategy_instance_id,),
             )
             if cur.rowcount == 0:
-                raise WriteNotFound(f"No strategy instance {strategy_instance_id}.")
-    return {"deleted": "hard", "strategy_instance_id": strategy_instance_id}
+                raise WriteNotFound(f"No trade {strategy_instance_id}.")
+    return {"deleted": "hard", "strategy_instance_id": strategy_instance_id, "trade_id": strategy_instance_id}
