@@ -2,9 +2,15 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional, get_args
 
 from pydantic import BaseModel, Field
+
+# strategy_opportunity.scope_type (TD-71, core 0.41.0): where the symbols came from. `symbols`
+# is what the rule covers either way; `watchlist_stk` needs at least one. NULL = not said.
+# The table's CHECK strategy_opportunity_scope_type_ck holds the same set.
+ScopeType = Literal["watchlist_stk", "explicit_symbols"]
+SCOPE_TYPES: tuple[str, ...] = get_args(ScopeType)
 
 
 class EntryConditionBody(BaseModel):
@@ -24,9 +30,13 @@ class OpportunityBody(BaseModel):
     name: str = Field(..., min_length=1)
     strategy_structure_id: int
     default_gate_safety_strategy_id: Optional[int] = None
-    scope_type: Optional[str] = Field(None, description="e.g. watchlist_stk, explicit_symbols")
+    scope_type: Optional[Literal["watchlist_stk", "explicit_symbols", ""]] = Field(
+        None,
+        description="watchlist_stk | explicit_symbols ('' or null = not said): where the symbols came from",
+    )
     symbols: Optional[List[str]] = Field(
-        default_factory=list, description="Symbol list when scope_type is explicit_symbols"
+        default_factory=list,
+        description="The symbols the rule covers (whatever scope_type says); watchlist_stk needs at least one",
     )
     entry_conditions: Optional[List[EntryConditionBody]] = Field(default_factory=list)
     is_active: bool = True
@@ -38,7 +48,7 @@ class OpportunityUpdateBody(BaseModel):
     name: Optional[str] = Field(None, min_length=1)
     strategy_structure_id: Optional[int] = None
     default_gate_safety_strategy_id: Optional[int] = None
-    scope_type: Optional[str] = None
+    scope_type: Optional[Literal["watchlist_stk", "explicit_symbols", ""]] = None
     symbols: Optional[List[str]] = None
     entry_conditions: Optional[List[EntryConditionBody]] = None
     is_active: Optional[bool] = None
