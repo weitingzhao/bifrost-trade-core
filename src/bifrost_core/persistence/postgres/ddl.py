@@ -58,6 +58,47 @@ _GATE_SAFETY_RETIRED_CHILD_TABLES = frozenset(
 )
 
 
+# TD-09 (core 0.37.0): per-env strategy attribution keyed by the fill (account_id, exec_id).
+# Shared with the one-off migration (td09_attribution), which applies it in the same
+# transaction as the load. Idempotent.
+STRATEGY_INSTANCE_EXECUTION_DDL: tuple[str, ...] = (
+    """
+    DO $sie$
+    BEGIN
+      IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'strategy_instance_id_account_uq'
+          AND conrelid = 'public.strategy_instance'::regclass
+      ) THEN
+        ALTER TABLE strategy_instance
+          ADD CONSTRAINT strategy_instance_id_account_uq UNIQUE (strategy_instance_id, account_id);
+      END IF;
+    END $sie$;
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS strategy_instance_execution (
+        strategy_instance_execution_id bigserial PRIMARY KEY,
+        account_id text NOT NULL,
+        exec_id text NOT NULL,
+        strategy_instance_id bigint NOT NULL,
+        allocated_quantity numeric NULL,
+        created_at timestamptz NOT NULL DEFAULT now(),
+        updated_at timestamptz NOT NULL DEFAULT now(),
+        CONSTRAINT strategy_instance_execution_instance_fk
+            FOREIGN KEY (strategy_instance_id, account_id)
+            REFERENCES strategy_instance (strategy_instance_id, account_id) ON DELETE RESTRICT,
+        CONSTRAINT strategy_instance_execution_uq UNIQUE (account_id, exec_id, strategy_instance_id),
+        CONSTRAINT strategy_instance_execution_qty_ck
+            CHECK (allocated_quantity IS NULL OR allocated_quantity <> 0)
+    )
+    """,
+    "CREATE UNIQUE INDEX IF NOT EXISTS strategy_instance_execution_whole_uq "
+    "ON strategy_instance_execution (account_id, exec_id) WHERE allocated_quantity IS NULL",
+    "CREATE INDEX IF NOT EXISTS strategy_instance_execution_instance_ix "
+    "ON strategy_instance_execution (strategy_instance_id)",
+)
+
+
 def _drop_gate_safety_retired_child_tables(cur) -> None:
     """Drop Wave 1 child tables if they still exist on legacy databases."""
     for name in _GATE_SAFETY_RETIRED_CHILD_TABLES:
@@ -694,6 +735,20 @@ def _ensure_tables(conn, log=None, log_table=None) -> None:
             "CREATE INDEX IF NOT EXISTS account_exec_inst_alloc_strategy_instance_id "
             "ON account_execution_instance_allocation (strategy_instance_id)"
         )
+
+        # TD-09 (core 0.37.0): strategy attribution per env, keyed by the fill
+        # (account_id, exec_id) -- a TWS row and its Flex twin share it. Replaces the
+        # Golden Source raw_broker.executions_raw_*.strategy_* columns (shared by all
+        # three envs, so one env's writes showed up in the others) and the split table
+        # above. NULL allocated_quantity = the whole fill; split rows carry their share.
+        # The composite FK makes "the fill's account is the instance's account" a rule
+        # of the database rather than a Python check.
+        _log_table(
+            "strategy_instance_execution",
+            "Strategy attribution of a fill (account_id, exec_id) to this env's instance; splits carry allocated_quantity (TD-09)",
+        )
+        for stmt in STRATEGY_INSTANCE_EXECUTION_DDL:
+            cur.execute(stmt)
 
         # OPT exercise / assignment: link option execution row(s) to underlying STK fills (performance book).
         _log_table(

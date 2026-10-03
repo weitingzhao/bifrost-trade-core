@@ -12,8 +12,10 @@ import logging
 from typing import Any, Callable, Optional
 
 from bifrost_core.persistence.postgres.brokerage_tables import (
+    BROKERAGE_ENV_VIEWS,
     BROKERAGE_PHYSICAL_TABLES,
     BROKERAGE_VIEWS,
+    INSTANCE_EXECUTION,
     SCHEMA,
 )
 from bifrost_core.persistence.postgres.market_tables import (
@@ -438,15 +440,52 @@ def ensure_brokerage_schema(
     conn.commit()
 
 
-def _create_brokerage_views(cur: Any, schema: str) -> None:
+def _env_attributed(rows_sql: str) -> str:
+    """Wrap a set of raw execution rows with this env's attribution (TD-09).
+
+    ``rows_sql`` selects ``account_executions_id`` plus the canonical columns. The two
+    Golden Source attribution columns are replaced: ``strategy_instance_id`` from the
+    whole-fill row of ``public.strategy_instance_execution`` on (account_id, exec_id),
+    ``strategy_opportunity_id`` from that instance. Column names and order are unchanged.
+    """
+    cols = [c.strip() for c in _EXEC_CANONICAL_COLS.split(",") if c.strip()]
+    out = []
+    for c in cols:
+        if c == "strategy_instance_id":
+            out.append("sie.strategy_instance_id")
+        elif c == "strategy_opportunity_id":
+            out.append("si.strategy_opportunity_id")
+        else:
+            out.append(f"u.{c}")
+    return (
+        f"SELECT u.account_executions_id, {', '.join(out)}\n"
+        f"        FROM ({rows_sql}) u\n"
+        f"        LEFT JOIN public.{INSTANCE_EXECUTION} sie\n"
+        "          ON sie.account_id = u.account_id AND sie.exec_id = u.exec_id\n"
+        "         AND sie.allocated_quantity IS NULL\n"
+        "        LEFT JOIN public.strategy_instance si ON si.strategy_instance_id = sie.strategy_instance_id"
+    )
+
+
+def _create_brokerage_views(cur: Any, schema: str, *, env: bool = False) -> None:
+    """The execution views over the three raw tables.
+
+    Golden Source (``env=False``): the attribution columns are the raw tables' own (no
+    longer written since TD-09; kept for the rollback window). Per-env DBs (``env=True``,
+    over the FDW tables): attribution comes from this env's ``strategy_instance_execution``,
+    and two env-only views are added -- ``executions_tws`` and ``instance_allocations``.
+    """
     cols = _EXEC_CANONICAL_COLS
+    for name in BROKERAGE_ENV_VIEWS:
+        cur.execute(f"DROP VIEW IF EXISTS {schema}.{name} CASCADE")
     cur.execute(f"DROP VIEW IF EXISTS {schema}.executions_fly CASCADE")
     cur.execute(f"DROP VIEW IF EXISTS {schema}.executions_final CASCADE")
     cur.execute(f"DROP VIEW IF EXISTS {schema}.executions CASCADE")
 
-    cur.execute(
-        f"""
-        CREATE OR REPLACE VIEW {schema}.executions AS
+    def body(rows_sql: str) -> str:
+        return _env_attributed(rows_sql) if env else rows_sql
+
+    executions_rows = f"""
         SELECT executions_raw_flex_id AS account_executions_id,
                {cols}
         FROM {schema}.executions_raw_flex
@@ -465,11 +504,9 @@ def _create_brokerage_views(cur: Any, schema: str) -> None:
                {cols}
         FROM {schema}.executions_raw_journal
         """
-    )
+    cur.execute(f"CREATE OR REPLACE VIEW {schema}.executions AS {body(executions_rows)}")
 
-    cur.execute(
-        f"""
-        CREATE OR REPLACE VIEW {schema}.executions_final AS
+    final_rows = f"""
         SELECT executions_raw_flex_id AS account_executions_id,
                {cols}
         FROM {schema}.executions_raw_flex
@@ -478,7 +515,7 @@ def _create_brokerage_views(cur: Any, schema: str) -> None:
                {cols}
         FROM {schema}.executions_raw_journal
         """
-    )
+    cur.execute(f"CREATE OR REPLACE VIEW {schema}.executions_final AS {body(final_rows)}")
 
     exec_cols_t = ", ".join(f"t.{c.strip()}" for c in cols.split(",") if c.strip())
     fly_final_equity = (
@@ -490,9 +527,7 @@ def _create_brokerage_views(cur: Any, schema: str) -> None:
         "NULLIF(trim(split_part(COALESCE(f.contract_key, ''), '|', 2)), '')"
         ")))"
     )
-    cur.execute(
-        f"""
-        CREATE OR REPLACE VIEW {schema}.executions_fly AS
+    fly_rows = f"""
         SELECT -(t.executions_raw_tws_id) AS account_executions_id,
                {exec_cols_t}
         FROM {schema}.executions_raw_tws t
@@ -523,6 +558,39 @@ def _create_brokerage_views(cur: Any, schema: str) -> None:
                 )
               )
         )
+        """
+    cur.execute(f"CREATE OR REPLACE VIEW {schema}.executions_fly AS {body(fly_rows)}")
+
+    if not env:
+        return
+
+    tws_rows = f"""
+        SELECT -(executions_raw_tws_id) AS account_executions_id,
+               {cols}
+        FROM {schema}.executions_raw_tws
+        """
+    cur.execute(f"CREATE OR REPLACE VIEW {schema}.executions_tws AS {body(tws_rows)}")
+
+    # Split rows, one per raw representation of the fill, in the shape readers joined
+    # account_execution_instance_allocation by (account_executions_id, account_id).
+    cur.execute(
+        f"""
+        CREATE OR REPLACE VIEW {schema}.instance_allocations AS
+        SELECT s.account_id, x.account_executions_id, s.strategy_instance_id,
+               s.allocated_quantity::double precision AS allocated_quantity,
+               s.exec_id
+        FROM public.{INSTANCE_EXECUTION} s
+        JOIN (
+            SELECT executions_raw_flex_id AS account_executions_id, account_id, exec_id
+            FROM {schema}.executions_raw_flex
+            UNION ALL
+            SELECT -(executions_raw_tws_id), account_id, exec_id
+            FROM {schema}.executions_raw_tws
+            UNION ALL
+            SELECT -(1000000000 + executions_raw_journal_id), account_id, exec_id
+            FROM {schema}.executions_raw_journal
+        ) x ON x.account_id = s.account_id AND x.exec_id = s.exec_id
+        WHERE s.allocated_quantity IS NOT NULL
         """
     )
 
@@ -600,6 +668,15 @@ def setup_fdw_foreign_tables(
     remote_password = str(golden_source_params.get("password") or "")
 
     with env_conn.cursor() as cur:
+        # The env views join public.strategy_instance_execution, which _ensure_tables
+        # creates (db_refresh_schema runs it first). A DB without it is not on TD-09
+        # yet: stop before dropping anything rather than build views that read Golden
+        # Source's attribution columns.
+        cur.execute("SELECT to_regclass(%s)", (f"public.{INSTANCE_EXECUTION}",))
+        if (cur.fetchone() or [None])[0] is None:
+            raise RuntimeError(
+                f"public.{INSTANCE_EXECUTION} is missing: run _ensure_tables (db_refresh_schema) first."
+            )
         if not skip_server_admin:
             cur.execute("CREATE EXTENSION IF NOT EXISTS postgres_fdw")
             _log("extension postgres_fdw")
@@ -653,7 +730,7 @@ def setup_fdw_foreign_tables(
 
         cur.execute(f"CREATE SCHEMA IF NOT EXISTS {SCHEMA}")
 
-        for name in BROKERAGE_VIEWS:
+        for name in (*BROKERAGE_ENV_VIEWS, *BROKERAGE_VIEWS):
             cur.execute(f"DROP VIEW IF EXISTS {SCHEMA}.{name} CASCADE")
         for name in BROKERAGE_PHYSICAL_TABLES:
             cur.execute(f"DROP FOREIGN TABLE IF EXISTS {SCHEMA}.{name} CASCADE")
@@ -672,7 +749,7 @@ def setup_fdw_foreign_tables(
             f"imported foreign tables from {GOLDEN_SOURCE_BROKERAGE_SCHEMA}: {table_list}"
         )
 
-        _create_brokerage_views(cur, SCHEMA)
+        _create_brokerage_views(cur, SCHEMA, env=True)
         _log("local views over foreign tables")
 
         cur.execute(f"GRANT USAGE ON SCHEMA {SCHEMA} TO {local_user}")

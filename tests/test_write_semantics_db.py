@@ -185,20 +185,19 @@ def test_strict_deletes_in_postgres(db) -> None:
         rules.delete_allocation_strict(db, ids["alloc"])
 
 
-def test_instance_delete_reads_golden_source_attribution(db) -> None:
+def test_instance_delete_reads_this_envs_attribution(db) -> None:
     ids = _seed_rule_chain(db)
-    _one(db, "INSERT INTO raw_broker.executions_raw_tws (exec_id, account_id, symbol, strategy_instance_id) "
-             "VALUES ('td15.e1', %s, 'TDXV', %s)", (ACCOUNT, ids["inst"]))
+    # Golden Source's columns no longer count (TD-09): this env's table does.
     _one(db, "INSERT INTO raw_broker.executions_raw_flex (exec_id, account_id, symbol, strategy_instance_id) "
-             "VALUES ('td15.e1', %s, 'TDXV', %s)", (ACCOUNT, ids["inst"]))
-    _one(db, "INSERT INTO raw_broker.executions_raw_flex (exec_id, account_id, symbol, strategy_instance_id) "
-             "VALUES ('td15.e2', %s, 'TDXV', %s)", (ACCOUNT, ids["inst"]))
-    assert strategy_instance.count_attributed_executions(CFG, ids["inst"]) == 2  # e1 counted once
+             "VALUES ('td15.e9', %s, 'TDXV', %s)", (ACCOUNT, ids["inst"]))
+    assert strategy_instance.count_attributed_executions(CFG, ids["inst"]) == 0
+    _one(db, "INSERT INTO strategy_instance_execution (account_id, exec_id, strategy_instance_id) "
+             "VALUES (%s, 'td15.e1', %s), (%s, 'td15.e2', %s)", (ACCOUNT, ids["inst"], ACCOUNT, ids["inst"]))
+    assert strategy_instance.count_attributed_executions(CFG, ids["inst"]) == 2
     with pytest.raises(WriteConflict, match="^2 executions are attributed to this instance.$"):
         strategy_instance.delete_instance_strict(CFG, ids["inst"])
     assert _one(db, "SELECT 1 FROM strategy_instance WHERE strategy_instance_id = %s", (ids["inst"],)) == (1,)
-    _one(db, "UPDATE raw_broker.executions_raw_tws SET strategy_instance_id = NULL WHERE exec_id LIKE 'td15.%%'")
-    _one(db, "UPDATE raw_broker.executions_raw_flex SET strategy_instance_id = NULL WHERE exec_id LIKE 'td15.%%'")
+    _one(db, "DELETE FROM strategy_instance_execution WHERE exec_id LIKE 'td15.%%'")
     assert strategy_instance.delete_instance_strict(CFG, ids["inst"])["deleted"] == "hard"
 
 

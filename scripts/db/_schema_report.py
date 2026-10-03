@@ -20,6 +20,7 @@ EXPECTED_TABLES_BY_CATEGORY: Dict[str, List[str]] = {
     ],
     "execution": [
         "account_execution_instance_allocation",
+        "strategy_instance_execution",
         "account_execution_option_stock_link",
     ],
     "gate_safety": [

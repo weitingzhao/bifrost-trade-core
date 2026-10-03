@@ -26,6 +26,7 @@ from bifrost_core.persistence.postgres.brokerage_tables import (
     GOLDEN_EXECUTIONS_RAW_TWS,
     GOLDEN_TRANSACTIONS,
     INSTANCE_ALLOCATION,
+    INSTANCE_EXECUTION,
     OPTION_STOCK_LINK,
     POSITIONS,
 )
@@ -57,6 +58,111 @@ def _normalized_signed_qty_from_raw(source: Any, side: Any, quantity: Any) -> fl
     return 0.0 if q is None else q
 
 
+# --- TD-09: attribution lives in this env's strategy_instance_execution -----------------
+#
+# Keyed by the fill (account_id, exec_id): a TWS row and its Flex twin share the key, so
+# one write attributes both. A row with NULL allocated_quantity is the whole fill; split
+# rows carry their share. Golden Source's raw strategy_* columns are no longer written.
+
+OPPORTUNITY_ONLY = (
+    "A fill is attributed to a trade (strategy_instance_id); its opportunity is the trade's. "
+    "Send strategy_instance_id."
+)
+
+
+def _fill_key(raw_cur: Any, raw_tbl: str, pk_col: str, pk_val: int, *, lock: bool = False) -> Optional[Tuple[str, str, float]]:
+    """(account_id, exec_id, signed quantity) of one raw row; None when there is no such row.
+    exec_id is '' when the row has none (such a row cannot be attributed)."""
+    raw_cur.execute(
+        f"SELECT account_id, quantity, side, source, exec_id FROM {raw_tbl} WHERE {pk_col} = %s"
+        + (" FOR UPDATE" if lock else ""),
+        (pk_val,),
+    )
+    row = raw_cur.fetchone()
+    if not row:
+        return None
+    return (
+        (row[0] or "").strip(),
+        (row[4] or "").strip(),
+        _normalized_signed_qty_from_raw(row[3], row[2], row[1]),
+    )
+
+
+def _instance_problem(cur: Any, instance_id: int, account_id: str, opportunity_id: Optional[int] = None) -> Optional[str]:
+    """Why ``instance_id`` cannot take a fill of ``account_id`` (None when it can). When an
+    opportunity is sent with it, it must be the instance's own."""
+    cur.execute(
+        "SELECT account_id, strategy_opportunity_id FROM strategy_instance WHERE strategy_instance_id = %s",
+        (instance_id,),
+    )
+    inst = cur.fetchone()
+    if inst is None:
+        return f"No strategy instance {instance_id}."
+    if (inst[0] or "").strip() != account_id:
+        return f"Strategy instance {instance_id} belongs to account {inst[0]}, and the execution to {account_id}."
+    if opportunity_id is not None and len(inst) > 1 and inst[1] is not None and int(inst[1]) != int(opportunity_id):
+        return f"Strategy instance {instance_id} is under opportunity {inst[1]}, not {opportunity_id}."
+    return None
+
+
+def _split_count(cur: Any, account_id: str, exec_id: str) -> int:
+    cur.execute(
+        f"SELECT count(*) FROM {INSTANCE_EXECUTION} "
+        "WHERE account_id = %s AND exec_id = %s AND allocated_quantity IS NOT NULL",
+        (account_id, exec_id),
+    )
+    return int((cur.fetchone() or [0])[0] or 0)
+
+
+def _drop_attribution_if_last(raw_cur: Any, env_cur: Any, account_id: str, exec_id: str) -> int:
+    """After a raw row is deleted: remove the fill's attribution unless another raw row
+    (its TWS / Flex twin) still carries (account_id, exec_id). Returns the split rows removed."""
+    if not exec_id:
+        return 0
+    for table in (GOLDEN_EXECUTIONS_RAW_TWS, GOLDEN_EXECUTIONS_RAW_FLEX, GOLDEN_EXECUTIONS_RAW_JOURNAL):
+        raw_cur.execute(f"SELECT 1 FROM {table} WHERE account_id = %s AND exec_id = %s LIMIT 1", (account_id, exec_id))
+        if raw_cur.fetchone():
+            return 0
+    env_cur.execute(
+        f"DELETE FROM {INSTANCE_EXECUTION} WHERE account_id = %s AND exec_id = %s "
+        "RETURNING allocated_quantity IS NOT NULL",
+        (account_id, exec_id),
+    )
+    return sum(1 for r in (env_cur.fetchall() or []) if r and r[0])
+
+
+def _set_whole_attribution(cur: Any, account_id: str, exec_id: str, instance_id: Optional[int]) -> None:
+    """Attribute the whole fill to ``instance_id``; None clears it. Splits are not touched."""
+    if instance_id is None:
+        cur.execute(
+            f"DELETE FROM {INSTANCE_EXECUTION} "
+            "WHERE account_id = %s AND exec_id = %s AND allocated_quantity IS NULL",
+            (account_id, exec_id),
+        )
+        return
+    cur.execute(
+        f"""
+        INSERT INTO {INSTANCE_EXECUTION} (account_id, exec_id, strategy_instance_id)
+        VALUES (%s, %s, %s)
+        ON CONFLICT (account_id, exec_id) WHERE allocated_quantity IS NULL
+        DO UPDATE SET strategy_instance_id = EXCLUDED.strategy_instance_id, updated_at = now()
+        """,
+        (account_id, exec_id, int(instance_id)),
+    )
+
+
+def _direct_instance(fields: Dict[str, Any]) -> Tuple[bool, Optional[int], Optional[int]]:
+    """From a write body's two ids: (touches the whole-fill attribution, instance, opportunity).
+
+    The opportunity is the instance's and is not stored; sent alone (non-null) it is
+    refused by the callers (OPPORTUNITY_ONLY). ``strategy_opportunity_id: null`` alone
+    changes nothing."""
+    touches = "strategy_instance_id" in fields
+    inst = fields.get("strategy_instance_id")
+    opp = fields.get("strategy_opportunity_id")
+    return touches, (int(inst) if inst is not None else None), (int(opp) if opp is not None else None)
+
+
 def _apply_instance_allocations_on_cursor(
     cur: Any,
     account_executions_id: int,
@@ -67,29 +173,24 @@ def _apply_instance_allocations_on_cursor(
     *,
     raw_cur: Any = None,
 ) -> bool:
-    """DELETE + optional INSERT on per-env INSTANCE_ALLOCATION; clear strategy cols on raw (golden).
+    """Replace the fill's split rows in this env's strategy_instance_execution.
 
-    ``cur`` is the per-env cursor (instance allocation + strategy_instance).
-    ``raw_cur`` is the golden_source cursor for raw execution tables; defaults to ``cur``.
+    ``[]`` removes the splits; a non-empty list replaces them and clears the whole-fill
+    row (a fill is attributed one way or the other). Each split names a distinct
+    instance of the fill's account with a non-zero quantity, and they add up to the
+    fill's signed quantity. ``cur`` is the per-env cursor; ``raw_cur`` the Golden
+    Source one for the raw row (defaults to ``cur``). ``account_executions_id`` is
+    kept for the callers; the key is the raw row's (account_id, exec_id).
     """
     rcur = raw_cur if raw_cur is not None else cur
-    rcur.execute(
-        f"SELECT account_id, quantity, side, source FROM {raw_tbl} WHERE {pk_col} = %s",
-        (pk_val,),
-    )
-    row = rcur.fetchone()
-    if not row:
+    key = _fill_key(rcur, raw_tbl, pk_col, pk_val)
+    if key is None:
         return False
-    acc_id = (row[0] or "").strip()
-    expected = _normalized_signed_qty_from_raw(row[3], row[2], row[1])
-    cur.execute(
-        f"DELETE FROM {INSTANCE_ALLOCATION} WHERE account_executions_id = %s",
-        (int(account_executions_id),),
-    )
-    if not body_allocations:
-        return True
-    total = 0.0
+    acc_id, exec_id, expected = key
+    if not exec_id:
+        return False
     inserts: List[Tuple[int, float]] = []
+    total = 0.0
     for item in body_allocations:
         if not isinstance(item, dict):
             return False
@@ -102,32 +203,32 @@ def _apply_instance_allocations_on_cursor(
             aq = float(aq_raw)
         except (TypeError, ValueError):
             return False
-        cur.execute(
-            "SELECT account_id FROM strategy_instance WHERE strategy_instance_id = %s",
-            (si_id,),
-        )
-        si_row = cur.fetchone()
-        if not si_row or (si_row[0] or "").strip() != acc_id:
+        if aq == 0 or not math.isfinite(aq):
+            return False
+        if _instance_problem(cur, si_id, acc_id) is not None:
             return False
         inserts.append((si_id, aq))
         total += aq
     if len({x[0] for x in inserts}) != len(inserts):
         return False
-    if abs(total - expected) > 1e-5 * max(1.0, abs(expected)):
+    if inserts and abs(total - expected) > 1e-5 * max(1.0, abs(expected)):
         return False
+    cur.execute(
+        f"DELETE FROM {INSTANCE_EXECUTION} "
+        "WHERE account_id = %s AND exec_id = %s AND allocated_quantity IS NOT NULL",
+        (acc_id, exec_id),
+    )
+    if not inserts:
+        return True
+    _set_whole_attribution(cur, acc_id, exec_id, None)
     for si_id, aq in inserts:
         cur.execute(
             f"""
-            INSERT INTO {INSTANCE_ALLOCATION} (
-                account_id, account_executions_id, strategy_instance_id, allocated_quantity
-            ) VALUES (%s, %s, %s, %s)
+            INSERT INTO {INSTANCE_EXECUTION} (account_id, exec_id, strategy_instance_id, allocated_quantity)
+            VALUES (%s, %s, %s, %s)
             """,
-            (acc_id, int(account_executions_id), si_id, aq),
+            (acc_id, exec_id, si_id, aq),
         )
-    rcur.execute(
-        f"UPDATE {raw_tbl} SET strategy_instance_id = NULL, strategy_opportunity_id = NULL WHERE {pk_col} = %s",
-        (pk_val,),
-    )
     return True
 
 
@@ -136,7 +237,7 @@ def replace_execution_instance_allocations(
     account_executions_id: int,
     body_allocations: Any,
 ) -> bool:
-    """Replace or clear account_execution_instance_allocation rows. body_allocations: None=skip, []=delete all, list=replace."""
+    """Replace or clear the fill's split rows (strategy_instance_execution). body_allocations: None=skip, []=delete all, list=replace."""
     if body_allocations is None:
         return True
     if not isinstance(body_allocations, list):
@@ -548,7 +649,7 @@ def get_accounts_from_tables(
                                     SELECT e.contract_key,
                                            si.strategy_opportunity_id,
                                            a.strategy_instance_id
-                                    FROM account_execution_instance_allocation a
+                                    FROM {INSTANCE_ALLOCATION} a
                                     INNER JOIN strategy_instance si ON a.strategy_instance_id = si.strategy_instance_id
                                     INNER JOIN {_exec_tbl} e
                                       ON e.account_executions_id = a.account_executions_id
@@ -1083,27 +1184,24 @@ def insert_one_execution(status_config: dict, body: Dict[str, Any]) -> Optional[
     raw_extra = body.get("raw_extra")
     if raw_extra is not None and not isinstance(raw_extra, str):
         raw_extra = json.dumps(raw_extra) if raw_extra else None
-    strategy_opportunity_id = body.get("strategy_opportunity_id")
-    strategy_instance_id = body.get("strategy_instance_id")
-    if strategy_opportunity_id is not None:
-        try:
-            strategy_opportunity_id = int(strategy_opportunity_id)
-        except (TypeError, ValueError):
-            strategy_opportunity_id = None
-    if strategy_instance_id is not None:
-        try:
-            strategy_instance_id = int(strategy_instance_id)
-        except (TypeError, ValueError):
-            strategy_instance_id = None
+    try:
+        _, strategy_instance_id, strategy_opportunity_id = _direct_instance(body)
+    except (TypeError, ValueError):
+        return None
+    if strategy_instance_id is None and strategy_opportunity_id is not None:
+        logger.warning("insert_one_execution refused: %s", OPPORTUNITY_ONLY)
+        return None
     exec_dt = _exec_time_to_dt(exec_time)
     try:
         env_conn = ws.open_conn(status_config)
         golden = ws.open_conn(status_config, golden=True)
         try:
             with golden.cursor() as cur, env_conn.cursor() as env_cur:
-                cols = "account_id, exec_id, exec_time, symbol, sec_type, side, quantity, price, source, expiry, strike, option_right, exchange, order_id, cum_qty, contract_key, raw_extra, strategy_opportunity_id, strategy_instance_id"
-                placeholders = "%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s"
-                vals = (account_id, exec_id, exec_dt, symbol, sec_type, side, quantity, price, source, expiry, strike, option_right, exchange, order_id, cum_qty, contract_key, raw_extra, strategy_opportunity_id, strategy_instance_id)
+                # The strategy attribution goes to this env's strategy_instance_execution
+                # below (TD-09), not to Golden Source's strategy_* columns.
+                cols = "account_id, exec_id, exec_time, symbol, sec_type, side, quantity, price, source, expiry, strike, option_right, exchange, order_id, cum_qty, contract_key, raw_extra"
+                placeholders = "%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s"
+                vals = (account_id, exec_id, exec_dt, symbol, sec_type, side, quantity, price, source, expiry, strike, option_right, exchange, order_id, cum_qty, contract_key, raw_extra)
                 new_id = None
                 # Write physical raw tables on golden_source (executions view is read-only).
                 if source == "journal_closed":
@@ -1147,6 +1245,15 @@ def insert_one_execution(status_config: dict, body: Dict[str, Any]) -> Optional[
                         """,
                         (exec_id, commission, currency or None, realized_pnl),
                     )
+                if new_id is not None and strategy_instance_id is not None:
+                    acc_key = str(account_id or "").strip()
+                    problem = _instance_problem(env_cur, strategy_instance_id, acc_key, strategy_opportunity_id)
+                    if problem is not None:
+                        logger.warning("insert_one_execution refused: %s", problem)
+                        env_conn.rollback()
+                        golden.rollback()
+                        return None
+                    _set_whole_attribution(env_cur, acc_key, exec_id, strategy_instance_id)
                 if new_id is not None and body.get("instance_allocations") is not None:
                     ia = body.get("instance_allocations")
                     if not isinstance(ia, list):
@@ -1315,7 +1422,9 @@ def update_one_execution(status_config: dict, account_executions_id: int, body: 
     if not status_config or (status_config.get("sink") != "postgres" and not status_config.get("postgres")):
         return False
     # 可更新列（与 raw 表一致）
-    exec_cols = ("exec_time", "symbol", "sec_type", "side", "quantity", "price", "account_id", "source", "expiry", "strike", "option_right", "exchange", "order_id", "cum_qty", "contract_key", "strategy_opportunity_id", "strategy_instance_id")
+    # strategy_opportunity_id / strategy_instance_id go to this env's
+    # strategy_instance_execution (TD-09), not to the raw row.
+    exec_cols = ("exec_time", "symbol", "sec_type", "side", "quantity", "price", "account_id", "source", "expiry", "strike", "option_right", "exchange", "order_id", "cum_qty", "contract_key")
     commission_keys = ("commission", "realized_pnl", "currency")
     updates: List[str] = []
     values: List[Any] = []
@@ -1330,15 +1439,17 @@ def update_one_execution(status_config: dict, account_executions_id: int, body: 
             continue
         else:
             v = body[k]
-        if k in ("strategy_opportunity_id", "strategy_instance_id") and v is not None:
-            try:
-                v = int(v)
-            except (TypeError, ValueError):
-                v = None
         if k == "raw_extra" and v is not None and not isinstance(v, str):
             v = json.dumps(v) if v else None
         updates.append(f'"{k}" = %s')
         values.append(v)
+    try:
+        touches_whole, direct_instance, direct_opportunity = _direct_instance(body)
+    except (TypeError, ValueError):
+        touches_whole, direct_instance, direct_opportunity = True, None, None
+    if direct_instance is None and direct_opportunity is not None:
+        logger.warning("update_one_execution refused: %s", OPPORTUNITY_ONLY)
+        return False
     raw_tbl, pk_col, pk_val = _raw_table_pk_for_account_executions_id(account_executions_id)
     values.append(pk_val)
     try:
@@ -1346,6 +1457,29 @@ def update_one_execution(status_config: dict, account_executions_id: int, body: 
         golden = ws.open_conn(status_config, golden=True)
         try:
             with golden.cursor() as cur, env_conn.cursor() as env_cur:
+                key = _fill_key(cur, raw_tbl, pk_col, pk_val, lock=True)
+                if key is None:
+                    golden.rollback()
+                    env_conn.rollback()
+                    return False
+                old_account, exec_id_key, _ = key
+                new_account = str(body["account_id"]).strip() if body.get("account_id") is not None else old_account
+                if new_account != old_account and exec_id_key:
+                    # The attribution is keyed by (account_id, exec_id) and its instance is
+                    # on the old account: moving the fill would orphan it.
+                    env_cur.execute(
+                        f"SELECT 1 FROM {INSTANCE_EXECUTION} WHERE account_id = %s AND exec_id = %s LIMIT 1",
+                        (old_account, exec_id_key),
+                    )
+                    if env_cur.fetchone():
+                        logger.warning(
+                            "update_one_execution refused: %s is attributed; clear its trade before moving it to %s",
+                            account_executions_id,
+                            new_account,
+                        )
+                        golden.rollback()
+                        env_conn.rollback()
+                        return False
                 if updates:
                     cur.execute(
                         f"UPDATE {raw_tbl} SET " + ", ".join(updates) + f" WHERE {pk_col} = %s",
@@ -1362,7 +1496,11 @@ def update_one_execution(status_config: dict, account_executions_id: int, body: 
                             account_executions_id,
                         )
                         return False
-                elif not any(k in body for k in commission_keys) and "instance_allocations" not in body:
+                elif (
+                    not any(k in body for k in commission_keys)
+                    and "instance_allocations" not in body
+                    and not touches_whole
+                ):
                     return False
                 if "instance_allocations" in body:
                     ia = body.get("instance_allocations")
@@ -1377,6 +1515,24 @@ def update_one_execution(status_config: dict, account_executions_id: int, body: 
                             golden.rollback()
                             env_conn.rollback()
                             return False
+                if touches_whole:
+                    if not exec_id_key:
+                        golden.rollback()
+                        env_conn.rollback()
+                        return False
+                    if direct_instance is not None:
+                        problem = _instance_problem(env_cur, direct_instance, new_account, direct_opportunity)
+                        if problem is None and body.get("instance_allocations"):
+                            problem = "send instance_allocations or strategy_instance_id, not both"
+                        if problem is None and "instance_allocations" not in body:
+                            if _split_count(env_cur, new_account, exec_id_key):
+                                problem = "the execution is split across trades; send instance_allocations: []"
+                        if problem is not None:
+                            logger.warning("update_one_execution refused: %s", problem)
+                            golden.rollback()
+                            env_conn.rollback()
+                            return False
+                    _set_whole_attribution(env_cur, new_account, exec_id_key, direct_instance)
                 # commission 相关（exec_id 从物理表读取）
                 if any(k in body for k in commission_keys):
                     cur.execute(f"SELECT exec_id FROM {raw_tbl} WHERE {pk_col} = %s", (pk_val,))
@@ -1415,7 +1571,7 @@ def update_one_execution(status_config: dict, account_executions_id: int, body: 
 
 
 def delete_one_execution(status_config: dict, account_executions_id: int) -> bool:
-    """R-A2 扩展：按 account_executions_id 删除一条执行记录。删除 golden raw 行 + commissions；清理 per-env instance_allocation。"""
+    """R-A2 扩展：按 account_executions_id 删除一条执行记录。删除 golden raw 行 + commissions；无孪生行时清理本环境 strategy_instance_execution。"""
     if not status_config or (status_config.get("sink") != "postgres" and not status_config.get("postgres")):
         return False
     raw_tbl, pk_col, pk_val = _raw_table_pk_for_account_executions_id(account_executions_id)
@@ -1424,13 +1580,8 @@ def delete_one_execution(status_config: dict, account_executions_id: int) -> boo
         golden = ws.open_conn(status_config, golden=True)
         try:
             with golden.cursor() as cur, env_conn.cursor() as env_cur:
-                cur.execute(f"SELECT exec_id FROM {raw_tbl} WHERE {pk_col} = %s", (pk_val,))
-                row = cur.fetchone()
-                exec_id = row[0] if row and row[0] and str(row[0]).strip() else None
-                env_cur.execute(
-                    f"DELETE FROM {INSTANCE_ALLOCATION} WHERE account_executions_id = %s",
-                    (int(account_executions_id),),
-                )
+                key = _fill_key(cur, raw_tbl, pk_col, pk_val)
+                exec_id = key[1] if key and key[1] else None
                 if exec_id:
                     cur.execute(f"DELETE FROM {GOLDEN_COMMISSIONS} WHERE exec_id = %s", (exec_id,))
                 cur.execute(f"DELETE FROM {raw_tbl} WHERE {pk_col} = %s", (pk_val,))
@@ -1438,6 +1589,8 @@ def delete_one_execution(status_config: dict, account_executions_id: int) -> boo
                     golden.rollback()
                     env_conn.rollback()
                     return False
+                if key:
+                    _drop_attribution_if_last(cur, env_cur, key[0], key[1])
             golden.commit()
             env_conn.commit()
             return True
@@ -1458,71 +1611,61 @@ def batch_update_execution_strategy(
     strategy_opportunity_id: Optional[int],
     strategy_instance_id: Optional[int],
 ) -> int:
-    """Batch update strategy attribution on raw execution tables (not the account_executions union view).
-    Either by contract_key (all matching rows in each raw table) or by explicit account_executions_id list."""
+    """Batch strategy attribution, by contract_key (every matching raw row) or by an
+    explicit account_executions_id list, written to this env's strategy_instance_execution
+    (TD-09). Returns the raw rows matched; -1 when one of them is split; 0 when nothing
+    matched, the instance is not on the account, only an opportunity was sent, or the
+    write failed."""
     if not conn or not (account_id or "").strip():
         return 0
     acc = str(account_id).strip()
-    count = 0
+    if strategy_instance_id is None and strategy_opportunity_id is not None:
+        logger.warning("batch_update_execution_strategy refused: %s", OPPORTUNITY_ONLY)
+        return 0
     try:
         with conn.cursor() as cur:
-            if execution_ids:
-                cur.execute(
-                    f"SELECT 1 FROM {INSTANCE_ALLOCATION} WHERE account_executions_id = ANY(%s) LIMIT 1",
-                    (execution_ids,),
-                )
-                if cur.fetchone():
+            if strategy_instance_id is not None:
+                problem = _instance_problem(cur, int(strategy_instance_id), acc, strategy_opportunity_id)
+                if problem is not None:
+                    logger.warning("batch_update_execution_strategy refused: %s", problem)
                     conn.rollback()
-                    return -1
+                    return 0
+            exec_ids: List[str] = []
+            if execution_ids:
                 for eid in execution_ids:
                     try:
-                        raw_tbl, pk_col, pk_val = _raw_table_pk_for_account_executions_id(
-                            int(eid), golden=False
-                        )
+                        raw_tbl, pk_col, pk_val = _raw_table_pk_for_account_executions_id(int(eid), golden=False)
                     except (TypeError, ValueError):
                         continue
                     cur.execute(
-                        f"""
-                        UPDATE {raw_tbl}
-                        SET strategy_opportunity_id = %s, strategy_instance_id = %s
-                        WHERE account_id = %s AND {pk_col} = %s
-                        """,
-                        (strategy_opportunity_id, strategy_instance_id, acc, pk_val),
+                        f"SELECT exec_id FROM {raw_tbl} WHERE account_id = %s AND {pk_col} = %s",
+                        (acc, pk_val),
                     )
-                    count += cur.rowcount
+                    exec_ids.extend((r[0] or "").strip() for r in cur.fetchall() or [])
             elif contract_key and contract_key.strip():
                 ck = contract_key.strip()
+                for raw_tbl in (EXECUTIONS_RAW_TWS, EXECUTIONS_RAW_FLEX, EXECUTIONS_RAW_JOURNAL):
+                    cur.execute(
+                        f"SELECT exec_id FROM {raw_tbl} WHERE account_id = %s AND contract_key = %s",
+                        (acc, ck),
+                    )
+                    exec_ids.extend((r[0] or "").strip() for r in cur.fetchall() or [])
+            else:
+                return 0
+            keys = sorted({e for e in exec_ids if e})
+            if keys:
                 cur.execute(
-                    f"""
-                    SELECT 1 FROM {INSTANCE_ALLOCATION} a
-                    WHERE a.account_id = %s
-                      AND EXISTS (
-                        SELECT 1 FROM {EXECUTIONS} e
-                        WHERE e.account_executions_id = a.account_executions_id
-                          AND e.account_id IS NOT DISTINCT FROM a.account_id
-                          AND trim(COALESCE(e.contract_key, '')) = trim(COALESCE(%s, ''))
-                      )
-                    LIMIT 1
-                    """,
-                    (acc, ck),
+                    f"SELECT 1 FROM {INSTANCE_EXECUTION} WHERE account_id = %s AND exec_id = ANY(%s) "
+                    "AND allocated_quantity IS NOT NULL LIMIT 1",
+                    (acc, keys),
                 )
                 if cur.fetchone():
                     conn.rollback()
                     return -1
-                for raw_tbl in (EXECUTIONS_RAW_TWS, EXECUTIONS_RAW_FLEX, EXECUTIONS_RAW_JOURNAL):
-                    cur.execute(
-                        f"""
-                        UPDATE {raw_tbl}
-                        SET strategy_opportunity_id = %s, strategy_instance_id = %s
-                        WHERE account_id = %s AND contract_key = %s
-                        """,
-                        (strategy_opportunity_id, strategy_instance_id, acc, ck),
-                    )
-                    count += cur.rowcount
-            else:
-                return 0
+            for exec_id in keys:
+                _set_whole_attribution(cur, acc, exec_id, strategy_instance_id)
         conn.commit()
-        return count
+        return sum(1 for e in exec_ids if e)
     except Exception as e:
         logger.warning("batch_update_execution_strategy failed: %s", e)
         try:
@@ -1534,11 +1677,10 @@ def batch_update_execution_strategy(
 
 # --- TD-15 writers (core 0.33.0): return what was written / raise Write* ----------------
 #
-# An execution spans two databases: its raw row on Golden Source (raw_broker.*, which
-# holds the direct attribution columns) and its quantity splits in the per-env
-# account_execution_instance_allocation. Both writers below hold one transaction on
-# each, check everything before writing, and commit Golden Source first, as
-# update_one_execution / delete_one_execution do.
+# An execution spans two databases: its raw row on Golden Source (raw_broker.*) and its
+# strategy attribution -- whole fill or splits -- in this env's strategy_instance_execution
+# (TD-09). Both writers below hold one transaction on each, check everything before
+# writing, and commit Golden Source first, as update_one_execution / delete_one_execution do.
 
 EXECUTION_PATCHABLE = ("strategy_opportunity_id", "strategy_instance_id", "instance_allocations")
 _GOLDEN_RAW_TABLES = (
@@ -1548,40 +1690,38 @@ _GOLDEN_RAW_TABLES = (
 )
 
 
-def _execution_attribution(env_cur: Any, golden_cur: Any, account_executions_id: int, raw_tbl: str, pk_col: str, pk_val: int) -> Dict[str, Any]:
+def _execution_attribution(env_cur: Any, account_executions_id: int, account_id: str, exec_id: str) -> Dict[str, Any]:
     """The attribution fields of one execution, as GET /executions items carry them."""
-    golden_cur.execute(
-        f"SELECT account_id, strategy_opportunity_id, strategy_instance_id FROM {raw_tbl} WHERE {pk_col} = %s",
-        (pk_val,),
-    )
-    raw = golden_cur.fetchone()
-    if raw is None:
-        raise WriteFailed(f"execution {account_executions_id} was changed but could not be read back; nothing was saved.")
     env_cur.execute(
         f"""
-        SELECT a.strategy_instance_id, a.allocated_quantity, si.label, si.strategy_opportunity_id
-        FROM {INSTANCE_ALLOCATION} a
-        LEFT JOIN strategy_instance si ON a.strategy_instance_id = si.strategy_instance_id
-        WHERE a.account_executions_id = %s
-        ORDER BY a.strategy_instance_id
+        SELECT sie.strategy_instance_id, sie.allocated_quantity, si.label, si.strategy_opportunity_id
+        FROM {INSTANCE_EXECUTION} sie
+        LEFT JOIN strategy_instance si ON si.strategy_instance_id = sie.strategy_instance_id
+        WHERE sie.account_id = %s AND sie.exec_id = %s
+        ORDER BY sie.allocated_quantity IS NOT NULL, sie.strategy_instance_id
         """,
-        (int(account_executions_id),),
+        (account_id, exec_id),
     )
+    whole: Optional[Tuple[int, Optional[int]]] = None
     allocations = []
     for r in env_cur.fetchall() or []:
+        opp = int(r[3]) if r[3] is not None else None
+        if r[1] is None:
+            whole = (int(r[0]), opp)
+            continue
         item: Dict[str, Any] = {
             "strategy_instance_id": int(r[0]),
             "allocated_quantity": float(r[1]),
-            "strategy_opportunity_id": int(r[3]) if r[3] is not None else None,
+            "strategy_opportunity_id": opp,
         }
         if r[2] is not None and str(r[2]).strip():
             item["strategy_instance_label"] = str(r[2]).strip()
         allocations.append(item)
     return {
         "account_executions_id": int(account_executions_id),
-        "account_id": raw[0],
-        "strategy_opportunity_id": int(raw[1]) if raw[1] is not None else None,
-        "strategy_instance_id": int(raw[2]) if raw[2] is not None else None,
+        "account_id": account_id,
+        "strategy_opportunity_id": whole[1] if whole else None,
+        "strategy_instance_id": whole[0] if whole else None,
         "instance_allocations": allocations,
     }
 
@@ -1593,17 +1733,19 @@ def patch_execution(status_config: Any, account_executions_id: int, fields: Dict
     instance_allocations: [{strategy_instance_id, allocated_quantity, strategy_opportunity_id,
     strategy_instance_label?}]}`` -- the attribution keys of a GET /executions item.
 
-    Patchable: ``strategy_opportunity_id`` / ``strategy_instance_id`` (nullable ids: null
-    clears the direct attribution) and ``instance_allocations`` (the splits, replaced whole;
-    ``[]`` removes them). An execution is attributed one way or the other:
-    non-empty splits together with a non-null id is WriteInvalid; setting a direct id on
-    an execution that has splits, without ``instance_allocations: []`` in the same patch,
-    is WriteConflict. The instance must exist and be on the execution's account, the
-    opportunity must exist, and splits must name distinct instances of that account and
-    add up to the execution's quantity (WriteInvalid otherwise). The fill's own columns
-    (time, price, quantity ...) are not patchable here: ``update_one_execution`` keeps them.
-    Needs the status config (two databases). Raises WriteInvalid, WriteNotFound,
-    WriteConflict, WriteFailed.
+    Patchable: ``strategy_instance_id`` (null clears the whole-fill attribution),
+    ``strategy_opportunity_id`` (not stored -- it is the instance's: sent with an instance it
+    must match it, sent alone it is WriteInvalid unless null) and ``instance_allocations``
+    (the splits, replaced whole; ``[]`` removes them). An execution is attributed one way or
+    the other: non-empty splits together with an instance is WriteInvalid; setting an
+    instance on an execution that has splits, without ``instance_allocations: []`` in the
+    same patch, is WriteConflict. The instance must exist and be on the execution's account,
+    and splits must name distinct instances of that account and add up to the execution's
+    quantity (WriteInvalid otherwise). The write goes to this env's
+    strategy_instance_execution by (account_id, exec_id), so a TWS row and its Flex twin
+    change together. The fill's own columns (time, price, quantity ...) are not patchable
+    here: ``update_one_execution`` keeps them. Needs the status config (two databases).
+    Raises WriteInvalid, WriteNotFound, WriteConflict, WriteFailed.
     """
     what = f"execution {account_executions_id}"
     fields = ws.check_fields(fields, EXECUTION_PATCHABLE, "execution")
@@ -1616,11 +1758,13 @@ def patch_execution(status_config: Any, account_executions_id: int, fields: Dict
         splits = ws.list_value(fields["instance_allocations"], "instance_allocations")
         if any(not isinstance(item, dict) for item in splits):
             raise WriteInvalid("instance_allocations must be a list of {strategy_instance_id, allocated_quantity}.")
-    sets_direct = any(v is not None for v in direct.values())
-    if splits and sets_direct:
+    touches_whole, instance_id, opportunity_id = _direct_instance(direct)
+    if instance_id is None and opportunity_id is not None:
+        raise WriteInvalid(OPPORTUNITY_ONLY)
+    if splits and instance_id is not None:
         raise WriteInvalid(
             "An execution is attributed one way or the other: send instance_allocations, "
-            "or strategy_opportunity_id / strategy_instance_id, not both."
+            "or strategy_instance_id, not both."
         )
     if not isinstance(status_config, dict):
         raise WriteFailed(f"Cannot write {what}: the status config is needed (it spans two databases).")
@@ -1628,58 +1772,34 @@ def patch_execution(status_config: Any, account_executions_id: int, fields: Dict
     with ws.write_connection(status_config, what) as env, ws.write_connection(status_config, what, golden=True) as golden:
         try:
             with golden.cursor() as gcur, env.cursor() as ecur:
-                gcur.execute(f"SELECT account_id FROM {raw_tbl} WHERE {pk_col} = %s FOR UPDATE", (pk_val,))
-                raw = gcur.fetchone()
-                if raw is None:
+                key = _fill_key(gcur, raw_tbl, pk_col, pk_val, lock=True)
+                if key is None:
                     raise WriteNotFound(f"No execution {account_executions_id}.")
-                account_id = (raw[0] or "").strip()
-                instance_id = direct.get("strategy_instance_id")
+                account_id, exec_id, _ = key
+                if not exec_id and (touches_whole or splits is not None):
+                    raise WriteInvalid(f"Execution {account_executions_id} has no exec_id; it cannot be attributed.")
                 if instance_id is not None:
-                    ecur.execute(
-                        "SELECT account_id FROM strategy_instance WHERE strategy_instance_id = %s",
-                        (instance_id,),
-                    )
-                    inst = ecur.fetchone()
-                    if inst is None:
-                        raise WriteInvalid(f"No strategy instance {instance_id}.")
-                    if (inst[0] or "").strip() != account_id:
-                        raise WriteInvalid(
-                            f"Strategy instance {instance_id} belongs to account {inst[0]}, "
-                            f"and the execution to {account_id}."
-                        )
-                opportunity_id = direct.get("strategy_opportunity_id")
-                if opportunity_id is not None:
-                    ecur.execute(
-                        "SELECT 1 FROM strategy_opportunity WHERE strategy_opportunity_id = %s",
-                        (opportunity_id,),
-                    )
-                    if ecur.fetchone() is None:
-                        raise WriteInvalid(f"No opportunity {opportunity_id}.")
-                if sets_direct and splits is None:
-                    ecur.execute(
-                        f"SELECT count(*) FROM {INSTANCE_ALLOCATION} WHERE account_executions_id = %s",
-                        (int(account_executions_id),),
-                    )
-                    n = int((ecur.fetchone() or [0])[0] or 0)
-                    if n:
-                        raise WriteConflict(
-                            f"This execution is split across {ws.plural(n, 'instance', 'instances')}; "
-                            "send instance_allocations: [] with the ids to replace the split."
-                        )
+                    problem = _instance_problem(ecur, instance_id, account_id, opportunity_id)
+                    if problem is not None:
+                        raise WriteInvalid(problem)
+                    if splits is None:
+                        n = _split_count(ecur, account_id, exec_id)
+                        if n:
+                            raise WriteConflict(
+                                f"This execution is split across {ws.plural(n, 'instance', 'instances')}; "
+                                "send instance_allocations: [] with the ids to replace the split."
+                            )
                 if splits is not None:
                     if not _apply_instance_allocations_on_cursor(
                         ecur, account_executions_id, raw_tbl, pk_col, pk_val, splits, raw_cur=gcur
                     ):
                         raise WriteInvalid(
                             "instance_allocations must name distinct strategy instances of account "
-                            f"{account_id}, each with an allocated_quantity, adding up to the execution's quantity."
+                            f"{account_id}, each with a non-zero allocated_quantity, adding up to the execution's quantity."
                         )
-                if direct:
-                    assignments, values = ws.set_clause(direct, touch=False)
-                    gcur.execute(f"UPDATE {raw_tbl} SET {assignments} WHERE {pk_col} = %s", [*values, pk_val])
-                    if gcur.rowcount == 0:
-                        raise WriteNotFound(f"No execution {account_executions_id}.")
-                out = _execution_attribution(ecur, gcur, account_executions_id, raw_tbl, pk_col, pk_val)
+                if touches_whole:
+                    _set_whole_attribution(ecur, account_id, exec_id, instance_id)
+                out = _execution_attribution(ecur, account_executions_id, account_id, exec_id)
             golden.commit()
             env.commit()
             return out
@@ -1693,14 +1813,16 @@ def patch_execution(status_config: Any, account_executions_id: int, fields: Dict
 
 
 def delete_execution_strict(status_config: Any, account_executions_id: int) -> Dict[str, Any]:
-    """Hard-delete one execution: its Golden Source raw row, its commission, its splits.
+    """Hard-delete one execution: its Golden Source raw row, its commission, its attribution.
 
     Returns ``{"deleted": "hard", "account_executions_id", "allocations_removed"}``.
     Refused (WriteConflict) while an option/stock link names it -- those links have no
     FK and would be left pointing at nothing (``delete_one_execution`` leaves them). The
     commission row (keyed by ``exec_id``) is removed only when no other raw row -- the
     same fill recorded by TWS and by Flex -- still carries that ``exec_id``. Needs the
-    status config. Raises WriteNotFound, WriteConflict, WriteFailed.
+    status config. The attribution (this env's strategy_instance_execution) goes too unless
+    the twin still carries the (account_id, exec_id); ``allocations_removed`` counts the
+    split rows removed. Raises WriteNotFound, WriteConflict, WriteFailed.
     """
     what = f"execution {account_executions_id}"
     if not isinstance(status_config, dict):
@@ -1710,11 +1832,10 @@ def delete_execution_strict(status_config: Any, account_executions_id: int) -> D
     with ws.write_connection(status_config, what) as env, ws.write_connection(status_config, what, golden=True) as golden:
         try:
             with golden.cursor() as gcur, env.cursor() as ecur:
-                gcur.execute(f"SELECT exec_id FROM {raw_tbl} WHERE {pk_col} = %s FOR UPDATE", (pk_val,))
-                raw = gcur.fetchone()
-                if raw is None:
+                key = _fill_key(gcur, raw_tbl, pk_col, pk_val, lock=True)
+                if key is None:
                     raise WriteNotFound(f"No execution {account_executions_id}.")
-                exec_id = raw[0] if raw[0] and str(raw[0]).strip() else None
+                exec_id = key[1] or None
                 ecur.execute(
                     f"SELECT count(*) FROM {OPTION_STOCK_LINK} "
                     "WHERE option_account_executions_id = %s OR stock_account_executions_id = %s",
@@ -1726,11 +1847,10 @@ def delete_execution_strict(status_config: Any, account_executions_id: int) -> D
                         f"This execution is in {ws.plural(links, 'option/stock link', 'option/stock links')}; "
                         "unlink it first."
                     )
-                ecur.execute(f"DELETE FROM {INSTANCE_ALLOCATION} WHERE account_executions_id = %s", (eid,))
-                allocations = max(int(ecur.rowcount or 0), 0)
                 gcur.execute(f"DELETE FROM {raw_tbl} WHERE {pk_col} = %s", (pk_val,))
                 if gcur.rowcount == 0:
                     raise WriteNotFound(f"No execution {account_executions_id}.")
+                allocations = _drop_attribution_if_last(gcur, ecur, key[0], key[1])
                 if exec_id:
                     still_used = " AND ".join(
                         f"NOT EXISTS (SELECT 1 FROM {t} WHERE exec_id = %s)" for t in _GOLDEN_RAW_TABLES

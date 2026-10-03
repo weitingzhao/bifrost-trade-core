@@ -148,25 +148,28 @@ def two_dbs(monkeypatch: pytest.MonkeyPatch):
     return install
 
 
+EXEC = "0000e1.01"
+_RAW = "SELECT account_id, quantity, side, source, exec_id FROM raw_broker.executions_raw_flex"
+
+
 def _golden(**over: Any) -> FakeConn:
-    rules = [
-        ("SELECT account_id FROM raw_broker.executions_raw_flex WHERE executions_raw_flex_id = %s FOR UPDATE",
-         over.get("lock", Reply(one=(ACCOUNT,)))),
-        ("SELECT account_id, strategy_opportunity_id, strategy_instance_id FROM",
-         over.get("read", Reply(one=(ACCOUNT, 5, 41)))),
-    ]
-    if "update" in over:
-        rules.insert(0, ("UPDATE raw_broker.executions_raw_flex SET", over["update"]))
-    return FakeConn(rules)
+    """Golden Source: the raw row (lock and plain reads) and the twin check."""
+    return FakeConn(
+        [
+            (_RAW, over.get("lock", Reply(one=(ACCOUNT, 2.0, "BUY", "flex_trades", EXEC)))),
+            ("SELECT 1 FROM raw_broker.executions_raw_", over.get("twin", Reply(one=None))),
+        ]
+    )
 
 
 def _env(**over: Any) -> FakeConn:
+    """The env database: instance check, split count, attribution read-back and writes."""
     return FakeConn(
         [
-            ("SELECT account_id FROM strategy_instance", over.get("instance", Reply(one=(ACCOUNT,)))),
-            ("SELECT 1 FROM strategy_opportunity", over.get("opportunity", Reply(one=(1,)))),
-            ("SELECT count(*) FROM account_execution_instance_allocation", over.get("splits", Reply(one=(0,)))),
-            ("FROM account_execution_instance_allocation a", over.get("read", Reply(all=[]))),
+            ("SELECT account_id, strategy_opportunity_id FROM strategy_instance", over.get("instance", Reply(one=(ACCOUNT, 5)))),
+            ("SELECT count(*) FROM strategy_instance_execution", over.get("splits", Reply(one=(0,)))),
+            ("FROM strategy_instance_execution sie", over.get("read", Reply(all=[(41, None, "L", 5)]))),
+            ("INSERT INTO strategy_instance_execution", over.get("insert", Reply())),
         ]
     )
 
@@ -182,18 +185,26 @@ def test_patch_execution_sets_direct_attribution_and_returns_it(two_dbs) -> None
         "strategy_instance_id": 41,
         "instance_allocations": [],
     }
-    sql, params = golden.statement("UPDATE raw_broker.executions_raw_flex SET")
-    assert sql.startswith("UPDATE raw_broker.executions_raw_flex SET strategy_opportunity_id = %s, strategy_instance_id = %s WHERE")
-    assert params == [5, 41, 77]
+    # TD-09: this env's table, keyed by the fill; Golden Source is only read.
+    sql, params = env.statement("INSERT INTO strategy_instance_execution")
+    assert "ON CONFLICT (account_id, exec_id) WHERE allocated_quantity IS NULL" in sql
+    assert params == (ACCOUNT, EXEC, 41)
+    assert not golden.ran("UPDATE raw_broker")
     assert golden.commits == 1 and env.commits == 1 and golden.closed and env.closed
 
 
-def test_patch_execution_null_clears_one_id_and_leaves_the_other(two_dbs) -> None:
+def test_patch_execution_null_clears_the_whole_fill_row(two_dbs) -> None:
+    env, golden = _env(read=Reply(all=[])), _golden()
+    two_dbs(env, golden)
+    out = accounts.patch_execution(CFG, 77, {"strategy_instance_id": None})
+    sql, params = env.statement("DELETE FROM strategy_instance_execution")
+    assert "allocated_quantity IS NULL" in sql and params == (ACCOUNT, EXEC)
+    assert out["strategy_instance_id"] is None and out["strategy_opportunity_id"] is None
+    # strategy_opportunity_id: null alone changes nothing.
     env, golden = _env(), _golden()
     two_dbs(env, golden)
-    accounts.patch_execution(CFG, 77, {"strategy_instance_id": None})
-    sql, params = golden.statement("UPDATE raw_broker.executions_raw_flex SET")
-    assert "strategy_opportunity_id" not in sql and params == [None, 77]
+    accounts.patch_execution(CFG, 77, {"strategy_opportunity_id": None})
+    assert not env.ran("DELETE") and not env.ran("INSERT")
 
 
 def test_patch_execution_refusals(two_dbs) -> None:
@@ -207,12 +218,25 @@ def test_patch_execution_refusals(two_dbs) -> None:
         )
     with pytest.raises(WriteInvalid, match=r"send \[\]"):
         accounts.patch_execution(CFG, 77, {"instance_allocations": None})
+    # An opportunity is reached through a trade (TD-09).
+    with pytest.raises(WriteInvalid, match="Send strategy_instance_id"):
+        accounts.patch_execution(CFG, 77, {"strategy_opportunity_id": 5})
+    with pytest.raises(WriteInvalid, match="Send strategy_instance_id"):
+        accounts.patch_execution(CFG, 77, {"strategy_opportunity_id": 5, "strategy_instance_id": None})
+
+    two_dbs(_env(), _golden())
+    with pytest.raises(WriteInvalid, match="under opportunity 5, not 6"):
+        accounts.patch_execution(CFG, 77, {"strategy_opportunity_id": 6, "strategy_instance_id": 41})
 
     two_dbs(_env(), _golden(lock=Reply(one=None)))
     with pytest.raises(WriteNotFound, match="No execution 77"):
         accounts.patch_execution(CFG, 77, {"strategy_instance_id": 41})
 
-    two_dbs(_env(instance=Reply(one=("U0000002",))), _golden())
+    two_dbs(_env(), _golden(lock=Reply(one=(ACCOUNT, 2.0, "BUY", "flex_trades", None))))
+    with pytest.raises(WriteInvalid, match="has no exec_id"):
+        accounts.patch_execution(CFG, 77, {"strategy_instance_id": 41})
+
+    two_dbs(_env(instance=Reply(one=("U0000002", 5))), _golden())
     with pytest.raises(WriteInvalid, match="belongs to account U0000002"):
         accounts.patch_execution(CFG, 77, {"strategy_instance_id": 41})
 
@@ -224,9 +248,9 @@ def test_patch_execution_refusals(two_dbs) -> None:
     two_dbs(env, golden)
     with pytest.raises(WriteConflict, match="split across 2 instances"):
         accounts.patch_execution(CFG, 77, {"strategy_instance_id": 41})
-    assert not golden.ran("UPDATE raw_broker") and golden.rollbacks == 1 and env.rollbacks == 1
+    assert not env.ran("INSERT") and golden.rollbacks == 1 and env.rollbacks == 1
 
-    two_dbs(_env(), _golden(update=Reply(raises=DB_DOWN)))
+    two_dbs(_env(insert=Reply(raises=DB_DOWN)), _golden())
     with pytest.raises(WriteFailed):
         accounts.patch_execution(CFG, 77, {"strategy_instance_id": 41})
 
@@ -240,11 +264,33 @@ def test_patch_execution_refusals(two_dbs) -> None:
 
 def test_patch_execution_replacing_splits_with_a_direct_id(two_dbs) -> None:
     env, golden = _env(splits=Reply(one=(2,))), _golden()
-    golden.rules.append(("SELECT account_id, quantity, side, source FROM", Reply(one=(ACCOUNT, 2.0, "BUY", "flex"))))
     two_dbs(env, golden)
     accounts.patch_execution(CFG, 77, {"instance_allocations": [], "strategy_instance_id": 41})
-    assert env.ran("DELETE FROM account_execution_instance_allocation")
-    assert golden.ran("UPDATE raw_broker.executions_raw_flex SET strategy_instance_id = %s")
+    sql, params = env.statement("DELETE FROM strategy_instance_execution")
+    assert "allocated_quantity IS NOT NULL" in sql and params == (ACCOUNT, EXEC)
+    assert env.statement("INSERT INTO strategy_instance_execution")[1] == (ACCOUNT, EXEC, 41)
+    # the splits go first: the whole-fill row may name an instance a split named
+    ran = [sql for sql, _ in env.executed]
+    assert ran.index(sql) < next(i for i, x in enumerate(ran) if x.startswith("INSERT"))
+
+
+def test_patch_execution_splits_replace_the_whole_fill_row(two_dbs) -> None:
+    env, golden = _env(read=Reply(all=[(41, 1.5, "A", 5), (42, 0.5, None, 6)])), _golden()
+    two_dbs(env, golden)
+    out = accounts.patch_execution(
+        CFG,
+        77,
+        {"instance_allocations": [{"strategy_instance_id": 41, "allocated_quantity": 1.5}, {"strategy_instance_id": 42, "allocated_quantity": 0.5}]},
+    )
+    deletes = [sql for sql, _ in env.executed if sql.startswith("DELETE FROM strategy_instance_execution")]
+    assert any("IS NOT NULL" in d for d in deletes) and any("IS NULL" in d and "NOT NULL" not in d for d in deletes)
+    inserts = [p for sql, p in env.executed if sql.startswith("INSERT INTO strategy_instance_execution")]
+    assert inserts == [(ACCOUNT, EXEC, 41, 1.5), (ACCOUNT, EXEC, 42, 0.5)]
+    assert out["strategy_instance_id"] is None
+    assert out["instance_allocations"] == [
+        {"strategy_instance_id": 41, "allocated_quantity": 1.5, "strategy_opportunity_id": 5, "strategy_instance_label": "A"},
+        {"strategy_instance_id": 42, "allocated_quantity": 0.5, "strategy_opportunity_id": 6},
+    ]
 
 
 def test_patch_execution_bad_splits_are_invalid(two_dbs, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -255,11 +301,11 @@ def test_patch_execution_bad_splits_are_invalid(two_dbs, monkeypatch: pytest.Mon
 
 
 def test_delete_execution_strict(two_dbs) -> None:
-    golden = FakeConn([("SELECT exec_id FROM", Reply(one=("0000e1.01",)))])
+    golden = _golden()
     env = FakeConn(
         [
             ("FROM account_execution_option_stock_link", Reply(one=(0,))),
-            ("DELETE FROM account_execution_instance_allocation", Reply(rowcount=2)),
+            ("DELETE FROM strategy_instance_execution", Reply(all=[(True,), (True,)])),
         ]
     )
     two_dbs(env, golden)
@@ -269,23 +315,32 @@ def test_delete_execution_strict(two_dbs) -> None:
         "allocations_removed": 2,
     }
     sql, params = golden.statement("DELETE FROM raw_broker.commissions")
-    assert sql.count("NOT EXISTS") == 3 and params == ["0000e1.01"] * 4
+    assert sql.count("NOT EXISTS") == 3 and params == [EXEC] * 4
+    assert env.statement("DELETE FROM strategy_instance_execution")[1] == (ACCOUNT, EXEC)
     assert golden.commits == 1 and env.commits == 1
 
 
+def test_delete_execution_strict_keeps_the_attribution_of_a_surviving_twin(two_dbs) -> None:
+    golden = _golden(twin=Reply(one=(1,)))
+    env = FakeConn([("FROM account_execution_option_stock_link", Reply(one=(0,)))])
+    two_dbs(env, golden)
+    assert accounts.delete_execution_strict(CFG, 77)["allocations_removed"] == 0
+    assert not env.ran("DELETE FROM strategy_instance_execution")
+
+
 def test_delete_execution_strict_refusals(two_dbs) -> None:
-    golden = FakeConn([("SELECT exec_id FROM", Reply(one=("0000e1.01",)))])
+    golden = _golden()
     env = FakeConn([("FROM account_execution_option_stock_link", Reply(one=(1,)))])
     two_dbs(env, golden)
     with pytest.raises(WriteConflict, match="in 1 option/stock link; unlink it first"):
         accounts.delete_execution_strict(CFG, 77)
     assert not golden.ran("DELETE")
 
-    two_dbs(FakeConn(), FakeConn([("SELECT exec_id FROM", Reply(one=None))]))
+    two_dbs(FakeConn(), _golden(lock=Reply(one=None)))
     with pytest.raises(WriteNotFound, match="No execution 77"):
         accounts.delete_execution_strict(CFG, 77)
 
-    two_dbs(FakeConn(), FakeConn([("SELECT exec_id FROM", Reply(raises=DB_DOWN))]))
+    two_dbs(FakeConn(), _golden(lock=Reply(raises=DB_DOWN)))
     with pytest.raises(WriteFailed):
         accounts.delete_execution_strict(CFG, 77)
 

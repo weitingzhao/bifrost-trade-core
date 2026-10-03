@@ -74,37 +74,29 @@ All three `executions_raw_*` tables carry:
 
 | Column | Type | Meaning |
 |--------|------|---------|
-| `strategy_opportunity_id` | bigint | Whole-execution attribution to a per-env `strategy_opportunity`. Exposed by all three views |
-| `strategy_instance_id` | bigint | Whole-execution attribution to a per-env `strategy_instance`. Exposed by all three views |
+| `strategy_opportunity_id` | bigint | **Frozen since core 0.37.0 (TD-09).** Was the whole-execution attribution to a per-env `strategy_opportunity`. No longer written or read by Trade; the per-env views no longer expose it (the Golden Source `raw_broker.executions*` views still do) |
+| `strategy_instance_id` | bigint | **Frozen since core 0.37.0 (TD-09).** Was the whole-execution attribution to a per-env `strategy_instance` |
 | `legacy_account_executions_id` | bigint | Historical map: the row's id in the single pre-split `account_executions` table. Rows from before the split keep it; no code writes it (new rows get NULL by default since core 0.32.0) or reads it, and the views do not expose it |
 
-The two `strategy_*` columns are the older of two attribution paths; the other is the per-env
-`account_execution_instance_allocation` (quantity splits). How they are written:
+**Why they were retired.** These ids point at per-env tables, so the database could not check them, and DEV,
+STG and PROD all read the same `raw_broker` rows: an id written from one environment named a row in that
+environment's `strategy_instance` and read as a different (or missing) instance in the other two. On
+2026-10-03 five instance ids (158–162) named different trades in DEV and PROD, and 40 instances still carried
+an opportunity id their environment had since changed.
 
-- `POST /executions` (manual or journal row) inserts them on the new raw row; `PUT /executions/{id}` updates
-  them (`update_one_execution`). `patch_execution` (core 0.33.0) writes only the attribution -- these two ids or
-  the allocation splits, never both -- and refuses a direct id on a split execution unless the same patch clears
-  the splits.
-- `delete_instance_strict` (core 0.33.0) reads these columns on Golden Source before deleting an instance and
-  refuses while any raw row names it; with no FK, nothing else stops the delete.
-- `PATCH /executions/strategy-attribution` (`batch_update_execution_strategy`) sets them on a list of
-  executions or on every raw row of one `contract_key`, through the per-env `brokerage.executions_raw_*`
-  foreign tables. It refuses (returns -1) when any of those executions already has allocation rows.
-- Writing allocations for an execution sets both columns to NULL on its raw row
-  (`_apply_instance_allocations_on_cursor`) — an execution is attributed one way or the other.
-
-Readers take the union: an instance's executions are those tagged here plus those allocated to it
-([`strategy_instance.py`](../src/bifrost_core/monitor/reader/strategy_instance.py)).
-
-**No FK, and one Golden Source for three environments.** These ids point at per-env tables, so the database
-cannot check them, and DEV, STG and PROD all read the same `raw_broker` rows: an id written from one
-environment names a row in that environment's `strategy_instance`, and reads as a different (or missing)
-instance in the other two.
+**Since core 0.37.0** each environment keeps its own attribution in `public.strategy_instance_execution`,
+keyed by the fill (`account_id`, `exec_id`) — a TWS row and its Flex twin share it — with a composite FK to that
+environment's `strategy_instance (strategy_instance_id, account_id)`; see [DATABASE.md](DATABASE.md#strategy_instance_execution-core-0370).
+The per-env `brokerage.executions*` views take `strategy_instance_id` from it and `strategy_opportunity_id`
+from that instance. The columns here were kept, unwritten, as the rollback path; clearing or dropping them is a
+separate Owner decision. The one-off move is `td09_attribution` (`scripts/db/td09_migrate_attribution.py`).
 
 ## Bridge tables (per-env)
 
-- `account_execution_instance_allocation` — FK to `strategy_instance`; the execution id (unified, above) is
-  checked in core, not by the DB
+- `strategy_instance_execution` (core 0.37.0) — the strategy attribution of a fill, whole or split; keyed by
+  (`account_id`, `exec_id`), composite FK to `strategy_instance`
+- `account_execution_instance_allocation` — **frozen since core 0.37.0**: the splits before TD-09, keyed by the
+  unified execution id; no longer written or read (the migration read it)
 - `account_execution_option_stock_link` — option execution ↔ stock fill(s) of its exercise / assignment;
   no FK at all (both ends are unified execution ids)
 

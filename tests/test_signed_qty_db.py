@@ -20,7 +20,8 @@ from typing import Any, Dict, List
 import pytest
 from psycopg2.extras import RealDictCursor, execute_values
 
-from bifrost_core.persistence.postgres.brokerage_ddl import ensure_brokerage_schema
+from bifrost_core.persistence.postgres import td09_attribution
+from bifrost_core.persistence.postgres.brokerage_ddl import _create_brokerage_views, ensure_brokerage_schema
 from bifrost_core.portfolio.reader import executions as executions_reader
 from bifrost_core.portfolio.reader import option_stock_link as link_reader
 from bifrost_core.portfolio.signed_qty import signed_qty, signed_qty_sql
@@ -49,8 +50,7 @@ LEGACY_TWS_ROW = (
 )
 
 _VIEWS = (
-    "executions", "executions_final", "executions_fly", "executions_raw_tws",
-    "executions_raw_flex", "executions_raw_journal", "commissions", "positions",
+    "executions_raw_tws", "executions_raw_flex", "executions_raw_journal", "commissions", "positions",
     "contract_quote_live",
 )
 
@@ -72,7 +72,8 @@ def test_sql_matches_python(pg_conn: Any) -> None:
 
 @pytest.fixture
 def book(pg_conn: Any) -> Dict[str, Any]:
-    """Golden Source rows stored the way they are today; ``brokerage.*`` views over them."""
+    """Golden Source rows stored the way they were before TD-09, moved into this env's
+    strategy_instance_execution by the TD-09 load; the env ``brokerage.*`` views over them."""
     ensure_brokerage_schema(pg_conn, log=lambda m: None)
     ids: Dict[str, Any] = {}
     with pg_conn.cursor() as cur:
@@ -94,9 +95,9 @@ def book(pg_conn: Any) -> Dict[str, Any]:
         ids["sell"] = flex("TDQA|STK|||", "SELL", -100.0, 52.0, 50.0, 12)
         ids["opt"] = flex("TDQA|OPT|20261120|50|C", "SELL", -1.0, 1.2, 1.1, 12, sec="OPT")
         cur.execute(
-            "INSERT INTO raw_broker.executions_raw_journal (account_id, symbol, sec_type, side, quantity, "
+            "INSERT INTO raw_broker.executions_raw_journal (exec_id, account_id, symbol, sec_type, side, quantity, "
             "price, close_price, source, contract_key, trade_date, exec_time, strategy_instance_id) "
-            "VALUES (%s, 'TDQA', 'STK', 'SELL', -50, 49.0, 50.0, 'journal_closed', 'TDQA|STK|||', "
+            "VALUES ('td30.j.1', %s, 'TDQA', 'STK', 'SELL', -50, 49.0, 50.0, 'journal_closed', 'TDQA|STK|||', "
             "DATE '2026-09-19', TIMESTAMPTZ '2026-09-19 15:00+00', 11) RETURNING executions_raw_journal_id",
             (ACCOUNT,),
         )
@@ -120,6 +121,22 @@ def book(pg_conn: Any) -> Dict[str, Any]:
             "(account_id, option_account_executions_id, stock_account_executions_id) VALUES (%s, %s, %s), (%s, %s, %s)",
             (ACCOUNT, ids["opt"], ids["sell"], ACCOUNT, ids["opt"], ids["buy"]),
         )
+        # instances 11 and 12 on the account, then the TD-09 load and the env views
+        cur.execute("INSERT INTO strategy_template (template_code, display_name) VALUES ('td30_tpl', 'TD30') "
+                    "RETURNING strategy_template_id")
+        tpl = cur.fetchone()[0]
+        cur.execute("INSERT INTO strategy_structure (name, strategy_template_id) VALUES ('TD30', %s) "
+                    "RETURNING strategy_structure_id", (tpl,))
+        struct = cur.fetchone()[0]
+        cur.execute("INSERT INTO strategy_opportunity (name, strategy_structure_id, scope_type) "
+                    "VALUES ('TD30', %s, 'symbols') RETURNING strategy_opportunity_id", (struct,))
+        opp = cur.fetchone()[0]
+        for si in (11, 12):
+            cur.execute("INSERT INTO strategy_instance (strategy_instance_id, strategy_opportunity_id, account_id, opened_at) "
+                        "VALUES (%s, %s, %s, now())", (si, opp, ACCOUNT))
+        for stmt in td09_attribution.load_statements("brokerage"):
+            cur.execute(stmt)
+        _create_brokerage_views(cur, "brokerage", env=True)
     return ids
 
 

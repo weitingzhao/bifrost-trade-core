@@ -39,8 +39,23 @@ EXECUTIONS = f"{SCHEMA}.executions"
 EXECUTIONS_FINAL = f"{SCHEMA}.executions_final"
 EXECUTIONS_FLY = f"{SCHEMA}.executions_fly"
 
-# Bridge tables stay in per-env public schema (FK to strategy_instance)
-INSTANCE_ALLOCATION = "account_execution_instance_allocation"
+# Per-env strategy attribution (TD-09, core 0.37.0). One table in each env's public
+# schema, keyed by the fill (account_id, exec_id) -- the TWS row and its Flex twin share
+# it -- with a real FK to that env's strategy_instance. A NULL allocated_quantity is the
+# whole fill; split rows carry their share. Golden Source's strategy_* columns on the raw
+# tables are no longer written or read.
+INSTANCE_EXECUTION = "strategy_instance_execution"
+# Split rows as readers join them: one row per raw representation (Flex id, TWS -id,
+# journal -(1e9+id)) of each split fill, in the account_execution_instance_allocation shape
+# (account_id, account_executions_id, strategy_instance_id, allocated_quantity). A local
+# view over the FDW tables, rebuilt with them (``brokerage_ddl._create_brokerage_views``).
+INSTANCE_ALLOCATION = f"{SCHEMA}.instance_allocations"
+# TWS raw rows with the synthetic account_executions_id and this env's attribution
+# (the ``tws_raw`` scope and the position attribution's no-Flex branch).
+EXECUTIONS_TWS = f"{SCHEMA}.executions_tws"
+# Before TD-09: per-env splits keyed by account_executions_id. Kept, no longer written;
+# the migration reads it (scripts/db/td09_migrate_attribution.py).
+LEGACY_INSTANCE_ALLOCATION = "account_execution_instance_allocation"
 OPTION_STOCK_LINK = "account_execution_option_stock_link"
 
 # Legacy public names → brokerage qualified (for migration scripts / docs)
@@ -77,4 +92,10 @@ BROKERAGE_VIEWS: tuple[str, ...] = (
     "executions",
     "executions_final",
     "executions_fly",
+)
+
+# Per-env only: they join this env's attribution table (not on Golden Source).
+BROKERAGE_ENV_VIEWS: tuple[str, ...] = (
+    "executions_tws",
+    "instance_allocations",
 )

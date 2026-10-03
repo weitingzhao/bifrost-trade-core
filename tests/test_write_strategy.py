@@ -568,46 +568,47 @@ def _env(*rules_: Any) -> FakeConn:
     return FakeConn([("FROM strategy_instance WHERE strategy_instance_id = %s FOR UPDATE", Reply(one=(1,))), *rules_])
 
 
+_COUNTS = "FROM strategy_instance_execution WHERE strategy_instance_id = %s"
+
+
 def test_instance_delete_blocked_by_directly_attributed_executions(two_dbs) -> None:
-    env = _env(("FROM account_execution_instance_allocation", Reply(one=(0,))))
-    golden = FakeConn([("count(DISTINCT k)", Reply(one=(3,)))])
+    env = _env((_COUNTS, Reply(one=(3, 0))))
+    golden = FakeConn()
     two_dbs(env, golden)
     with pytest.raises(WriteConflict, match="^3 executions are attributed to this instance.$"):
         strategy_instance.delete_instance_strict(CFG, 41)
     assert not env.ran("DELETE FROM strategy_instance")
     assert env.rollbacks == 1 and env.commits == 0
-    sql, params = golden.statement("count(DISTINCT k)")
-    for table in ("raw_broker.executions_raw_tws", "raw_broker.executions_raw_flex", "raw_broker.executions_raw_journal"):
-        assert table in sql
-    assert params == [41, 41, 41]
-    assert golden.closed
+    # TD-09: this env's table; Golden Source is not read.
+    assert env.statement(_COUNTS)[1] == (41,)
+    assert golden.executed == []
 
 
 def test_instance_delete_blocked_by_split_allocations_with_its_own_reason(two_dbs) -> None:
-    env = _env(("FROM account_execution_instance_allocation", Reply(one=(2,))))
-    golden = FakeConn([("count(DISTINCT k)", Reply(one=(0,)))])
-    two_dbs(env, golden)
+    env = _env((_COUNTS, Reply(one=(0, 2))))
+    two_dbs(env, FakeConn())
     with pytest.raises(WriteConflict, match="2 executions are split-allocated to this instance"):
         strategy_instance.delete_instance_strict(CFG, 41)
     assert not env.ran("DELETE FROM strategy_instance")
 
 
-@pytest.mark.parametrize(
-    "golden",
-    [psycopg2.OperationalError("could not connect"), FakeConn([("count(DISTINCT k)", Reply(raises=DB_DOWN))])],
-    ids=["unreachable", "query fails"],
-)
-def test_instance_delete_does_not_delete_blind_when_golden_source_is_down(two_dbs, golden: Any) -> None:
-    env = _env(("FROM account_execution_instance_allocation", Reply(one=(0,))))
-    two_dbs(env, golden)
-    with pytest.raises(WriteFailed, match="Golden Source"):
+def test_instance_delete_does_not_delete_blind_when_the_count_fails(two_dbs) -> None:
+    env = _env((_COUNTS, Reply(raises=DB_DOWN)))
+    two_dbs(env, FakeConn())
+    with pytest.raises(WriteFailed):
         strategy_instance.delete_instance_strict(CFG, 41)
     assert not env.ran("DELETE FROM strategy_instance")
 
 
+def test_count_attributed_executions_reads_this_env(two_dbs) -> None:
+    env = FakeConn([(_COUNTS, Reply(one=(4, 1)))])
+    two_dbs(env, FakeConn())
+    assert strategy_instance.count_attributed_executions(CFG, 41) == 4
+
+
 def test_instance_delete_succeeds_when_nothing_is_attributed(two_dbs) -> None:
-    env = _env(("FROM account_execution_instance_allocation", Reply(one=(0,))))
-    two_dbs(env, FakeConn([("count(DISTINCT k)", Reply(one=(0,)))]))
+    env = _env((_COUNTS, Reply(one=(0, 0))))
+    two_dbs(env, FakeConn())
     assert strategy_instance.delete_instance_strict(CFG, 41) == {"deleted": "hard", "strategy_instance_id": 41}
     assert env.ran("DELETE FROM strategy_instance") and env.commits == 1
 
@@ -623,9 +624,9 @@ def test_instance_delete_missing_and_without_config(two_dbs) -> None:
 
 def test_instance_delete_fk_race_is_a_conflict(two_dbs) -> None:
     env = _env(
-        ("FROM account_execution_instance_allocation", Reply(one=(0,))),
+        (_COUNTS, Reply(one=(0, 0))),
         ("DELETE FROM strategy_instance", Reply(raises=psycopg2.errors.ForeignKeyViolation("fk"))),
     )
-    two_dbs(env, FakeConn([("count(DISTINCT k)", Reply(one=(0,)))]))
+    two_dbs(env, FakeConn())
     with pytest.raises(WriteConflict, match="still reference it"):
         strategy_instance.delete_instance_strict(CFG, 41)

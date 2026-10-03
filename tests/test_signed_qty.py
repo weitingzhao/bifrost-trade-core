@@ -209,7 +209,7 @@ class _AllocCursor:
     ],
 )
 def test_allocation_sum_check(stored: Any, side: str, source: Any, splits: List[float], ok: bool) -> None:
-    cur = _AllocCursor((ACCOUNT, stored, side, source))
+    cur = _AllocCursor((ACCOUNT, stored, side, source, "td.e1"))
     body = [{"strategy_instance_id": 10 + i, "allocated_quantity": q} for i, q in enumerate(splits)]
     got = accounts_reader._apply_instance_allocations_on_cursor(
         cur, -7, "raw_broker.executions_raw_tws", "executions_raw_tws_id", 7, body

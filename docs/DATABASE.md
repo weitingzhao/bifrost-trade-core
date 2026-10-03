@@ -66,8 +66,8 @@ Qualified names: [`brokerage_tables.py`](../src/bifrost_core/persistence/postgre
 
 Writers connect to Golden Source with `psycopg2.connect(**_get_golden_source_conn_params(config))`
 ([`connection.py`](../src/bifrost_core/persistence/postgres/connection.py)) and write `raw_broker.*` (`GOLDEN_*`
-names). Readers stay on the per-env connection and JOIN `brokerage.*` via FDW. One exception: the batch
-strategy-attribution update writes through the updatable `brokerage.executions_raw_*` foreign tables.
+names). Readers stay on the per-env connection and JOIN `brokerage.*` via FDW. Strategy attribution is per-env
+(`strategy_instance_execution`, core 0.37.0); nothing writes Golden Source's `strategy_*` columns any more.
 
 Process IPC (heartbeat / run_status / control) is **not** in PostgreSQL. `_ensure_tables()` does not create the retired `daemon_*` / `account_sync_*` IPC tables.
 
@@ -124,13 +124,36 @@ it, plans that were filled point at it, and Review keeps one verdict per instanc
 Indexes: `(strategy_opportunity_id)`, `(account_id, opened_at)`. Nothing in the schema limits an
 opportunity/account pair to one open instance.
 
-Referenced by: `account_execution_instance_allocation.strategy_instance_id` (ON DELETE RESTRICT),
-`strategy_plan.strategy_instance_id` (SET NULL), `trade_review.strategy_instance_id` (CASCADE, UNIQUE), and —
-with no FK, because they live in Golden Source — `raw_broker.executions_raw_*.strategy_instance_id`
-(see [BROKERAGE_GOLDEN_SOURCE.md](BROKERAGE_GOLDEN_SOURCE.md#strategy-attribution-and-legacy-columns)).
-An instance's executions are the union of both links: quantity splits in
-`account_execution_instance_allocation`, and whole executions tagged on the raw row
-([`strategy_instance.py`](../src/bifrost_core/monitor/reader/strategy_instance.py)).
+Referenced by: `strategy_instance_execution (strategy_instance_id, account_id)` (ON DELETE RESTRICT; the
+UNIQUE `(strategy_instance_id, account_id)` constraint `strategy_instance_id_account_uq` exists for it),
+`strategy_plan.strategy_instance_id` (SET NULL), `trade_review.strategy_instance_id` (CASCADE, UNIQUE), and the
+frozen `account_execution_instance_allocation.strategy_instance_id` (ON DELETE RESTRICT).
+
+### `strategy_instance_execution` (core **0.37.0**)
+
+Which trade a fill belongs to, in this environment (TD-09). Before 0.37.0 this was two columns on Golden
+Source's raw rows, shared by all three environments, plus `account_execution_instance_allocation` for splits.
+
+| Column | Meaning |
+|--------|---------|
+| `strategy_instance_execution_id` | PK |
+| `account_id`, `exec_id` | The fill. A TWS row and its Flex twin share `exec_id`, so one row attributes both; a raw row without `exec_id` cannot be attributed |
+| `strategy_instance_id` | NOT NULL. With `account_id`, FK → `strategy_instance (strategy_instance_id, account_id)` **ON DELETE RESTRICT**: the fill's account must be the instance's |
+| `allocated_quantity` | NULL = the whole fill. Otherwise this instance's share of a split (signed like the fill; CHECK ≠ 0) |
+| `created_at` / `updated_at` | Row timestamps |
+
+Constraints: UNIQUE `(account_id, exec_id, strategy_instance_id)`; partial UNIQUE `(account_id, exec_id) WHERE
+allocated_quantity IS NULL` (one whole-fill row per fill); index `(strategy_instance_id)`. A fill is attributed
+whole or split, never both — the writers keep that (`accounts.py`), not a trigger. The opportunity is not stored:
+it is the instance's.
+
+Read through the per-env views (built in `brokerage_ddl._create_brokerage_views(..., env=True)` with the FDW
+tables): `brokerage.executions` / `executions_final` / `executions_fly` take `strategy_instance_id` from the
+whole-fill row and `strategy_opportunity_id` from its instance; `brokerage.executions_tws` is every TWS raw row the
+same way (the `tws_raw` scope); `brokerage.instance_allocations` gives the split rows once per raw representation
+(Flex id, TWS −id, journal −(1e9+id)) in the old split table's shape (`account_id`, `account_executions_id`,
+`strategy_instance_id`, `allocated_quantity`, plus `exec_id`). `setup_fdw_foreign_tables` refuses to run before this
+table exists.
 
 ### `strategy_plan` (core **0.22.0**)
 
@@ -267,6 +290,7 @@ Reads and writes: [`saved_search.py`](../src/bifrost_core/monitor/reader/saved_s
 | — | 0.35.1 | No DDL. Config (TD-53/54/79): connection settings are env, then YAML, then defaults for Postgres, Golden Source (per field, falling back to the Trade database; the name never falls back) and Redis (the IB bus per field); daemon gate defaults come from `GateParams`, not `config.yaml.example` beside the config; `normalize_server_config` requires monitor / account (`account_port`, legacy `trading_port` kept as an alias) / research / market ports and drops the retired five; the `ib` block is optional. Old configs still load. Affected downstreams: **api** (reads `account_port`), **worker** (no change), **infra** (dead ports and IB blocks removable from overlays in a later release) |
 | — | 0.36.0 | No DDL. **Structures carry no `structure_subtype` (TD-41), public response change:** `get_structure_by_id` and the structure list no longer return `structure_subtype` (always `NULL`; no such column) or `structure_subtype_label` (it repeated `template_display_name`). The writer no longer reads a `structure_subtype` from the payload: a bare `structure_type: covered_call` still resolves to `covered_call_otm`, any other template is named by `strategy_template_id` or its code. Affected downstreams: **api** (0.4.0 drops the request field), **frontend** (stopped sending and reading it in 678e0d2e) |
 | — | 0.36.1 | No DDL. `set_instrument_class(..., keep_note=True)`: the default keeps a stored note when none is sent (unchanged); `keep_note=False` is a full replace, so the row becomes what was sent and no note clears it (TD-15, used by PUT /instrument-classes from api 0.6.0). Additive; no other caller. |
+| — | 0.37.0 | **DDL (TD-09): per-env strategy attribution.** Add `strategy_instance_execution` and `strategy_instance_id_account_uq` UNIQUE `(strategy_instance_id, account_id)` on `strategy_instance` (`STRATEGY_INSTANCE_EXECUTION_DDL`, run by `_ensure_tables`). The per-env views read attribution from it (`_create_brokerage_views(env=True)`; new env-only views `brokerage.executions_tws`, `brokerage.instance_allocations`); `setup_fdw_foreign_tables` refuses to run before the table exists. Writers (`patch_execution`, `update_one_execution`, `insert_one_execution`, `batch_update_execution_strategy`, the deletes) write only the table — Golden Source's raw `strategy_*` columns and `account_execution_instance_allocation` are frozen (not cleared). Behaviour changes: an opportunity without an instance is refused (`patch_execution` WriteInvalid; the bool writers answer False / None, the batch 0); an opportunity sent with an instance must be the instance's; the opportunity read back is always the instance's; a split quantity of 0 is refused; attributing a fill attributes its TWS / Flex twin too; `update_one_execution` refuses to move an attributed fill to another account; deleting a raw row keeps the attribution while its twin remains; `count_attributed_executions` / `delete_instance_strict` count this env's table. `brokerage_tables`: new `INSTANCE_EXECUTION`, `EXECUTIONS_TWS`, `LEGACY_INSTANCE_ALLOCATION`, `BROKERAGE_ENV_VIEWS`; `INSTANCE_ALLOCATION` now names the read view. One-off move: `td09_attribution.migration_sql` / `scripts/db/td09_migrate_attribution.py` (one transaction per env: DDL, instance #3 → U8829175, empty and reload from the Golden Source columns and the old split table under the approved rules, optional views; ROLLBACK unless `--commit`). Affected downstreams: **api** (raise the floor to `bifrost-core>=0.37.0`; PATCH /executions/{id}/attribution answers 400 for an opportunity without a trade), **frontend** (a fill links to a trade: Link execution and the execution form require one), **worker** / Flex / Research (none) |
 
 
 ## Brokerage tables
@@ -294,13 +318,12 @@ it. It is kept, not dropped, because the values are the only map back to the old
 | `brokerage.settings_flex` | `settings_ib_flex` |
 | views `brokerage.executions*` | `account_executions*` |
 
-Bridge tables remain per-env. They key executions by the unified `account_executions_id` of the
-`brokerage.executions` view and cannot FK it (the rows live in Golden Source); integrity is checked in core:
+Bridge tables remain per-env:
 
-- `account_execution_instance_allocation` — splits one execution's quantity across `strategy_instance` rows
-  (FK `strategy_instance_id` ON DELETE RESTRICT; UNIQUE per execution × instance). Writing allocations for an
-  execution clears that execution's raw-row `strategy_*` tags
-  ([`accounts.py`](../src/bifrost_core/portfolio/reader/accounts.py) `_apply_instance_allocations_on_cursor`)
+- `strategy_instance_execution` (core 0.37.0) — see [above](#strategy_instance_execution-core-0370); keyed by the
+  fill (`account_id`, `exec_id`), not by a view id
+- `account_execution_instance_allocation` — **frozen since core 0.37.0**: the splits before TD-09, keyed by the
+  unified `account_executions_id`. Kept for the rollback window; not written or read
 - `account_execution_option_stock_link` — links an option execution to the stock fill(s) of its exercise or
   assignment (`role` ∈ exercise · assignment); no FK at all
 

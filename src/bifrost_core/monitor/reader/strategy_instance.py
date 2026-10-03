@@ -7,7 +7,7 @@ bool for one release."""
 import logging
 import math
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from psycopg2.extras import RealDictCursor
 
@@ -16,10 +16,8 @@ from bifrost_core.portfolio.quote_freshness import fresh_quote_sql
 from bifrost_core.persistence.postgres.brokerage_tables import (
     CONTRACT_QUOTE_LIVE,
     EXECUTIONS_FINAL,
-    GOLDEN_EXECUTIONS_RAW_FLEX,
-    GOLDEN_EXECUTIONS_RAW_JOURNAL,
-    GOLDEN_EXECUTIONS_RAW_TWS,
     INSTANCE_ALLOCATION,
+    INSTANCE_EXECUTION,
     POSITIONS,
 )
 from bifrost_core.monitor.reader import write_support as ws
@@ -386,60 +384,50 @@ def patch_instance(conn_or_config: Any, strategy_instance_id: int, fields: Dict[
     return row
 
 
-_GOLDEN_RAW_EXECUTION_TABLES = (
-    (GOLDEN_EXECUTIONS_RAW_TWS, "executions_raw_tws_id"),
-    (GOLDEN_EXECUTIONS_RAW_FLEX, "executions_raw_flex_id"),
-    (GOLDEN_EXECUTIONS_RAW_JOURNAL, "executions_raw_journal_id"),
-)
+def _attributed_counts(cur: Any, strategy_instance_id: int) -> Tuple[int, int]:
+    """(whole fills, split fills) attributed to the instance in this env's strategy_instance_execution."""
+    cur.execute(
+        f"SELECT count(*) FILTER (WHERE allocated_quantity IS NULL), "
+        f"count(*) FILTER (WHERE allocated_quantity IS NOT NULL) "
+        f"FROM {INSTANCE_EXECUTION} WHERE strategy_instance_id = %s",
+        (strategy_instance_id,),
+    )
+    row = cur.fetchone() or (0, 0)
+    return int(row[0] or 0), int(row[1] or 0)
 
 
 def count_attributed_executions(status_config: Any, strategy_instance_id: int) -> int:
-    """Executions whose Golden Source raw row names this instance directly.
+    """Fills attributed whole to this instance (this env's strategy_instance_execution, TD-09).
 
-    Direct attribution is ``raw_broker.executions_raw_{tws,flex,journal}.strategy_instance_id``
-    on Golden Source (no FK: a cross-database reference). A fill that both TWS and
-    Flex recorded counts once (``exec_id``). The three environments share these rows,
-    so an id written from another environment counts too -- the check errs on the
-    side of keeping the instance. Raises WriteFailed when Golden Source cannot be read.
+    A fill is (account_id, exec_id), so one recorded by both TWS and Flex counts once.
+    Before core 0.37.0 this read Golden Source's raw columns, shared by all three envs.
+    Raises WriteFailed when the env database cannot be read.
     """
-    parts = []
-    for table, pk in _GOLDEN_RAW_EXECUTION_TABLES:
-        tag = table.rsplit(".", 1)[-1]
-        parts.append(
-            f"SELECT COALESCE(NULLIF(trim(exec_id), ''), '{tag}:' || {pk}::text) AS k "
-            f"FROM {table} WHERE strategy_instance_id = %s"
-        )
-    sql = "SELECT count(DISTINCT k) FROM (" + " UNION ALL ".join(parts) + ") attributed"
     what = f"the executions attributed to strategy instance {strategy_instance_id}"
-    with ws.write_connection(status_config, what, golden=True) as golden:
+    with ws.write_connection(status_config, what) as conn:
         try:
-            with golden.cursor() as cur:
-                cur.execute(sql, [strategy_instance_id] * len(parts))
-                row = cur.fetchone()
-            ws.rollback_quietly(golden)
+            with conn.cursor() as cur:
+                whole, _ = _attributed_counts(cur, strategy_instance_id)
+            ws.rollback_quietly(conn)
         except Exception as e:
-            ws.rollback_quietly(golden)
+            ws.rollback_quietly(conn)
             logger.warning("count_attributed_executions(%s) failed: %s", strategy_instance_id, e)
-            raise WriteFailed(
-                f"Could not read {what} from the Golden Source; nothing was deleted."
-            ) from e
-    return int(row[0]) if row and row[0] is not None else 0
+            raise WriteFailed(f"Could not read {what}; nothing was deleted.") from e
+    return whole
 
 
 def delete_instance_strict(status_config: Any, strategy_instance_id: int) -> Dict[str, Any]:
     """Delete an instance nothing is attributed to. Returns ``{"deleted": "hard", "strategy_instance_id"}``.
 
-    Refused (WriteConflict, nothing deleted) when executions are split-allocated to
-    it (``account_execution_instance_allocation``, per env) or directly attributed
-    to it on Golden Source (``count_attributed_executions``). The Golden Source check
-    needs the status config: a live connection is not enough, and an unreachable
-    Golden Source is WriteFailed, not a blind delete. Its review (``trade_review``)
-    goes with it (CASCADE); a plan that pointed at it keeps its text (SET NULL).
+    Refused (WriteConflict, nothing deleted) when fills are split-allocated to it or
+    attributed to it whole in this env's ``strategy_instance_execution`` (TD-09; its
+    FK is ON DELETE RESTRICT as well). Its review (``trade_review``) goes with it
+    (CASCADE); a plan that pointed at it keeps its text (SET NULL).
     """
     what = f"strategy instance {strategy_instance_id}"
     if not isinstance(status_config, dict):
         raise WriteFailed(
-            f"Cannot delete {what}: the status config is needed to check the Golden Source for attributed executions."
+            f"Cannot delete {what}: the status config is needed to open its database."
         )
     with ws.write_connection(status_config, what) as conn, ws.write_transaction(conn, what, on_fk="conflict"):
         with conn.cursor() as cur:
@@ -449,18 +437,12 @@ def delete_instance_strict(status_config: Any, strategy_instance_id: int) -> Dic
             )
             if cur.fetchone() is None:
                 raise WriteNotFound(f"No strategy instance {strategy_instance_id}.")
-            cur.execute(
-                f"SELECT count(DISTINCT account_executions_id) FROM {_ALLOC_TABLE} WHERE strategy_instance_id = %s",
-                (strategy_instance_id,),
-            )
-            split = cur.fetchone()
-            n_split = int(split[0]) if split and split[0] is not None else 0
+            n_direct, n_split = _attributed_counts(cur, strategy_instance_id)
             if n_split:
                 raise WriteConflict(
                     f"{ws.plural(n_split, 'execution is', 'executions are')} split-allocated to this instance; "
                     "move or clear those allocations first."
                 )
-            n_direct = count_attributed_executions(status_config, strategy_instance_id)
             if n_direct:
                 raise WriteConflict(
                     f"{ws.plural(n_direct, 'execution is', 'executions are')} attributed to this instance."
