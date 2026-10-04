@@ -600,13 +600,13 @@ The one public view, `v_us_equity_universe`, is `market.v_us_equity_universe` (`
 |--------|------|------|-----------------|
 | `id` | int4 | no | `1`; PK; single row; `_ensure_tables()` seeds `id = 1` |
 | `ib_host_account_id` | text | yes | trading (host) IB account — `/status` `ib_client.account.trading`; monitor `POST /config/ib` |
-| `flex_default_range_days` | int4 | no | `30`. **Deprecated (TD-74):** Flex Query plugin 0.7.0 keeps the range in Golden Source `ops_jobs.flex_settings` and reads this column only to seed it (and as the fallback until seeded); core no longer reads it (0.39.0). To be dropped one week after plugin 0.7.0 is stable, Owner sign-off |
-| `flex_init_range_days` | int4 | no | `360`. **Deprecated (TD-74):** same as `flex_default_range_days` |
 | `stream_host_account_id` | text | yes | event-stream host account — `ib_client.account.event_host` |
 | `stream_secondary_account_id` | text | yes | event-stream secondary account — `ib_client.account.event_secondary` |
 | `active_strategy_structure_id` | int8 | yes | FK → `strategy_structure.strategy_structure_id` ON DELETE SET NULL; monitor `POST /config/active-strategy`; the daemon loads it at start |
 | `active_gate_safety_strategy_id` | int8 | yes | FK → `gate_safety_strategy.gate_safety_strategy_id` ON DELETE SET NULL; monitor `POST /config/active-strategy`; the daemon loads the gate set at start |
 | `active_strategy_allocation_id` | int8 | yes | FK → `strategy_allocation.strategy_allocation_id` ON DELETE SET NULL; monitor `POST /config/active-strategy` |
+
+`flex_default_range_days` / `flex_init_range_days` (the Flex Query range, 30 / 360) left the DDL with TD-74: the Flex Query plugin keeps the range in Golden Source `ops_jobs.flex_settings` since 0.7.0 and core has not read them since 0.39.0. They are dropped from existing databases by an Owner db-step after the deliver (infra `scripts/release/db-steps.d/2026-10-10-td74-drop-settings-flex-columns.md`), never by db-init.
 
 #### `strategy_allocation`
 

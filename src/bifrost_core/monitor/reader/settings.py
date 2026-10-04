@@ -36,10 +36,10 @@ def get_ib_config(conn: Any) -> Optional[Dict[str, Any]]:
     """Return settings row id=1: ib_host_account_id and stream account IDs.
 
     IB host/port/client IDs come from config YAML (see get_effective_ib_config), not from DB.
-    The Flex range days are not read here since core 0.39.0: nothing used them (the HTTP
-    boundary never output them) and the Flex Query plugin keeps them in Golden Source
-    ``ops_jobs.flex_settings`` from 0.7.0 (TD-74). The ``settings.flex_*_range_days``
-    columns stay until a later version drops them.
+    The Flex range days are not read here since core 0.39.0, and the Flex Query plugin keeps
+    them in Golden Source ``ops_jobs.flex_settings`` from 0.7.0. ``settings.flex_*_range_days``
+    left the DDL with TD-74 and are dropped by an Owner db-step (infra
+    ``db-steps.d/2026-10-10-td74-drop-settings-flex-columns``).
     """
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:

@@ -39,9 +39,6 @@ _LEGACY = (
     "ALTER INDEX strategy_allocation_opportunity_opportunity_id RENAME TO strategy_portfolio_opportunity_opportunity_id",
     "CREATE INDEX watchlist_contract_key ON watchlist (contract_key)",
     "ALTER TABLE strategy_allocation_opportunity DROP CONSTRAINT strategy_allocation_opportunity_strategy_opportunity_id_fkey",
-    "ALTER TABLE settings ALTER COLUMN flex_default_range_days DROP NOT NULL",
-    "ALTER TABLE settings ALTER COLUMN flex_init_range_days DROP NOT NULL",
-    "UPDATE settings SET flex_default_range_days = NULL",
     "ALTER TABLE settings ADD COLUMN ib_primary_account_id text, ADD COLUMN stream_primary_account_id text",
 )
 
@@ -92,8 +89,6 @@ def test_legacy_schema_converges_on_the_ddl(pg_conn):
         assert _catalog(cur) != declared
         migrate_wave13_reconcile_legacy_schema(cur)
         assert _catalog(cur) == declared
-        cur.execute("SELECT flex_default_range_days, flex_init_range_days FROM settings WHERE id = 1")
-        assert cur.fetchone() == (30, 360)
 
 
 def test_wave13_is_a_no_op_on_a_converged_schema(pg_conn):

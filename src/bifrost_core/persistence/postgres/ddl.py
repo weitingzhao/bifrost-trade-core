@@ -222,8 +222,8 @@ def _ensure_tables(conn, log=None, log_table=None) -> None:
         # retired → per-env Redis (bifrost_core.persistence.redis_daemon_state).
         _log("daemon_* / account_sync_* IPC tables skipped (Redis daemon state)")
 
-        _log("settings (account/stream + flex + active strategy refs; IB host/port/client IDs in config YAML)")
-        _log_table("settings", "App settings (account IDs, stream accounts, Flex, active strategy refs)")
+        _log("settings (account/stream + active strategy refs; IB host/port/client IDs in config YAML)")
+        _log_table("settings", "App settings (account IDs, stream accounts, active strategy refs)")
         cur.execute(
             """
             CREATE TABLE IF NOT EXISTS settings (
@@ -231,8 +231,6 @@ def _ensure_tables(conn, log=None, log_table=None) -> None:
                 ib_host_account_id text,
                 stream_host_account_id text,
                 stream_secondary_account_id text,
-                flex_default_range_days integer NOT NULL DEFAULT 30,
-                flex_init_range_days integer NOT NULL DEFAULT 360,
                 active_strategy_structure_id bigint,
                 active_gate_safety_strategy_id bigint,
                 active_strategy_allocation_id bigint
