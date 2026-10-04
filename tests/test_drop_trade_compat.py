@@ -79,3 +79,17 @@ def test_the_script_prints_the_same_sql() -> None:
         capture_output=True, text=True, check=True,
     ).stdout
     assert export.strip() == r4.EXPORT_SQL and "TO STDOUT" in export
+
+
+@pytest.mark.parametrize("env", ["dev", "stg", "prod"])
+def test_the_rebuilt_views_are_granted_to_the_runtime_role(env: str) -> None:
+    """TD-85: trade_app_<env> reads the env views; the rebuild drops their grants, so the step
+    grants SELECT again (besides bifrost's default privileges) and its report checks it."""
+    sql = r4.forward_sql(env)
+    grant = (f"GRANT SELECT ON brokerage.executions, brokerage.executions_final, brokerage.executions_fly, "
+             f"brokerage.executions_tws, brokerage.trade_fill_splits TO trade_app_{env};")
+    assert grant in sql
+    last_view = sql.rindex("CREATE OR REPLACE VIEW")
+    assert last_view < sql.index(grant) < sql.index("DROP TABLE IF EXISTS public.account_execution_instance_allocation")
+    assert f"trade_app_{env} cannot read a rebuilt env view" in sql
+    assert f"to_regrole('trade_app_{env}') IS NOT NULL" in sql

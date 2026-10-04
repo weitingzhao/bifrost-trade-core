@@ -189,3 +189,24 @@ def test_a_table_where_a_view_should_be_is_refused(cur: Any) -> None:
     with pytest.raises(psycopg2.errors.RaiseException, match="is not a view"):
         _run(cur, r4.forward_statements("stg"))
     cur.execute("ROLLBACK TO SAVEPOINT r4_table")
+
+
+_ROLE = "DO $$ BEGIN IF to_regrole('trade_app_stg') IS NULL THEN CREATE ROLE trade_app_stg NOLOGIN; END IF; END $$"
+
+
+def test_the_runtime_role_reads_the_rebuilt_views(cur: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    """TD-85: the rebuilt env views are granted to trade_app_<env>; without the grant the report refuses."""
+    _seed(cur)
+    cur.execute("SAVEPOINT r4_role")
+    cur.execute(_ROLE)
+    _run(cur, r4.forward_statements("stg"))
+    for v in r4.ENV_VIEWS:
+        assert _one(cur, "SELECT has_table_privilege('trade_app_stg', %s, 'SELECT')", (v,)) == (True,), v
+    cur.execute("ROLLBACK TO SAVEPOINT r4_role")
+
+    cur.execute(_ROLE)
+    monkeypatch.setattr(r4, "grant_statement", lambda env: "SELECT 1")
+    with pytest.raises(psycopg2.errors.RaiseException, match="trade_app_stg cannot read a rebuilt env view"):
+        _run(cur, r4.forward_statements("stg"))
+    cur.execute("ROLLBACK TO SAVEPOINT r4_role")
+    assert _present(cur)["public.strategy_instance"]

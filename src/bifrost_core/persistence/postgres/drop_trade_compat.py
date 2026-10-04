@@ -23,8 +23,9 @@ table again (``CREATE TABLE IF NOT EXISTS``, empty) on every release.
 
 ``forward_sql(env)`` prints the whole transaction for ``bifrost_<env>`` (``psql -d bifrost_<env>``,
 as ``postgres``; it switches to ``bifrost``, which owns every object here in all three envs since
-TD-85 D8; views it creates get ``trade_app_<env>``'s SELECT from bifrost's default privileges);
-it ends ``ROLLBACK`` unless ``commit``. Steps:
+TD-85 D8); it ends ``ROLLBACK`` unless ``commit``. The rebuilt views lose their grants with the
+DROP; bifrost's default privileges (TD-85 D1) give ``trade_app_<env>`` SELECT again, and step 2
+also grants it explicitly, so the runtime role reads them whatever the default ACLs say. Steps:
 
 0. guards: the right database; the two compatibility objects are views (or already gone), never
    tables; every object dropped or rebuilt is owned by ``bifrost``; the legacy table holds exactly
@@ -32,11 +33,13 @@ it ends ``ROLLBACK`` unless ``commit``. Steps:
    CSV export (``EXPORT_SQL``) is taken before the commit; then the counts the report compares
    (``r4_before``);
 1. ``DROP VIEW`` the two public compatibility views;
-2. the env views as core 0.47.0 builds them (``view_statements``);
+2. the env views as core 0.47.0 builds them (``view_statements``), then ``GRANT SELECT`` on the five
+   to the env's runtime role ``trade_app_<env>`` (TD-85) when that role exists;
 3. ``DROP TABLE public.account_execution_instance_allocation`` (its sequence, indexes and FK go
    with it);
 4. the report: counts before / after (trade, trade_execution, splits, attributed fills, split
-   rows) and a RAISE if one changed, an object is left or a view still has ``strategy_instance_id``.
+   rows) and a RAISE if one changed, an object is left, a view still has ``strategy_instance_id``
+   or ``trade_app_<env>`` (when it exists) cannot read a rebuilt view.
 
 ``reverse_sql(env)`` puts back the two views (R3's definitions), ``brokerage.instance_allocations``
 (core 0.45.0's) and the empty table (core 0.46.x's DDL); the rows come back from the CSV with
@@ -126,6 +129,23 @@ _LEGACY_MATCHED = f"""SELECT count(*) FROM {LEGACY_TABLE} a
   )"""
 
 
+def runtime_role(env: str) -> str:
+    """The env's runtime login (TD-85 D1): ``trade_app_<env>``; it reads the env views."""
+    env_db(env)
+    return f"trade_app_{env}"
+
+
+def grant_statement(env: str) -> str:
+    """Step 2's grant: SELECT on the rebuilt env views to the runtime role, when it exists."""
+    role = runtime_role(env)
+    views = ", ".join(ENV_VIEWS)
+    return f"""DO $r4$ BEGIN
+  IF to_regrole('{role}') IS NOT NULL THEN
+    GRANT SELECT ON {views} TO {role};
+  END IF;
+END $r4$"""
+
+
 def env_db(env: str) -> str:
     """``bifrost_<env>`` for dev / stg / prod; ValueError for anything else."""
     if env not in ENVS:
@@ -192,7 +212,7 @@ def before_statement() -> str:
     return f"CREATE TEMP TABLE r4_before ON COMMIT DROP AS SELECT\n  {cols}"
 
 
-def report_statements() -> List[str]:
+def report_statements(env: str) -> List[str]:
     rows = "\nUNION ALL ".join(
         f"SELECT '{label}' AS what, b.{label} AS before, ({sql}) AS after FROM r4_before b" for label, sql in REPORT
     )
@@ -202,17 +222,28 @@ def report_statements() -> List[str]:
         f" AND table_name IN ({views}) AND column_name = 'strategy_instance_id')"
     )
     checks = "\n  OR ".join(f"b.{label} <> ({sql})" for label, sql in REPORT)
+    role = runtime_role(env)
+    readable = " AND ".join(f"has_table_privilege('{role}', '{v}', 'SELECT')" for v in ENV_VIEWS)
     return [
         f"SELECT what, before, after, before = after AS same FROM (\n{rows}\n) r",
         "SELECT o AS dropped, to_regclass(o) IS NULL AS gone FROM unnest(ARRAY["
         + ", ".join(f"'{o}'" for o in DROPPED)
         + "]) o",
+        "SELECT v AS env_view, CASE WHEN to_regrole('" + role + "') IS NULL THEN NULL"
+        " ELSE has_table_privilege('" + role + "', v, 'SELECT') END AS " + role + "_select FROM unnest(ARRAY["
+        + ", ".join(f"'{v}'" for v in ENV_VIEWS)
+        + "]) v",
         f"""DO $r4$ BEGIN
   IF EXISTS (SELECT 1 FROM r4_before b WHERE {checks}) THEN
     RAISE EXCEPTION 'R4: a count changed (see the report above); nothing is kept';
   END IF;
   IF {left} THEN
     RAISE EXCEPTION 'R4: an object is still there (see the report above); nothing is kept';
+  END IF;
+  IF to_regrole('{role}') IS NOT NULL THEN  -- nested: AND does not short-circuit in SQL
+    IF NOT ({readable}) THEN
+      RAISE EXCEPTION 'R4: {role} cannot read a rebuilt env view (see the report above); nothing is kept';
+    END IF;
   END IF;
 END $r4$""",
     ]
@@ -246,8 +277,9 @@ def forward_statements(env: str) -> List[str]:
     parts += ["DROP TABLE IF EXISTS pg_temp.r4_before", before_statement()]
     parts += [f"DROP VIEW IF EXISTS {v}" for v in COMPAT_VIEWS]
     parts += [s.strip() for s in view_statements()]
+    parts.append(grant_statement(env))
     parts.append(f"DROP TABLE IF EXISTS {LEGACY_TABLE}")
-    parts += report_statements()
+    parts += report_statements(env)
     return parts
 
 
