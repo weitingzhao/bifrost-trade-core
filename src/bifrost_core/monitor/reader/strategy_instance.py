@@ -1,8 +1,9 @@
 """Strategy instance CRUD: list, get, create, patch, strict delete. Used for trade attribution (SI.2).
 
-``patch_instance`` and ``delete_instance_strict`` (core 0.33.0, TD-15) raise the
-``Write*`` outcomes. The bool writers ``update_instance`` / ``delete_instance`` and
-``get_instance_open_option_legs`` left in core 0.46.0 (TD-80: no caller)."""
+``patch_instance`` and ``delete_instance_strict`` (core 0.33.0, TD-15) and
+``create_instance_strict`` (core 0.47.0, TD-80 C2) raise the ``Write*`` outcomes. The bool
+writers ``update_instance`` / ``delete_instance`` and ``get_instance_open_option_legs`` left
+in core 0.46.0 (TD-80: no caller)."""
 
 import logging
 from datetime import datetime, timezone
@@ -211,6 +212,49 @@ def create_instance(
 
 
 # --- TD-15 writers (core 0.33.0): return the row / raise Write* --------------------
+
+
+def create_instance_strict(
+    conn_or_config: Any,
+    strategy_opportunity_id: Any,
+    account_id: Any,
+    opened_at: Any,
+    label: Any = None,
+) -> Dict[str, Any]:
+    """Open one trade; return the row as ``get_instance_by_id`` reads it (core 0.47.0, TD-80 C2).
+
+    The ``Write*`` twin of ``create_instance``, which answers None for every failure.
+    ``strategy_opportunity_id``: an existing opportunity (one that does not exist is
+    WriteInvalid -- the body names it) · ``account_id``: required text · ``opened_at``: a
+    timestamp (datetime, Unix seconds or ISO 8601) · ``label``: nullable text, blank refused
+    (send null). Raises WriteInvalid, WriteFailed; nothing is written when it raises.
+    """
+    what = "the trade"
+    opportunity_id = ws.row_id(strategy_opportunity_id, "strategy_opportunity_id", nullable=False)
+    account = ws.text(account_id, "account_id", nullable=False)
+    opened = ws.timestamp(opened_at, "opened_at", nullable=False)
+    label_text = ws.text(label, "label", nullable=True)
+    with ws.write_connection(conn_or_config, what) as conn, ws.write_transaction(conn, what):
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT 1 FROM strategy_opportunity WHERE strategy_opportunity_id = %s",
+                (opportunity_id,),
+            )
+            if cur.fetchone() is None:
+                raise WriteInvalid(f"No strategy opportunity {opportunity_id}; a trade opens under an existing one.")
+            cur.execute(
+                """
+                INSERT INTO trade (strategy_opportunity_id, account_id, opened_at, label, updated_at)
+                VALUES (%s, %s, %s, %s, now())
+                RETURNING trade_id
+                """,
+                (opportunity_id, account, opened, label_text),
+            )
+            new_id = int(cur.fetchone()[0])
+        row = get_instance_by_id(conn, new_id)
+        if row is None:
+            raise WriteFailed(f"{what} was written but could not be read back; nothing was saved.")
+    return row
 
 # No ``notes`` since core 0.43.0 (TD-73): a trade's notes live in the Research journal, and
 # the column is dropped after this release (infra db-steps 2026-10-03-td43-td73-drop-columns).

@@ -10,7 +10,9 @@ An instrument with no row is read as a stock by the callers; nothing here
 infers a class from the Owner's category.
 
 ``patch_instrument_class`` / ``delete_instrument_class_strict`` (core 0.33.0, TD-15)
-raise ``Write*``; ``set_instrument_class`` stays the upsert.
+raise ``Write*``; so does ``set_instrument_class_strict`` (core 0.47.0, TD-80 C2), the full
+replace the API's PUT calls. ``set_instrument_class`` (``(ok, error)``) stays one release for
+the ``StatusReader`` facade, then goes.
 """
 
 import logging
@@ -140,6 +142,43 @@ def patch_instrument_class(conn_or_config: Any, contract_key: str, fields: Dict[
             row = cur.fetchone()
         if row is None:
             raise WriteNotFound(f"{ck} has no instrument class registered.")
+    return dict(row)
+
+
+def set_instrument_class_strict(
+    conn_or_config: Any,
+    contract_key: Any,
+    instrument_class: Any,
+    note: Any = None,
+) -> Dict[str, Any]:
+    """Register one instrument's class, or replace its registration whole; return the row in
+    ``list_instrument_classes``' shape.
+
+    A full replace: the row becomes exactly what is sent, so no ``note`` clears a stored one
+    (PATCH changes only the fields sent). ``instrument_class`` NOT NULL, one of stock /
+    fixed_income / cash_like (spelling normalised as ``normalize_instrument_class`` does) ·
+    ``note`` nullable text, blank refused. Raises WriteInvalid, WriteFailed.
+    """
+    ck = _contract_key(contract_key)
+    raw = ws.text(instrument_class, "instrument_class", nullable=False)
+    cls = normalize_instrument_class(raw)
+    if cls is None:
+        raise WriteInvalid(f"instrument_class must be one of {', '.join(INSTRUMENT_CLASSES)}.")
+    note_text = ws.text(note, "note", nullable=True)
+    what = f"the instrument class of {ck}"
+    with ws.write_connection(conn_or_config, what) as conn, ws.write_transaction(conn, what):
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                f"""
+                INSERT INTO preference_instrument_class (contract_key, instrument_class, note, updated_at)
+                VALUES (%s, %s, %s, now())
+                ON CONFLICT (contract_key) DO UPDATE
+                SET instrument_class = EXCLUDED.instrument_class, note = EXCLUDED.note, updated_at = now()
+                RETURNING {_CLASS_COLUMNS}
+                """,
+                (ck, cls, note_text),
+            )
+            row = cur.fetchone()
     return dict(row)
 
 

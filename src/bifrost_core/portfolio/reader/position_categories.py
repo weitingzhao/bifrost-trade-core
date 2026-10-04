@@ -1,8 +1,10 @@
 """Position categories CRUD: read and write preference_position_categories / preference_position_category_tags.
 
 ``patch_position_category`` and ``delete_position_category_strict`` (core 0.33.0,
-TD-15) check the row exists and raise ``Write*``; the older writers answer a bool
-(and ``True`` for a missing id) for one release.
+TD-15) check the row exists and raise ``Write*``; so do ``create_position_category_strict``,
+``set_position_category_tag_strict`` and ``set_market_streams_symbol_order_strict`` (core
+0.47.0, TD-80 C2), which the API's POST / PUT call. The bool / ``(id, error)`` writers they
+replace stay one release for the ``StatusReader`` facade, then go.
 
 Names (TD-56, core 0.41.0): ``preference_market_streams_symbol_order`` keeps each category's
 symbol order under the category's *name*, so the name is a key -- UNIQUE in the table
@@ -320,3 +322,111 @@ def delete_position_category_strict(conn_or_config: Any, category_id: int) -> Di
         "watchlist_uncategorized": watched,
         "symbol_order_removed": ordered,
     }
+
+
+# --- TD-80 C2 writers (core 0.47.0): the POST / PUT twins of the bool writers above --------
+
+
+def create_position_category_strict(
+    conn_or_config: Any,
+    name: Any,
+    description: Any = None,
+    sort_order: Any = None,
+) -> Dict[str, Any]:
+    """Add one category; return the row in ``get_position_categories``' shape.
+
+    ``name`` NOT NULL text, not the reserved ``Uncategorized`` (WriteInvalid) and not one in use
+    (WriteConflict) · ``description`` nullable text (blank refused, as PATCH does) ·
+    ``sort_order`` nullable whole number. Raises WriteInvalid, WriteConflict, WriteFailed.
+    """
+    category_name = ws.text(name, "name", nullable=False)
+    check_category_name(category_name)
+    columns = {
+        "name": category_name,
+        "description": ws.text(description, "description", nullable=True),
+        "sort_order": ws.integer(sort_order, "sort_order", nullable=True),
+    }
+    what = f"position category '{category_name}'"
+    with ws.write_connection(conn_or_config, what) as conn, ws.write_transaction(conn, what):
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            _refuse_taken_name(cur, category_name)
+            cur.execute(
+                "INSERT INTO preference_position_categories (name, description, sort_order, updated_at) "
+                f"VALUES (%s, %s, %s, now()) RETURNING {_CATEGORY_COLUMNS}",
+                list(columns.values()),
+            )
+            row = cur.fetchone()
+    return dict(row)
+
+
+def set_position_category_tag_strict(
+    conn_or_config: Any,
+    account_id: Any,
+    contract_key: Any,
+    category_id: Any,
+) -> Dict[str, Any]:
+    """Tag one position with a category, or clear its tag (``category_id`` None).
+
+    Returns ``{"account_id", "contract_key", "category_id", "cleared"}``; ``cleared`` says
+    whether a clear removed a tag (clearing an untagged position is not an error).
+    ``account_id`` / ``contract_key`` required text · ``category_id`` an existing category
+    (one that does not exist is WriteInvalid -- the body names it). Raises WriteInvalid,
+    WriteFailed.
+    """
+    account = ws.text(account_id, "account_id", nullable=False)
+    key = ws.text(contract_key, "contract_key", nullable=False)
+    category = ws.row_id(category_id, "category_id", nullable=True)
+    what = f"the category tag of {key} in {account}"
+    with ws.write_connection(conn_or_config, what) as conn, ws.write_transaction(conn, what):
+        with conn.cursor() as cur:
+            if category is None:
+                cur.execute(
+                    "DELETE FROM preference_position_category_tags WHERE account_id = %s AND contract_key = %s",
+                    (account, key),
+                )
+                return {"account_id": account, "contract_key": key, "category_id": None, "cleared": cur.rowcount > 0}
+            cur.execute("SELECT 1 FROM preference_position_categories WHERE id = %s", (category,))
+            if cur.fetchone() is None:
+                raise WriteInvalid(f"No position category {category}.")
+            cur.execute(
+                """
+                INSERT INTO preference_position_category_tags (account_id, contract_key, category_id)
+                VALUES (%s, %s, %s)
+                ON CONFLICT (account_id, contract_key) DO UPDATE SET category_id = EXCLUDED.category_id
+                """,
+                (account, key, category),
+            )
+    return {"account_id": account, "contract_key": key, "category_id": category, "cleared": False}
+
+
+def set_market_streams_symbol_order_strict(
+    conn_or_config: Any,
+    category_name: Any,
+    symbols: Any,
+) -> Dict[str, Any]:
+    """Replace one category's Market Streams symbol order. Returns ``{"category_name", "symbols"}``.
+
+    ``category_name`` required text: the order is stored under the name (``Uncategorized``
+    included), so a name no category has yet is accepted as before. ``symbols`` a list of
+    symbols in order, ``[]`` empties it; a blank, non-text or repeated symbol is WriteInvalid
+    and nothing changes (the bool writer dropped blanks and failed on a repeat). Raises
+    WriteInvalid, WriteFailed.
+    """
+    category = ws.text(category_name, "category_name", nullable=False)
+    ordered = [
+        ws.text(s, f"symbols[{i}]", nullable=False) for i, s in enumerate(ws.list_value(symbols, "symbols"))
+    ]
+    repeated = sorted({s for s in ordered if ordered.count(s) > 1})
+    if repeated:
+        raise WriteInvalid(f"symbols lists {ws.name_list(repeated)} more than once.")
+    what = f"the symbol order of {category}"
+    with ws.write_connection(conn_or_config, what) as conn, ws.write_transaction(conn, what):
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM preference_market_streams_symbol_order WHERE category_name = %s", (category,))
+            for i, sym in enumerate(ordered):
+                cur.execute(
+                    "INSERT INTO preference_market_streams_symbol_order (category_name, symbol, sort_order, updated_at) "
+                    "VALUES (%s, %s, %s, now())",
+                    (category, sym, i),
+                )
+    return {"category_name": category, "symbols": ordered}
