@@ -82,7 +82,7 @@ class Case:
 
 CASES = [
     Case("instance", strategy_instance.patch_instance, strategy_instance, "get_instance_by_id",
-         "UPDATE strategy_instance", {"opened_at": "2026-09-01T14:30:00Z"}, "label", "opened_at"),
+         "UPDATE trade SET", {"opened_at": "2026-09-01T14:30:00Z"}, "label", "opened_at"),
     Case("allocation", allocation_write.patch_allocation, strategy_reader, "get_allocation_by_id",
          "UPDATE strategy_allocation", {"name": "Core book"}, "gate_safety_strategy_id", "name"),
     Case("opportunity", opportunity_write.patch_opportunity, strategy_reader, "get_opportunity_by_id",
@@ -208,7 +208,7 @@ def test_instance_timestamps_take_unix_seconds_or_iso(read_back) -> None:
     read_back(CASES[0])
     conn = FakeConn()
     strategy_instance.patch_instance(conn, 41, {"opened_at": 1767225600, "created_at": "2026-01-01T00:00:00Z"})
-    _, params = conn.statement("UPDATE strategy_instance")
+    _, params = conn.statement("UPDATE trade SET")
     assert params[0] == params[1] == datetime(2026, 1, 1, tzinfo=timezone.utc)
 
 
@@ -433,7 +433,7 @@ _REVIEW_ROW = {
 
 
 def test_review_patch_upserts_only_the_sent_fields_and_returns_the_row() -> None:
-    conn = FakeConn([("FROM strategy_instance", Reply(one=(1,))), ("INSERT INTO trade_review", Reply(one=_REVIEW_ROW))])
+    conn = FakeConn([("FROM trade WHERE trade_id", Reply(one=(1,))), ("INSERT INTO trade_review", Reply(one=_REVIEW_ROW))])
     row = trade_review.patch_review(conn, 41, {"reviewed": True})
     assert row["tags_added"] == ["early exit"] and row["reviewed"] is False
     sql, params = conn.statement("INSERT INTO trade_review")
@@ -456,11 +456,11 @@ def test_review_patch_rules() -> None:
     for value in ("x", None):
         with pytest.raises(WriteInvalid, match="Research journal"):
             trade_review.patch_review(FakeConn(), 41, {"note": value, "reviewed": True})
-    conn = FakeConn([("FROM strategy_instance", Reply(one=None))])
+    conn = FakeConn([("FROM trade WHERE trade_id", Reply(one=None))])
     with pytest.raises(WriteNotFound, match="No trade 41"):
         trade_review.patch_review(conn, 41, {"reviewed": True})
     assert not conn.ran("INSERT INTO trade_review")
-    conn = FakeConn([("FROM strategy_instance", Reply(one=(1,))), ("INSERT INTO trade_review", Reply(raises=DB_DOWN))])
+    conn = FakeConn([("FROM trade WHERE trade_id", Reply(one=(1,))), ("INSERT INTO trade_review", Reply(raises=DB_DOWN))])
     with pytest.raises(WriteFailed):
         trade_review.patch_review(conn, 41, {"reviewed": True})
 
@@ -509,7 +509,7 @@ def test_delete_structure_strict_is_soft_and_says_so() -> None:
     ("fn", "key", "in_use", "reason"),
     [
         (rules.delete_opportunity_strict, "strategy_opportunity_id",
-         ("FROM strategy_instance WHERE strategy_opportunity_id", Reply(one=(2,))), "It has 2 trades"),
+         ("FROM trade WHERE strategy_opportunity_id", Reply(one=(2,))), "It has 2 trades"),
         (rules.delete_allocation_strict, "strategy_allocation_id",
          ("SELECT active_strategy_allocation_id FROM settings", Reply(one=(6,))), "The daemon runs this allocation"),
         (rules.delete_gate_safety_strict, "gate_safety_strategy_id",
@@ -568,10 +568,10 @@ def two_dbs(monkeypatch: pytest.MonkeyPatch):
 
 
 def _env(*rules_: Any) -> FakeConn:
-    return FakeConn([("FROM strategy_instance WHERE strategy_instance_id = %s FOR UPDATE", Reply(one=(1,))), *rules_])
+    return FakeConn([("FROM trade WHERE trade_id = %s FOR UPDATE", Reply(one=(1,))), *rules_])
 
 
-_COUNTS = "FROM strategy_instance_execution WHERE strategy_instance_id = %s"
+_COUNTS = "FROM trade_execution WHERE trade_id = %s"
 
 
 def test_instance_delete_blocked_by_directly_attributed_executions(two_dbs) -> None:
@@ -580,7 +580,7 @@ def test_instance_delete_blocked_by_directly_attributed_executions(two_dbs) -> N
     two_dbs(env, golden)
     with pytest.raises(WriteConflict, match="^3 fills are attributed to this trade.$"):
         strategy_instance.delete_instance_strict(CFG, 41)
-    assert not env.ran("DELETE FROM strategy_instance")
+    assert not env.ran("DELETE FROM trade WHERE")
     assert env.rollbacks == 1 and env.commits == 0
     # TD-09: this env's table; Golden Source is not read.
     assert env.statement(_COUNTS)[1] == (41,)
@@ -592,7 +592,7 @@ def test_instance_delete_blocked_by_split_allocations_with_its_own_reason(two_db
     two_dbs(env, FakeConn())
     with pytest.raises(WriteConflict, match="2 fills are split to this trade"):
         strategy_instance.delete_instance_strict(CFG, 41)
-    assert not env.ran("DELETE FROM strategy_instance")
+    assert not env.ran("DELETE FROM trade WHERE")
 
 
 def test_instance_delete_does_not_delete_blind_when_the_count_fails(two_dbs) -> None:
@@ -600,7 +600,7 @@ def test_instance_delete_does_not_delete_blind_when_the_count_fails(two_dbs) -> 
     two_dbs(env, FakeConn())
     with pytest.raises(WriteFailed):
         strategy_instance.delete_instance_strict(CFG, 41)
-    assert not env.ran("DELETE FROM strategy_instance")
+    assert not env.ran("DELETE FROM trade WHERE")
 
 
 def test_count_attributed_executions_reads_this_env(two_dbs) -> None:
@@ -613,7 +613,7 @@ def test_instance_delete_succeeds_when_nothing_is_attributed(two_dbs) -> None:
     env = _env((_COUNTS, Reply(one=(0, 0))))
     two_dbs(env, FakeConn())
     assert strategy_instance.delete_instance_strict(CFG, 41) == {"deleted": "hard", "strategy_instance_id": 41, "trade_id": 41}
-    assert env.ran("DELETE FROM strategy_instance") and env.commits == 1
+    assert env.ran("DELETE FROM trade WHERE") and env.commits == 1
 
 
 def test_instance_delete_missing_and_without_config(two_dbs) -> None:
@@ -628,7 +628,7 @@ def test_instance_delete_missing_and_without_config(two_dbs) -> None:
 def test_instance_delete_fk_race_is_a_conflict(two_dbs) -> None:
     env = _env(
         (_COUNTS, Reply(one=(0, 0))),
-        ("DELETE FROM strategy_instance", Reply(raises=psycopg2.errors.ForeignKeyViolation("fk"))),
+        ("DELETE FROM trade WHERE", Reply(raises=psycopg2.errors.ForeignKeyViolation("fk"))),
     )
     two_dbs(env, FakeConn())
     with pytest.raises(WriteConflict, match="still reference it"):

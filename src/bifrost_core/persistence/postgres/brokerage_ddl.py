@@ -15,8 +15,8 @@ from bifrost_core.persistence.postgres.brokerage_tables import (
     BROKERAGE_ENV_VIEWS,
     BROKERAGE_PHYSICAL_TABLES,
     BROKERAGE_VIEWS,
-    INSTANCE_EXECUTION,
     SCHEMA,
+    TRADE_EXECUTION,
 )
 from bifrost_core.persistence.postgres.brokerage_views import (  # noqa: F401 - re-exported
     _EXEC_CANONICAL_COLS,
@@ -505,14 +505,15 @@ def setup_fdw_foreign_tables(
     remote_password = str(golden_source_params.get("password") or "")
 
     with env_conn.cursor() as cur:
-        # The env views join public.strategy_instance_execution, which _ensure_tables
-        # creates (db_refresh_schema runs it first). A DB without it is not on TD-09
-        # yet: stop before dropping anything rather than build views that read Golden
-        # Source's attribution columns.
-        cur.execute("SELECT to_regclass(%s)", (f"public.{INSTANCE_EXECUTION}",))
+        # The env views join public.trade_execution, which _ensure_tables creates
+        # (db_refresh_schema runs it first) and the naming R3 rename makes out of
+        # strategy_instance_execution. A DB without it is on neither: stop before
+        # dropping anything rather than build views over tables that are not there.
+        cur.execute("SELECT to_regclass(%s)", (f"public.{TRADE_EXECUTION}",))
         if (cur.fetchone() or [None])[0] is None:
             raise RuntimeError(
-                f"public.{INSTANCE_EXECUTION} is missing: run _ensure_tables (db_refresh_schema) first."
+                f"public.{TRADE_EXECUTION} is missing: run _ensure_tables (db_refresh_schema) first "
+                "(a database still on strategy_instance_execution needs scripts/db/rename_trade_entity.py)."
             )
         if not skip_server_admin:
             cur.execute("CREATE EXTENSION IF NOT EXISTS postgres_fdw")

@@ -110,7 +110,7 @@ def test_legs_are_read_per_instance_and_contract() -> None:
     legs = read_instance_legs(cur, [7, 8])
     assert sorted(legs) == [7, 8] and [x.contract_key for x in legs[7]] == ["A", "B"]
     sql, params = cur.executed[0]
-    assert "strategy_instance_execution" in sql and "brokerage.executions" in sql and "allocated_quantity" in sql
+    assert "FROM trade_execution" in sql and "brokerage.executions" in sql and "split_quantity" in sql
     assert params == {"ids": [7, 8]}
     states = instance_states(_Cur(cur.rows), [7, 8, 9], today=TODAY)
     assert states == {7: ("expired", date(2026, 9, 18)), 8: ("closed", date(2026, 9, 3)), 9: ("no_fills", None)}

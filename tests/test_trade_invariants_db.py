@@ -92,8 +92,8 @@ def _opportunity(db: _Savepointed, name: str = "k43") -> int:
 def _instance(db: _Savepointed, opp: int) -> int:
     return _one(
         db,
-        "INSERT INTO strategy_instance (strategy_opportunity_id, account_id, opened_at) VALUES (%s, %s, %s) "
-        "RETURNING strategy_instance_id",
+        "INSERT INTO trade (strategy_opportunity_id, account_id, opened_at) VALUES (%s, %s, %s) "
+        "RETURNING trade_id",
         (opp, ACCT, OPENED),
     )[0]
 
@@ -131,7 +131,7 @@ def _opt_fill(
     if inst is not None:
         _one(
             db,
-            "INSERT INTO strategy_instance_execution (account_id, exec_id, strategy_instance_id, allocated_quantity) "
+            "INSERT INTO trade_execution (account_id, exec_id, trade_id, split_quantity) "
             "VALUES (%s, %s, %s, %s)",
             (ACCT, exec_id, inst, allocated),
         )
@@ -147,7 +147,7 @@ def test_the_table_holds_filled_and_the_instance_together(db) -> None:
                  "VALUES (%s, 'ZZZQ', 'Put', 1, 'filled')", (ACCT,))
     db.rollback()
     with pytest.raises(psycopg2.errors.CheckViolation):
-        _one(db, "INSERT INTO strategy_plan (account_id, symbol, structure_label, qty, status, strategy_instance_id) "
+        _one(db, "INSERT INTO strategy_plan (account_id, symbol, structure_label, qty, status, trade_id) "
                  "VALUES (%s, 'ZZZQ', 'Put', 1, 'intended', %s)", (ACCT, inst))
     db.rollback()
 
@@ -170,22 +170,22 @@ def test_a_filled_plan_reads_its_instance_open_and_keeps_its_instance(db, monkey
     assert [p["filled_at"] for p in strategy_plan.list_plans(CFG, status="filled", symbol="zzzq", account_id=ACCT)] == [moved]
     # The instance cannot go while the plan points at it: not by SQL, not by core.
     with pytest.raises(psycopg2.errors.ForeignKeyViolation):
-        _one(db, "DELETE FROM strategy_instance WHERE strategy_instance_id = %s", (inst,))
+        _one(db, "DELETE FROM trade WHERE trade_id = %s", (inst,))
     db.rollback()
     with pytest.raises(WriteConflict, match="1 plan was filled by it"):
         strategy_instance.delete_instance_strict(CFG, inst)
-    assert _one(db, "SELECT count(*) FROM strategy_instance WHERE strategy_instance_id = %s", (inst,)) == (1,)
+    assert _one(db, "SELECT count(*) FROM trade WHERE trade_id = %s", (inst,)) == (1,)
 
 
 def test_a_review_is_never_deleted_with_its_instance(db) -> None:
     inst = _instance(db, _opportunity(db))
-    _one(db, "INSERT INTO trade_review (strategy_instance_id) VALUES (%s)", (inst,))
+    _one(db, "INSERT INTO trade_review (trade_id) VALUES (%s)", (inst,))
     with pytest.raises(psycopg2.errors.ForeignKeyViolation):
-        _one(db, "DELETE FROM strategy_instance WHERE strategy_instance_id = %s", (inst,))
+        _one(db, "DELETE FROM trade WHERE trade_id = %s", (inst,))
     db.rollback()
     with pytest.raises(WriteConflict, match="it has a review"):
         strategy_instance.delete_instance_strict(CFG, inst)
-    assert _one(db, "SELECT count(*) FROM trade_review WHERE strategy_instance_id = %s", (inst,)) == (1,)
+    assert _one(db, "SELECT count(*) FROM trade_review WHERE trade_id = %s", (inst,)) == (1,)
 
 
 def test_an_instance_nothing_points_at_is_still_deleted(db) -> None:

@@ -13,7 +13,7 @@ from typing import Any, Dict, List, Optional, TypedDict
 
 from psycopg2.extras import RealDictCursor
 
-from bifrost_core.persistence.postgres.brokerage_tables import EXECUTIONS_FINAL, INSTANCE_ALLOCATION
+from bifrost_core.persistence.postgres.brokerage_tables import EXECUTIONS_FINAL, TRADE_FILL_SPLITS
 from bifrost_core.monitor.reader.strategy_instance import list_instances
 from bifrost_core.portfolio.model.payoff import RiskPosition, compute_risk_profile
 from bifrost_core.portfolio.reader.executions import get_executions
@@ -25,7 +25,7 @@ from bifrost_core.portfolio.reader.instance_exec_net_pnl import (
 logger = logging.getLogger(__name__)
 
 _EXEC_FINAL = EXECUTIONS_FINAL
-_ALLOC_TABLE = INSTANCE_ALLOCATION
+_ALLOC_TABLE = TRADE_FILL_SPLITS
 
 
 class WinRatePayload(TypedDict, total=False):
@@ -39,9 +39,9 @@ def _batch_underlying_cost(conn: Any, instance_ids: List[int]) -> Dict[int, floa
     Uses **strike × |quantity| × 100** per row (``underlyingCostSellOptUsd`` /
     ``instanceDetailPnlMetrics.ts``), not ``net_cash`` / premium.
 
-    - If ``account_execution_instance_allocation`` exists for the fill: for each instance
-      row, ``strike × abs(allocated_quantity) × 100`` (matches sliced execution ``quantity``).
-    - Otherwise: ``strike × abs(execution.quantity) × 100`` for ``strategy_instance_id``.
+    - If the fill is split (``brokerage.trade_fill_splits``): for each trade
+      row, ``strike × abs(quantity) × 100`` (matches sliced execution ``quantity``).
+    - Otherwise: ``strike × abs(execution.quantity) × 100`` for the fill's ``trade_id``.
 
     ``strike`` prefers ``executions.strike``; if null/zero, parses segment 4 of
     ``contract_key`` (``symbol|sec|expiry|strike|right``), same as the frontend fallback.
@@ -56,7 +56,7 @@ def _batch_underlying_cost(conn: Any, instance_ids: List[int]) -> Dict[int, floa
                 f"""
                 WITH opt_sell AS (
                     SELECT e.account_executions_id,
-                           e.strategy_instance_id AS direct_sid,
+                           e.trade_id AS direct_sid,
                            CASE
                              WHEN e.strike IS NOT NULL AND e.strike > 0 THEN e.strike::double precision
                              WHEN NULLIF(trim(split_part(COALESCE(e.contract_key, ''), '|', 4)), '') IS NOT NULL
@@ -68,11 +68,11 @@ def _batch_underlying_cost(conn: Any, instance_ids: List[int]) -> Dict[int, floa
                     WHERE upper(trim(COALESCE(e.side, ''))) IN ('SELL', 'SLD', 'S')
                       AND upper(trim(COALESCE(e.sec_type, ''))) = 'OPT'
                       AND (
-                          e.strategy_instance_id IN ({placeholders})
+                          e.trade_id IN ({placeholders})
                           OR EXISTS (
                               SELECT 1 FROM {_ALLOC_TABLE} a0
                               WHERE a0.account_executions_id = e.account_executions_id
-                                AND a0.strategy_instance_id IN ({placeholders})
+                                AND a0.trade_id IN ({placeholders})
                           )
                       )
                 ),
@@ -81,16 +81,16 @@ def _batch_underlying_cost(conn: Any, instance_ids: List[int]) -> Dict[int, floa
                     WHERE eff_strike IS NOT NULL AND eff_strike > 0
                 ),
                 weighted_from_alloc AS (
-                    SELECT a.strategy_instance_id AS sid,
+                    SELECT a.trade_id AS sid,
                            SUM(
-                               ABS(COALESCE(a.allocated_quantity, 0))
+                               ABS(COALESCE(a.quantity, 0))
                                * 100.0
                                * o.eff_strike
                            ) AS cost
                     FROM opt_sell_ok o
                     INNER JOIN {_ALLOC_TABLE} a ON a.account_executions_id = o.account_executions_id
-                    WHERE a.strategy_instance_id IN ({placeholders})
-                    GROUP BY a.strategy_instance_id
+                    WHERE a.trade_id IN ({placeholders})
+                    GROUP BY a.trade_id
                 ),
                 weighted_direct AS (
                     SELECT o.direct_sid AS sid,

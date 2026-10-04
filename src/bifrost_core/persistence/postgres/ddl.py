@@ -9,11 +9,17 @@ from bifrost_core.persistence.postgres.wave9_migrations import (
 from bifrost_core.persistence.postgres.wave11_migrations import migrate_wave11_drop_flex_token_columns
 from bifrost_core.persistence.postgres.wave13_migrations import migrate_wave13_reconcile_legacy_schema
 from bifrost_core.persistence.postgres.wave14_migrations import migrate_wave14_trade_invariants
+from bifrost_core.persistence.postgres.trade_ddl import (  # noqa: F401 - re-exported
+    STRATEGY_INSTANCE_EXECUTION_DDL,
+    TRADE_EXECUTION_DDL,
+    ensure_trade_tables,
+    refuse_unmigrated_trade_entity,
+)
 
 # IB / brokerage tables live in bifrost_golden_source.raw_broker.* (see brokerage_ddl.py).
 # Per-env DBs expose them via postgres_fdw. Do not recreate in public.
 # Bridge tables (account_execution_instance_allocation, account_execution_option_stock_link)
-# stay in per-env public — they FK strategy_instance.
+# stay in per-env public — the first FKs trade (trade_ddl).
 _BROKERAGE_MIGRATED_TABLES = frozenset(
     {
         "daemon_open_orders",
@@ -56,47 +62,6 @@ _P8_RETIRED_PUBLIC_TABLES = frozenset(
 # Wave 9: child tables collapsed into jsonb; earnings_dates folded into params_json.
 _GATE_SAFETY_RETIRED_CHILD_TABLES = frozenset(
     {"gate_safety_state", "gate_safety_intent", "gate_safety_guard"}
-)
-
-
-# TD-09 (core 0.37.0): per-env strategy attribution keyed by the fill (account_id, exec_id).
-# Shared with the one-off migration (td09_attribution), which applies it in the same
-# transaction as the load. Idempotent.
-STRATEGY_INSTANCE_EXECUTION_DDL: tuple[str, ...] = (
-    """
-    DO $sie$
-    BEGIN
-      IF NOT EXISTS (
-        SELECT 1 FROM pg_constraint
-        WHERE conname = 'strategy_instance_id_account_uq'
-          AND conrelid = 'public.strategy_instance'::regclass
-      ) THEN
-        ALTER TABLE strategy_instance
-          ADD CONSTRAINT strategy_instance_id_account_uq UNIQUE (strategy_instance_id, account_id);
-      END IF;
-    END $sie$;
-    """,
-    """
-    CREATE TABLE IF NOT EXISTS strategy_instance_execution (
-        strategy_instance_execution_id bigserial PRIMARY KEY,
-        account_id text NOT NULL,
-        exec_id text NOT NULL,
-        strategy_instance_id bigint NOT NULL,
-        allocated_quantity numeric NULL,
-        created_at timestamptz NOT NULL DEFAULT now(),
-        updated_at timestamptz NOT NULL DEFAULT now(),
-        CONSTRAINT strategy_instance_execution_instance_fk
-            FOREIGN KEY (strategy_instance_id, account_id)
-            REFERENCES strategy_instance (strategy_instance_id, account_id) ON DELETE RESTRICT,
-        CONSTRAINT strategy_instance_execution_uq UNIQUE (account_id, exec_id, strategy_instance_id),
-        CONSTRAINT strategy_instance_execution_qty_ck
-            CHECK (allocated_quantity IS NULL OR allocated_quantity <> 0)
-    )
-    """,
-    "CREATE UNIQUE INDEX IF NOT EXISTS strategy_instance_execution_whole_uq "
-    "ON strategy_instance_execution (account_id, exec_id) WHERE allocated_quantity IS NULL",
-    "CREATE INDEX IF NOT EXISTS strategy_instance_execution_instance_ix "
-    "ON strategy_instance_execution (strategy_instance_id)",
 )
 
 
@@ -251,6 +216,9 @@ def _ensure_tables(conn, log=None, log_table=None) -> None:
     except Exception:
         pass
     with conn.cursor() as cur:
+        # Naming R3 (core 0.45.0): a database whose strategy_instance is still a table has
+        # not been renamed; stop before the first change (trade_ddl).
+        refuse_unmigrated_trade_entity(cur)
         # Daemon / Account Sync IPC (heartbeat, run_status, control, auto_status*)
         # retired → per-env Redis (bifrost_core.persistence.redis_daemon_state).
         _log("daemon_* / account_sync_* IPC tables skipped (Redis daemon state)")
@@ -527,99 +495,9 @@ def _ensure_tables(conn, log=None, log_table=None) -> None:
             )
             """
         )
-        # Not created, never added back (core 0.43.0, TD-43 / TD-73): strategy_instance.notes,
-        # strategy_plan.filled_at, trade_review.note -- dropped by an Owner db-step, not here.
-        _log_table(
-            "strategy_instance", "Strategy instance (a trade under an opportunity, one account)"
-        )
-        cur.execute(
-            """
-            CREATE TABLE IF NOT EXISTS strategy_instance (
-                strategy_instance_id bigserial PRIMARY KEY,
-                strategy_opportunity_id bigint NOT NULL REFERENCES strategy_opportunity(strategy_opportunity_id) ON DELETE RESTRICT,
-                account_id text NOT NULL,
-                opened_at timestamptz NOT NULL,
-                label text,
-                created_at timestamptz NOT NULL DEFAULT now(),
-                updated_at timestamptz NOT NULL DEFAULT now()
-            )
-            """
-        )
-        cur.execute(
-            "CREATE INDEX IF NOT EXISTS strategy_instance_opportunity_id ON strategy_instance (strategy_opportunity_id)"
-        )
-        cur.execute(
-            "CREATE INDEX IF NOT EXISTS strategy_instance_account_opened ON strategy_instance (account_id, opened_at)"
-        )
-        _log_table(
-            "strategy_plan", "Structured trade plans (advisory; no execution consumer -- D10)"
-        )
-        cur.execute(
-            """
-            CREATE TABLE IF NOT EXISTS strategy_plan (
-                strategy_plan_id        bigserial PRIMARY KEY,
-                account_id              text        NOT NULL,
-                symbol                  text        NOT NULL,
-                structure_label         text        NOT NULL,
-                strategy_structure_id   bigint      REFERENCES strategy_structure(strategy_structure_id) ON DELETE SET NULL,
-                strategy_opportunity_id bigint      REFERENCES strategy_opportunity(strategy_opportunity_id) ON DELETE SET NULL,
-                legs_json               jsonb       NOT NULL DEFAULT '[]'::jsonb,
-                qty                     integer     NOT NULL CHECK (qty > 0),
-                price_effect            text        CHECK (price_effect IN ('credit', 'debit')),
-                limit_price             numeric     CHECK (limit_price >= 0),
-                target_kind             text        CHECK (target_kind IN ('credit_pct', 'option_price', 'underlying_price')),
-                target_value            numeric,
-                stop_kind               text        CHECK (stop_kind IN ('credit_multiple', 'option_price', 'underlying_price')),
-                stop_value              numeric,
-                exit_by                 date,
-                rationale               text,
-                source_kind             text        NOT NULL DEFAULT 'manual'
-                                                    CHECK (source_kind IN ('manual', 'symbol', 'hypothesis', 'inbox_draft', 'roll')),
-                source_ref              text,
-                source_json             jsonb       NOT NULL DEFAULT '[]'::jsonb,
-                status                  text        NOT NULL DEFAULT 'draft'
-                                                    CHECK (status IN ('draft', 'intended', 'filled', 'cancelled')),
-                expires_at              timestamptz,
-                intended_at             timestamptz,
-                cancelled_at            timestamptz,
-                strategy_instance_id    bigint      REFERENCES strategy_instance(strategy_instance_id) ON DELETE RESTRICT,
-                parent_strategy_plan_id bigint      REFERENCES strategy_plan(strategy_plan_id) ON DELETE SET NULL,
-                created_at              timestamptz NOT NULL DEFAULT now(),
-                updated_at              timestamptz NOT NULL DEFAULT now(),
-                CHECK ((target_kind IS NULL) = (target_value IS NULL)),
-                CHECK ((stop_kind IS NULL) = (stop_value IS NULL)),
-                CONSTRAINT strategy_plan_filled_instance_ck
-                    CHECK ((status = 'filled') = (strategy_instance_id IS NOT NULL))
-            )
-            """
-        )
-        cur.execute(
-            "CREATE INDEX IF NOT EXISTS strategy_plan_status_created ON strategy_plan (status, created_at DESC)"
-        )
-        cur.execute(
-            "CREATE INDEX IF NOT EXISTS strategy_plan_symbol ON strategy_plan (symbol)"
-        )
-        cur.execute(
-            "CREATE INDEX IF NOT EXISTS strategy_plan_instance ON strategy_plan (strategy_instance_id) "
-            "WHERE strategy_instance_id IS NOT NULL"
-        )
-        _log_table(
-            "trade_review", "One review record per strategy instance (Review › Queue and Single trade)"
-        )
-        cur.execute(
-            """
-            CREATE TABLE IF NOT EXISTS trade_review (
-                trade_review_id      bigserial   PRIMARY KEY,
-                strategy_instance_id bigint      NOT NULL UNIQUE
-                                                 REFERENCES strategy_instance(strategy_instance_id) ON DELETE RESTRICT,
-                tags_added           jsonb       NOT NULL DEFAULT '[]'::jsonb,
-                tags_dropped         jsonb       NOT NULL DEFAULT '[]'::jsonb,
-                reviewed_at          timestamptz,
-                created_at           timestamptz NOT NULL DEFAULT now(),
-                updated_at           timestamptz NOT NULL DEFAULT now()
-            )
-            """
-        )
+        # trade, strategy_plan, trade_review, the frozen pre-TD-09 split table and
+        # trade_execution (naming R3, core 0.45.0).
+        ensure_trade_tables(cur, _log_table)
         _log_table("strategy_allocation", "Strategy allocation")
         cur.execute(
             """
@@ -712,48 +590,6 @@ def _ensure_tables(conn, log=None, log_table=None) -> None:
         _log("option_trades skipped (Market Data Plugin)")
         # Brokerage Golden Source owns executions_raw_* + executions views.
         _log("executions_raw_* / account_executions* views skipped (brokerage.*)")
-
-        # One execution row (unified account_executions_id) may attribute quantity to multiple strategy_instance rows.
-        _log_table(
-            "account_execution_instance_allocation",
-            "Execution to strategy_instance quantity splits (R-A2 extension)",
-        )
-        cur.execute(
-            """
-            CREATE TABLE IF NOT EXISTS account_execution_instance_allocation (
-                account_execution_instance_allocation_id bigserial PRIMARY KEY,
-                account_id text NOT NULL,
-                account_executions_id bigint NOT NULL,
-                strategy_instance_id bigint NOT NULL REFERENCES strategy_instance(strategy_instance_id) ON DELETE RESTRICT,
-                allocated_quantity double precision NOT NULL,
-                created_at timestamptz NOT NULL DEFAULT now(),
-                updated_at timestamptz NOT NULL DEFAULT now(),
-                UNIQUE (account_executions_id, strategy_instance_id)
-            )
-            """
-        )
-        cur.execute(
-            "CREATE INDEX IF NOT EXISTS account_exec_inst_alloc_account_exec_id "
-            "ON account_execution_instance_allocation (account_id, account_executions_id)"
-        )
-        cur.execute(
-            "CREATE INDEX IF NOT EXISTS account_exec_inst_alloc_strategy_instance_id "
-            "ON account_execution_instance_allocation (strategy_instance_id)"
-        )
-
-        # TD-09 (core 0.37.0): strategy attribution per env, keyed by the fill
-        # (account_id, exec_id) -- a TWS row and its Flex twin share it. Replaces the
-        # Golden Source raw_broker.executions_raw_*.strategy_* columns (shared by all
-        # three envs, so one env's writes showed up in the others) and the split table
-        # above. NULL allocated_quantity = the whole fill; split rows carry their share.
-        # The composite FK makes "the fill's account is the instance's account" a rule
-        # of the database rather than a Python check.
-        _log_table(
-            "strategy_instance_execution",
-            "Strategy attribution of a fill (account_id, exec_id) to this env's instance; splits carry allocated_quantity (TD-09)",
-        )
-        for stmt in STRATEGY_INSTANCE_EXECUTION_DDL:
-            cur.execute(stmt)
 
         # OPT exercise / assignment: link option execution row(s) to underlying STK fills (performance book).
         _log_table(

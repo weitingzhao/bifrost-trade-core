@@ -16,9 +16,9 @@ from bifrost_core.portfolio.quote_freshness import fresh_quote_sql
 from bifrost_core.persistence.postgres.brokerage_tables import (
     CONTRACT_QUOTE_LIVE,
     EXECUTIONS_FINAL,
-    INSTANCE_ALLOCATION,
-    INSTANCE_EXECUTION,
     POSITIONS,
+    TRADE_EXECUTION,
+    TRADE_FILL_SPLITS,
 )
 from bifrost_core.monitor.reader import write_support as ws
 from bifrost_core.monitor.reader.instance_state import instance_states
@@ -34,7 +34,7 @@ from bifrost_core.monitor.reader.errors import (
 logger = logging.getLogger(__name__)
 
 _EXEC_READ_TABLE = EXECUTIONS_FINAL
-_ALLOC_TABLE = INSTANCE_ALLOCATION
+_ALLOC_TABLE = TRADE_FILL_SPLITS
 
 
 def list_instances(
@@ -62,7 +62,7 @@ def list_instances(
             values.append(strategy_opportunity_id)
         if strategy_instance_ids:
             placeholders = ", ".join(["%s"] * len(strategy_instance_ids))
-            conditions.append(f"si.strategy_instance_id IN ({placeholders})")
+            conditions.append(f"si.trade_id IN ({placeholders})")
             values.extend(strategy_instance_ids)
         if opened_at_from is not None and opened_at_from > 0:
             conditions.append("si.opened_at >= to_timestamp(%s)")
@@ -84,28 +84,28 @@ def list_instances(
                 # execution is in the read table) — verified row for row, < 0.01 s.
                 f"""
                 WITH ex AS (
-                    SELECT e.account_executions_id, e.strategy_instance_id FROM {_EXEC_READ_TABLE} e
+                    SELECT e.account_executions_id, e.trade_id FROM {_EXEC_READ_TABLE} e
                 ),
                 linked AS (
-                    SELECT account_executions_id, strategy_instance_id AS sid
-                    FROM ex WHERE strategy_instance_id IS NOT NULL
+                    SELECT account_executions_id, trade_id AS sid
+                    FROM ex WHERE trade_id IS NOT NULL
                     UNION
-                    SELECT a.account_executions_id, a.strategy_instance_id
+                    SELECT a.account_executions_id, a.trade_id
                     FROM {_ALLOC_TABLE} a
                     JOIN ex ON ex.account_executions_id = a.account_executions_id
                 ),
                 counts AS (
                     SELECT sid, COUNT(DISTINCT account_executions_id) AS n FROM linked GROUP BY sid
                 )
-                SELECT si.strategy_instance_id, si.strategy_opportunity_id, si.account_id,
+                SELECT si.trade_id AS strategy_instance_id, si.strategy_opportunity_id, si.account_id,
                        si.opened_at, si.label, si.created_at, si.updated_at,
                        so.name AS strategy_opportunity_name,
                        ss.strategy_structure_id, ss.name AS strategy_structure_name,
                        COALESCE(c.n, 0) AS executions_count
-                FROM strategy_instance si
+                FROM trade si
                 LEFT JOIN strategy_opportunity so ON si.strategy_opportunity_id = so.strategy_opportunity_id
                 LEFT JOIN strategy_structure ss ON so.strategy_structure_id = ss.strategy_structure_id
-                LEFT JOIN counts c ON c.sid = si.strategy_instance_id
+                LEFT JOIN counts c ON c.sid = si.trade_id
                 {where}
                 ORDER BY si.opened_at DESC
                 """,
@@ -140,14 +140,14 @@ def get_instance_by_id(conn: Any, strategy_instance_id: int) -> Optional[Dict[st
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(
                 """
-                SELECT si.strategy_instance_id, si.strategy_opportunity_id, si.account_id,
+                SELECT si.trade_id AS strategy_instance_id, si.strategy_opportunity_id, si.account_id,
                        si.opened_at, si.label, si.created_at, si.updated_at,
                        so.name AS strategy_opportunity_name,
                        ss.strategy_structure_id, ss.name AS strategy_structure_name
-                FROM strategy_instance si
+                FROM trade si
                 LEFT JOIN strategy_opportunity so ON si.strategy_opportunity_id = so.strategy_opportunity_id
                 LEFT JOIN strategy_structure ss ON so.strategy_structure_id = ss.strategy_structure_id
-                WHERE si.strategy_instance_id = %s
+                WHERE si.trade_id = %s
                 """,
                 (strategy_instance_id,),
             )
@@ -172,7 +172,7 @@ def create_instance(
     opened_at: Any,
     label: Optional[str] = None,
 ) -> Optional[int]:
-    """Insert one strategy_instance. opened_at: datetime or Unix timestamp. Returns strategy_instance_id or None.
+    """Insert one trade (table trade, R3). opened_at: datetime or Unix timestamp. Returns strategy_instance_id or None.
 
     No ``notes`` since core 0.43.0 (TD-73): a trade's notes live in the Research journal."""
     if conn is None:
@@ -193,9 +193,9 @@ def create_instance(
         with conn.cursor() as cur:
             cur.execute(
                 """
-                INSERT INTO strategy_instance (strategy_opportunity_id, account_id, opened_at, label, updated_at)
+                INSERT INTO trade (strategy_opportunity_id, account_id, opened_at, label, updated_at)
                 VALUES (%s, %s, %s, %s, now())
-                RETURNING strategy_instance_id
+                RETURNING trade_id
                 """,
                 (strategy_opportunity_id, account_id, opened_dt, label or None),
             )
@@ -213,13 +213,13 @@ def create_instance(
 
 
 def delete_instance(conn: Any, strategy_instance_id: int) -> bool:
-    """Delete a strategy_instance by id. Returns True if deleted, False if not found or has linked executions."""
+    """Delete a trade by id. Returns True if deleted, False if not found or has linked executions."""
     if conn is None:
         return False
     try:
         with conn.cursor() as cur:
             cur.execute(
-                "DELETE FROM strategy_instance WHERE strategy_instance_id = %s",
+                "DELETE FROM trade WHERE trade_id = %s",
                 (strategy_instance_id,),
             )
             deleted = cur.rowcount > 0
@@ -281,7 +281,7 @@ def update_instance(
     try:
         with conn.cursor() as cur:
             cur.execute(
-                f"UPDATE strategy_instance SET {', '.join(updates)} WHERE strategy_instance_id = %s",
+                f"UPDATE trade SET {', '.join(updates)} WHERE trade_id = %s",
                 values,
             )
             if cur.rowcount == 0:
@@ -314,7 +314,7 @@ def get_instance_open_option_legs(conn: Any, strategy_instance_id: int) -> List[
                 INNER JOIN (
                     SELECT DISTINCT account_id, contract_key
                     FROM {_EXEC_READ_TABLE}
-                    WHERE strategy_instance_id = %s
+                    WHERE trade_id = %s
                       AND upper(trim(COALESCE(sec_type, ''))) = 'OPT'
                 ) tagged ON ap.account_id = tagged.account_id AND ap.contract_key = tagged.contract_key
                 LEFT JOIN {CONTRACT_QUOTE_LIVE} ip
@@ -389,7 +389,7 @@ def patch_instance(conn_or_config: Any, strategy_instance_id: int, fields: Dict[
     with ws.write_connection(conn_or_config, what) as conn, ws.write_transaction(conn, what):
         with conn.cursor() as cur:
             cur.execute(
-                f"UPDATE strategy_instance SET {assignments} WHERE strategy_instance_id = %s",
+                f"UPDATE trade SET {assignments} WHERE trade_id = %s",
                 [*values, strategy_instance_id],
             )
             if cur.rowcount == 0:
@@ -401,11 +401,11 @@ def patch_instance(conn_or_config: Any, strategy_instance_id: int, fields: Dict[
 
 
 def _attributed_counts(cur: Any, strategy_instance_id: int) -> Tuple[int, int]:
-    """(whole fills, split fills) attributed to the instance in this env's strategy_instance_execution."""
+    """(whole fills, split fills) attributed to the trade in this env's trade_execution."""
     cur.execute(
-        f"SELECT count(*) FILTER (WHERE allocated_quantity IS NULL), "
-        f"count(*) FILTER (WHERE allocated_quantity IS NOT NULL) "
-        f"FROM {INSTANCE_EXECUTION} WHERE strategy_instance_id = %s",
+        f"SELECT count(*) FILTER (WHERE split_quantity IS NULL), "
+        f"count(*) FILTER (WHERE split_quantity IS NOT NULL) "
+        f"FROM {TRADE_EXECUTION} WHERE trade_id = %s",
         (strategy_instance_id,),
     )
     row = cur.fetchone() or (0, 0)
@@ -415,8 +415,8 @@ def _attributed_counts(cur: Any, strategy_instance_id: int) -> Tuple[int, int]:
 def _plan_and_review_counts(cur: Any, strategy_instance_id: int) -> Tuple[int, int]:
     """(plans filled by the instance, reviews of it): the two ON DELETE RESTRICT references (TD-43)."""
     cur.execute(
-        "SELECT (SELECT count(*) FROM strategy_plan WHERE strategy_instance_id = %s), "
-        "(SELECT count(*) FROM trade_review WHERE strategy_instance_id = %s)",
+        "SELECT (SELECT count(*) FROM strategy_plan WHERE trade_id = %s), "
+        "(SELECT count(*) FROM trade_review WHERE trade_id = %s)",
         (strategy_instance_id, strategy_instance_id),
     )
     row = cur.fetchone() or (0, 0)
@@ -424,7 +424,7 @@ def _plan_and_review_counts(cur: Any, strategy_instance_id: int) -> Tuple[int, i
 
 
 def count_attributed_executions(status_config: Any, strategy_instance_id: int) -> int:
-    """Fills attributed whole to this instance (this env's strategy_instance_execution, TD-09).
+    """Fills attributed whole to this trade (this env's trade_execution, TD-09).
 
     A fill is (account_id, exec_id), so one recorded by both TWS and Flex counts once.
     Before core 0.37.0 this read Golden Source's raw columns, shared by all three envs.
@@ -447,7 +447,7 @@ def delete_instance_strict(status_config: Any, strategy_instance_id: int) -> Dic
     """Delete an instance nothing is attributed to. Returns ``{"deleted": "hard", "strategy_instance_id", "trade_id"}``.
 
     Refused (WriteConflict, nothing deleted) when fills are split-allocated to it or
-    attributed to it whole in this env's ``strategy_instance_execution`` (TD-09; its
+    attributed to it whole in this env's ``trade_execution`` (TD-09; its
     FK is ON DELETE RESTRICT as well), and while a plan was filled by it or it has a
     review: both FKs are ON DELETE RESTRICT since core 0.41.0 (TD-43), so a filled plan never
     loses its instance and a review is never deleted with one.
@@ -460,7 +460,7 @@ def delete_instance_strict(status_config: Any, strategy_instance_id: int) -> Dic
     with ws.write_connection(status_config, what) as conn, ws.write_transaction(conn, what, on_fk="conflict"):
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT 1 FROM strategy_instance WHERE strategy_instance_id = %s FOR UPDATE",
+                "SELECT 1 FROM trade WHERE trade_id = %s FOR UPDATE",
                 (strategy_instance_id,),
             )
             if cur.fetchone() is None:
@@ -481,7 +481,7 @@ def delete_instance_strict(status_config: Any, strategy_instance_id: int) -> Dic
                 held += ["it has a review"] if n_reviews else []
                 raise WriteConflict(f"Cannot delete instance {strategy_instance_id}: {' and '.join(held)}.")
             cur.execute(
-                "DELETE FROM strategy_instance WHERE strategy_instance_id = %s",
+                "DELETE FROM trade WHERE trade_id = %s",
                 (strategy_instance_id,),
             )
             if cur.rowcount == 0:

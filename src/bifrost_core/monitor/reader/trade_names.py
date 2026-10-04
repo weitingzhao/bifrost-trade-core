@@ -1,8 +1,10 @@
 """Trade names beside the instance names (naming program R1, TD-26 / TD-82; core 0.42.0).
 
-The entity the UI calls a Trade is still ``strategy_instance`` in the database until R3.
-From this release every reader row that carries an instance key carries its trade name
-too, and every writer that takes an instance key takes the trade name as well:
+The entity the UI calls a Trade was ``strategy_instance`` in the database until R3 (core
+0.45.0 renamed the tables and columns: ``trade.trade_id``, ``trade_execution.split_quantity``,
+``trade_review.tags_*_json``; SQL aliases the new columns back to the old row keys). Since
+core 0.42.0 every reader row that carries an instance key carries its trade name too, and
+every writer that takes an instance key takes the trade name as well:
 
 ==================================  ===============================
 old (kept until R4)                 new

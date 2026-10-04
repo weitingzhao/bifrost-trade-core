@@ -23,8 +23,8 @@ from bifrost_core.persistence.postgres.brokerage_tables import (
     EXECUTIONS_FINAL,
     EXECUTIONS_FLY,
     EXECUTIONS_TWS,
-    INSTANCE_ALLOCATION,
     POSITIONS,
+    TRADE_FILL_SPLITS,
     TRANSACTIONS,
 )
 from bifrost_core.portfolio.reader.accounts_helpers import (
@@ -51,8 +51,9 @@ _EXEC_FINAL_TABLE = EXECUTIONS_FINAL
 # On-the-fly: TWS rows whose (account_id, contract_key) is not in final; excludes BAG (see view DDL).
 _EXEC_FLY_TABLE = EXECUTIONS_FLY
 
-# Multi–strategy_instance splits for one execution row (physical bridge table; see DATABASE §2.24.11d).
-_EXEC_INST_ALLOC_TABLE = INSTANCE_ALLOCATION
+# Fill splits: one execution row's quantity across several trades (view over trade_execution;
+# columns account_id, account_executions_id, trade_id, quantity, exec_id -- naming R3).
+_EXEC_INST_ALLOC_TABLE = TRADE_FILL_SPLITS
 
 # Raw TWS table (all rows) with the synthetic id and this env's attribution (TD-09 view).
 _EXEC_TWS_RAW_SUBQUERY = EXECUTIONS_TWS
@@ -133,12 +134,13 @@ def attach_instance_allocations(conn: Any, executions: List[Dict[str, Any]]) -> 
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(
                 f"""
-                SELECT a.account_executions_id, a.strategy_instance_id, a.allocated_quantity,
+                SELECT a.account_executions_id, a.trade_id AS strategy_instance_id,
+                       a.quantity AS allocated_quantity,
                        si.label AS strategy_instance_label, si.strategy_opportunity_id
                 FROM {_EXEC_INST_ALLOC_TABLE} a
-                LEFT JOIN strategy_instance si ON a.strategy_instance_id = si.strategy_instance_id
+                LEFT JOIN trade si ON a.trade_id = si.trade_id
                 WHERE a.account_executions_id = ANY(%s)
-                ORDER BY a.strategy_instance_id
+                ORDER BY a.trade_id
                 """,
                 (uniq,),
             )
@@ -453,9 +455,9 @@ def _read_executions(
             values.append(strategy_opportunity_id)
         if strategy_instance_id is not None:
             conditions.append(
-                f"(e.strategy_instance_id = %s OR EXISTS (SELECT 1 FROM {_EXEC_INST_ALLOC_TABLE} a "
+                f"(e.trade_id = %s OR EXISTS (SELECT 1 FROM {_EXEC_INST_ALLOC_TABLE} a "
                 f"WHERE a.account_executions_id = e.account_executions_id AND "
-                f"a.account_id IS NOT DISTINCT FROM e.account_id AND a.strategy_instance_id = %s))"
+                f"a.account_id IS NOT DISTINCT FROM e.account_id AND a.trade_id = %s))"
             )
             values.append(strategy_instance_id)
             values.append(strategy_instance_id)
@@ -484,13 +486,13 @@ def _read_executions(
                            {_REALIZED_PNL_COALESCE_E}, e.contract_key, c.currency, c.yield_, c.yield_redemption_date,
                            e.trade_date, e.report_date, e.settle_date_target, e.transaction_type, e.taxes, e.net_cash,
                            e.raw_extra, {_CREATED_AT_E}, {_EXEC_KEY_SELECT_E},
-                           e.strategy_opportunity_id, e.strategy_instance_id,
+                           e.strategy_opportunity_id, e.trade_id AS strategy_instance_id,
                            so.name AS strategy_opportunity_name, si.label AS strategy_instance_label,
                            EXTRACT(EPOCH FROM si.opened_at)::bigint AS strategy_instance_opened_at_epoch
                     FROM {from_table} e
                     LEFT JOIN {COMMISSIONS} c ON e.exec_id = c.exec_id AND e.exec_id IS NOT NULL
                     LEFT JOIN strategy_opportunity so ON e.strategy_opportunity_id = so.strategy_opportunity_id
-                    LEFT JOIN strategy_instance si ON e.strategy_instance_id = si.strategy_instance_id
+                    LEFT JOIN trade si ON e.trade_id = si.trade_id
                     {where}
                     ORDER BY e.trade_date DESC NULLS LAST, e.exec_time DESC NULLS LAST, e.account_executions_id DESC{limit_clause}
                     """,
@@ -770,13 +772,13 @@ def get_executions_for_strategy_link(
                            {_REALIZED_PNL_COALESCE_E}, e.contract_key, c.currency, c.yield_, c.yield_redemption_date,
                            e.trade_date, e.report_date, e.settle_date_target, e.transaction_type, e.taxes, e.net_cash,
                            e.raw_extra, {_CREATED_AT_E},
-                           e.strategy_opportunity_id, e.strategy_instance_id,
+                           e.strategy_opportunity_id, e.trade_id AS strategy_instance_id,
                            so.name AS strategy_opportunity_name, si.label AS strategy_instance_label,
                            EXTRACT(EPOCH FROM si.opened_at)::bigint AS strategy_instance_opened_at_epoch
                     FROM {_EXEC_READ_TABLE} e
                     LEFT JOIN {COMMISSIONS} c ON e.exec_id = c.exec_id AND e.exec_id IS NOT NULL
                     LEFT JOIN strategy_opportunity so ON e.strategy_opportunity_id = so.strategy_opportunity_id
-                    LEFT JOIN strategy_instance si ON e.strategy_instance_id = si.strategy_instance_id
+                    LEFT JOIN trade si ON e.trade_id = si.trade_id
                     WHERE {where_sql}
                     ORDER BY e.exec_time DESC NULLS LAST
                     LIMIT %s
@@ -796,13 +798,13 @@ def get_executions_for_strategy_link(
                                    e.expiry, e.strike, e.option_right, e.exchange, e.order_id, e.cum_qty,
                                    {_REALIZED_PNL_COALESCE_E}, e.contract_key, c.currency, c.yield_, c.yield_redemption_date,
                                    e.trade_date, e.raw_extra, {_CREATED_AT_E},
-                                   e.strategy_opportunity_id, e.strategy_instance_id,
+                                   e.strategy_opportunity_id, e.trade_id AS strategy_instance_id,
                                    so.name AS strategy_opportunity_name, si.label AS strategy_instance_label,
                                    EXTRACT(EPOCH FROM si.opened_at)::bigint AS strategy_instance_opened_at_epoch
                             FROM {_EXEC_READ_TABLE} e
                             LEFT JOIN {COMMISSIONS} c ON e.exec_id = c.exec_id
                             LEFT JOIN strategy_opportunity so ON e.strategy_opportunity_id = so.strategy_opportunity_id
-                            LEFT JOIN strategy_instance si ON e.strategy_instance_id = si.strategy_instance_id
+                            LEFT JOIN trade si ON e.trade_id = si.trade_id
                             WHERE {where_sql}
                             ORDER BY e.exec_time DESC NULLS LAST
                             LIMIT %s
@@ -984,9 +986,9 @@ def get_executions_with_opt_pairs_single_query(
         values.append(strategy_opportunity_id)
     if strategy_instance_id is not None:
         strat_cond += (
-            f" AND (e.strategy_instance_id = %s OR EXISTS (SELECT 1 FROM {_EXEC_INST_ALLOC_TABLE} a "
+            f" AND (e.trade_id = %s OR EXISTS (SELECT 1 FROM {_EXEC_INST_ALLOC_TABLE} a "
             f"WHERE a.account_executions_id = e.account_executions_id AND "
-            f"a.account_id IS NOT DISTINCT FROM e.account_id AND a.strategy_instance_id = %s))"
+            f"a.account_id IS NOT DISTINCT FROM e.account_id AND a.trade_id = %s))"
         )
         values.append(strategy_instance_id)
         values.append(strategy_instance_id)
@@ -1834,13 +1836,13 @@ def get_position_instance_attribution(
         ),
         exec_labeled AS (
             SELECT p.account_id, p.contract_key AS pos_contract_key,
-                   e.strategy_instance_id,
+                   e.trade_id,
                    COALESCE(e.strategy_opportunity_id, si2.strategy_opportunity_id) AS strategy_opportunity_id,
                    {_SIGNED_QTY_ROW_E} AS signed_qty
             FROM pos p
             INNER JOIN {_EXEC_FINAL_TABLE} e ON p.account_id = e.account_id AND {_POS_EXEC_JOIN_PE}
             INNER JOIN pos_has_final hf ON hf.account_id = p.account_id AND hf.contract_key = p.contract_key
-            LEFT JOIN strategy_instance si2 ON e.strategy_instance_id = si2.strategy_instance_id
+            LEFT JOIN trade si2 ON e.trade_id = si2.trade_id
             WHERE NOT EXISTS (
                 SELECT 1 FROM {_EXEC_INST_ALLOC_TABLE} ax
                 WHERE ax.account_executions_id = e.account_executions_id
@@ -1848,23 +1850,23 @@ def get_position_instance_attribution(
             )
             UNION ALL
             SELECT p.account_id, p.contract_key AS pos_contract_key,
-                   a.strategy_instance_id,
+                   a.trade_id,
                    COALESCE(si_a.strategy_opportunity_id, e.strategy_opportunity_id) AS strategy_opportunity_id,
-                   a.allocated_quantity AS signed_qty
+                   a.quantity AS signed_qty
             FROM pos p
             INNER JOIN {_EXEC_FINAL_TABLE} e ON p.account_id = e.account_id AND {_POS_EXEC_JOIN_PE}
             INNER JOIN pos_has_final hf ON hf.account_id = p.account_id AND hf.contract_key = p.contract_key
             INNER JOIN {_EXEC_INST_ALLOC_TABLE} a ON a.account_executions_id = e.account_executions_id
               AND a.account_id IS NOT DISTINCT FROM e.account_id
-            LEFT JOIN strategy_instance si_a ON a.strategy_instance_id = si_a.strategy_instance_id
+            LEFT JOIN trade si_a ON a.trade_id = si_a.trade_id
             UNION ALL
             SELECT p.account_id, p.contract_key AS pos_contract_key,
-                   e.strategy_instance_id,
+                   e.trade_id,
                    COALESCE(e.strategy_opportunity_id, si2.strategy_opportunity_id) AS strategy_opportunity_id,
                    {_SIGNED_QTY_ROW_E} AS signed_qty
             FROM pos p
             INNER JOIN {EXECUTIONS_TWS} e ON p.account_id = e.account_id AND {_POS_EXEC_JOIN_PE}
-            LEFT JOIN strategy_instance si2 ON e.strategy_instance_id = si2.strategy_instance_id
+            LEFT JOIN trade si2 ON e.trade_id = si2.trade_id
             WHERE NOT EXISTS (
                 SELECT 1 FROM pos_has_final hf
                 WHERE hf.account_id = p.account_id AND hf.contract_key = p.contract_key
@@ -1876,32 +1878,32 @@ def get_position_instance_attribution(
             )
             UNION ALL
             SELECT p.account_id, p.contract_key AS pos_contract_key,
-                   a.strategy_instance_id,
+                   a.trade_id,
                    COALESCE(si_a.strategy_opportunity_id, e.strategy_opportunity_id) AS strategy_opportunity_id,
-                   a.allocated_quantity AS signed_qty
+                   a.quantity AS signed_qty
             FROM pos p
             INNER JOIN {EXECUTIONS_TWS} e ON p.account_id = e.account_id AND {_POS_EXEC_JOIN_PE}
             INNER JOIN {_EXEC_INST_ALLOC_TABLE} a ON a.account_executions_id = e.account_executions_id
               AND a.account_id IS NOT DISTINCT FROM e.account_id
-            LEFT JOIN strategy_instance si_a ON a.strategy_instance_id = si_a.strategy_instance_id
+            LEFT JOIN trade si_a ON a.trade_id = si_a.trade_id
             WHERE NOT EXISTS (
                 SELECT 1 FROM pos_has_final hf
                 WHERE hf.account_id = p.account_id AND hf.contract_key = p.contract_key
             )
         ),
         exec_grouped AS (
-            SELECT account_id, pos_contract_key, strategy_instance_id,
+            SELECT account_id, pos_contract_key, trade_id,
                    MAX(strategy_opportunity_id) AS strategy_opportunity_id,
                    SUM(signed_qty) AS net_qty_contribution,
                    COUNT(*) AS exec_count
             FROM exec_labeled
-            GROUP BY account_id, pos_contract_key, strategy_instance_id
+            GROUP BY account_id, pos_contract_key, trade_id
         )
         SELECT
             p.account_id, p.contract_key, p.symbol, p.sec_type,
             p.position AS position_qty, p.avg_cost, p.expiry, p.strike, p.option_right,
             p.price_mid, p.price_last,
-            eg.strategy_instance_id,
+            eg.trade_id AS strategy_instance_id,
             eg.strategy_opportunity_id,
             si.label AS strategy_instance_label,
             so.name AS strategy_opportunity_name,
@@ -1914,11 +1916,11 @@ def get_position_instance_attribution(
             eg.exec_count
         FROM pos p
         LEFT JOIN exec_grouped eg ON p.account_id = eg.account_id AND p.contract_key = eg.pos_contract_key
-        LEFT JOIN strategy_instance si ON eg.strategy_instance_id = si.strategy_instance_id
+        LEFT JOIN trade si ON eg.trade_id = si.trade_id
         LEFT JOIN strategy_opportunity so ON eg.strategy_opportunity_id = so.strategy_opportunity_id
         LEFT JOIN strategy_structure ss ON so.strategy_structure_id = ss.strategy_structure_id
         LEFT JOIN strategy_template t ON ss.strategy_template_id = t.strategy_template_id
-        ORDER BY p.account_id, p.contract_key, eg.strategy_instance_id NULLS LAST
+        ORDER BY p.account_id, p.contract_key, eg.trade_id NULLS LAST
         """
 
         with conn.cursor(cursor_factory=RealDictCursor) as cur:

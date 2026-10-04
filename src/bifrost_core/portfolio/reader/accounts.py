@@ -25,10 +25,10 @@ from bifrost_core.persistence.postgres.brokerage_tables import (
     GOLDEN_EXECUTIONS_RAW_JOURNAL,
     GOLDEN_EXECUTIONS_RAW_TWS,
     GOLDEN_TRANSACTIONS,
-    INSTANCE_ALLOCATION,
-    INSTANCE_EXECUTION,
     OPTION_STOCK_LINK,
     POSITIONS,
+    TRADE_EXECUTION,
+    TRADE_FILL_SPLITS,
 )
 
 from bifrost_core.monitor.reader import market as market_module
@@ -59,10 +59,10 @@ def _normalized_signed_qty_from_raw(source: Any, side: Any, quantity: Any) -> fl
     return 0.0 if q is None else q
 
 
-# --- TD-09: attribution lives in this env's strategy_instance_execution -----------------
+# --- TD-09: attribution lives in this env's trade_execution (named so since naming R3) ---
 #
 # Keyed by the fill (account_id, exec_id): a TWS row and its Flex twin share the key, so
-# one write attributes both. A row with NULL allocated_quantity is the whole fill; split
+# one write attributes both. A row with NULL split_quantity is the whole fill; split
 # rows carry their share. Golden Source's raw strategy_* columns are no longer written.
 
 OPPORTUNITY_ONLY = (
@@ -93,7 +93,7 @@ def _instance_problem(cur: Any, instance_id: int, account_id: str, opportunity_i
     """Why ``instance_id`` cannot take a fill of ``account_id`` (None when it can). When an
     opportunity is sent with it, it must be the instance's own."""
     cur.execute(
-        "SELECT account_id, strategy_opportunity_id FROM strategy_instance WHERE strategy_instance_id = %s",
+        "SELECT account_id, strategy_opportunity_id FROM trade WHERE trade_id = %s",
         (instance_id,),
     )
     inst = cur.fetchone()
@@ -108,8 +108,8 @@ def _instance_problem(cur: Any, instance_id: int, account_id: str, opportunity_i
 
 def _split_count(cur: Any, account_id: str, exec_id: str) -> int:
     cur.execute(
-        f"SELECT count(*) FROM {INSTANCE_EXECUTION} "
-        "WHERE account_id = %s AND exec_id = %s AND allocated_quantity IS NOT NULL",
+        f"SELECT count(*) FROM {TRADE_EXECUTION} "
+        "WHERE account_id = %s AND exec_id = %s AND split_quantity IS NOT NULL",
         (account_id, exec_id),
     )
     return int((cur.fetchone() or [0])[0] or 0)
@@ -125,8 +125,8 @@ def _drop_attribution_if_last(raw_cur: Any, env_cur: Any, account_id: str, exec_
         if raw_cur.fetchone():
             return 0
     env_cur.execute(
-        f"DELETE FROM {INSTANCE_EXECUTION} WHERE account_id = %s AND exec_id = %s "
-        "RETURNING allocated_quantity IS NOT NULL",
+        f"DELETE FROM {TRADE_EXECUTION} WHERE account_id = %s AND exec_id = %s "
+        "RETURNING split_quantity IS NOT NULL",
         (account_id, exec_id),
     )
     return sum(1 for r in (env_cur.fetchall() or []) if r and r[0])
@@ -136,17 +136,17 @@ def _set_whole_attribution(cur: Any, account_id: str, exec_id: str, instance_id:
     """Attribute the whole fill to ``instance_id``; None clears it. Splits are not touched."""
     if instance_id is None:
         cur.execute(
-            f"DELETE FROM {INSTANCE_EXECUTION} "
-            "WHERE account_id = %s AND exec_id = %s AND allocated_quantity IS NULL",
+            f"DELETE FROM {TRADE_EXECUTION} "
+            "WHERE account_id = %s AND exec_id = %s AND split_quantity IS NULL",
             (account_id, exec_id),
         )
         return
     cur.execute(
         f"""
-        INSERT INTO {INSTANCE_EXECUTION} (account_id, exec_id, strategy_instance_id)
+        INSERT INTO {TRADE_EXECUTION} (account_id, exec_id, trade_id)
         VALUES (%s, %s, %s)
-        ON CONFLICT (account_id, exec_id) WHERE allocated_quantity IS NULL
-        DO UPDATE SET strategy_instance_id = EXCLUDED.strategy_instance_id, updated_at = now()
+        ON CONFLICT (account_id, exec_id) WHERE split_quantity IS NULL
+        DO UPDATE SET trade_id = EXCLUDED.trade_id, updated_at = now()
         """,
         (account_id, exec_id, int(instance_id)),
     )
@@ -174,7 +174,7 @@ def _apply_instance_allocations_on_cursor(
     *,
     raw_cur: Any = None,
 ) -> bool:
-    """Replace the fill's split rows in this env's strategy_instance_execution.
+    """Replace the fill's split rows in this env's trade_execution.
 
     ``[]`` removes the splits; a non-empty list replaces them and clears the whole-fill
     row (a fill is attributed one way or the other). Each split names a distinct
@@ -215,8 +215,8 @@ def _apply_instance_allocations_on_cursor(
     if inserts and abs(total - expected) > 1e-5 * max(1.0, abs(expected)):
         return False
     cur.execute(
-        f"DELETE FROM {INSTANCE_EXECUTION} "
-        "WHERE account_id = %s AND exec_id = %s AND allocated_quantity IS NOT NULL",
+        f"DELETE FROM {TRADE_EXECUTION} "
+        "WHERE account_id = %s AND exec_id = %s AND split_quantity IS NOT NULL",
         (acc_id, exec_id),
     )
     if not inserts:
@@ -225,7 +225,7 @@ def _apply_instance_allocations_on_cursor(
     for si_id, aq in inserts:
         cur.execute(
             f"""
-            INSERT INTO {INSTANCE_EXECUTION} (account_id, exec_id, strategy_instance_id, allocated_quantity)
+            INSERT INTO {TRADE_EXECUTION} (account_id, exec_id, trade_id, split_quantity)
             VALUES (%s, %s, %s, %s)
             """,
             (acc_id, exec_id, si_id, aq),
@@ -238,7 +238,7 @@ def replace_execution_instance_allocations(
     account_executions_id: int,
     body_allocations: Any,
 ) -> bool:
-    """Replace or clear the fill's split rows (strategy_instance_execution). body_allocations: None=skip, []=delete all, list=replace."""
+    """Replace or clear the fill's split rows (trade_execution). body_allocations: None=skip, []=delete all, list=replace."""
     if body_allocations is None:
         return True
     if not isinstance(body_allocations, list):
@@ -635,23 +635,23 @@ def get_accounts_from_tables(
                             f"""
                             SELECT u.contract_key,
                                    u.strategy_opportunity_id,
-                                   u.strategy_instance_id,
+                                   u.trade_id AS strategy_instance_id,
                                    so.name AS strategy_opportunity_name,
                                    si.label AS strategy_instance_label
                             FROM (
-                                SELECT DISTINCT contract_key, strategy_opportunity_id, strategy_instance_id
+                                SELECT DISTINCT contract_key, strategy_opportunity_id, trade_id
                                 FROM (
-                                    SELECT contract_key, strategy_opportunity_id, strategy_instance_id
+                                    SELECT contract_key, strategy_opportunity_id, trade_id
                                     FROM {_exec_tbl}
                                     WHERE account_id = %s
                                       AND contract_key = ANY(%s::text[])
-                                      AND (strategy_opportunity_id IS NOT NULL OR strategy_instance_id IS NOT NULL)
+                                      AND (strategy_opportunity_id IS NOT NULL OR trade_id IS NOT NULL)
                                     UNION
                                     SELECT e.contract_key,
                                            si.strategy_opportunity_id,
-                                           a.strategy_instance_id
-                                    FROM {INSTANCE_ALLOCATION} a
-                                    INNER JOIN strategy_instance si ON a.strategy_instance_id = si.strategy_instance_id
+                                           a.trade_id
+                                    FROM {TRADE_FILL_SPLITS} a
+                                    INNER JOIN trade si ON a.trade_id = si.trade_id
                                     INNER JOIN {_exec_tbl} e
                                       ON e.account_executions_id = a.account_executions_id
                                      AND e.account_id IS NOT DISTINCT FROM a.account_id
@@ -660,7 +660,7 @@ def get_accounts_from_tables(
                                 ) x
                             ) u
                             LEFT JOIN strategy_opportunity so ON u.strategy_opportunity_id = so.strategy_opportunity_id
-                            LEFT JOIN strategy_instance si ON u.strategy_instance_id = si.strategy_instance_id
+                            LEFT JOIN trade si ON u.trade_id = si.trade_id
                             """,
                             (acc_id, ck_list, acc_id, ck_list),
                         )
@@ -1200,7 +1200,7 @@ def insert_one_execution(status_config: dict, body: Dict[str, Any]) -> Optional[
         golden = ws.open_conn(status_config, golden=True)
         try:
             with golden.cursor() as cur, env_conn.cursor() as env_cur:
-                # The strategy attribution goes to this env's strategy_instance_execution
+                # The strategy attribution goes to this env's trade_execution
                 # below (TD-09), not to Golden Source's strategy_* columns.
                 cols = "account_id, exec_id, exec_time, symbol, sec_type, side, quantity, price, source, expiry, strike, option_right, exchange, order_id, cum_qty, contract_key, raw_extra"
                 placeholders = "%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s"
@@ -1427,7 +1427,7 @@ def update_one_execution(status_config: dict, account_executions_id: int, body: 
     body = fields_as_instance(body)  # trade_id / fill_splits read as the instance names (naming R1)
     # 可更新列（与 raw 表一致）
     # strategy_opportunity_id / strategy_instance_id go to this env's
-    # strategy_instance_execution (TD-09), not to the raw row.
+    # trade_execution (TD-09), not to the raw row.
     exec_cols = ("exec_time", "symbol", "sec_type", "side", "quantity", "price", "account_id", "source", "expiry", "strike", "option_right", "exchange", "order_id", "cum_qty", "contract_key")
     commission_keys = ("commission", "realized_pnl", "currency")
     updates: List[str] = []
@@ -1472,7 +1472,7 @@ def update_one_execution(status_config: dict, account_executions_id: int, body: 
                     # The attribution is keyed by (account_id, exec_id) and its instance is
                     # on the old account: moving the fill would orphan it.
                     env_cur.execute(
-                        f"SELECT 1 FROM {INSTANCE_EXECUTION} WHERE account_id = %s AND exec_id = %s LIMIT 1",
+                        f"SELECT 1 FROM {TRADE_EXECUTION} WHERE account_id = %s AND exec_id = %s LIMIT 1",
                         (old_account, exec_id_key),
                     )
                     if env_cur.fetchone():
@@ -1575,7 +1575,7 @@ def update_one_execution(status_config: dict, account_executions_id: int, body: 
 
 
 def delete_one_execution(status_config: dict, account_executions_id: int) -> bool:
-    """R-A2 扩展：按 account_executions_id 删除一条执行记录。删除 golden raw 行 + commissions；无孪生行时清理本环境 strategy_instance_execution。"""
+    """R-A2 扩展：按 account_executions_id 删除一条执行记录。删除 golden raw 行 + commissions；无孪生行时清理本环境 trade_execution。"""
     if not status_config or (status_config.get("sink") != "postgres" and not status_config.get("postgres")):
         return False
     raw_tbl, pk_col, pk_val = _raw_table_pk_for_account_executions_id(account_executions_id)
@@ -1616,7 +1616,7 @@ def batch_update_execution_strategy(
     strategy_instance_id: Optional[int],
 ) -> int:
     """Batch strategy attribution, by contract_key (every matching raw row) or by an
-    explicit account_executions_id list, written to this env's strategy_instance_execution
+    explicit account_executions_id list, written to this env's trade_execution
     (TD-09). Returns the raw rows matched; -1 when one of them is split; 0 when nothing
     matched, the instance is not on the account, only an opportunity was sent, or the
     write failed."""
@@ -1659,8 +1659,8 @@ def batch_update_execution_strategy(
             keys = sorted({e for e in exec_ids if e})
             if keys:
                 cur.execute(
-                    f"SELECT 1 FROM {INSTANCE_EXECUTION} WHERE account_id = %s AND exec_id = ANY(%s) "
-                    "AND allocated_quantity IS NOT NULL LIMIT 1",
+                    f"SELECT 1 FROM {TRADE_EXECUTION} WHERE account_id = %s AND exec_id = ANY(%s) "
+                    "AND split_quantity IS NOT NULL LIMIT 1",
                     (acc, keys),
                 )
                 if cur.fetchone():
@@ -1682,7 +1682,7 @@ def batch_update_execution_strategy(
 # --- TD-15 writers (core 0.33.0): return what was written / raise Write* ----------------
 #
 # An execution spans two databases: its raw row on Golden Source (raw_broker.*) and its
-# strategy attribution -- whole fill or splits -- in this env's strategy_instance_execution
+# strategy attribution -- whole fill or splits -- in this env's trade_execution
 # (TD-09). Both writers below hold one transaction on each, check everything before
 # writing, and commit Golden Source first, as update_one_execution / delete_one_execution do.
 
@@ -1698,11 +1698,11 @@ def _execution_attribution(env_cur: Any, account_executions_id: int, account_id:
     """The attribution fields of one execution, as GET /executions items carry them."""
     env_cur.execute(
         f"""
-        SELECT sie.strategy_instance_id, sie.allocated_quantity, si.label, si.strategy_opportunity_id
-        FROM {INSTANCE_EXECUTION} sie
-        LEFT JOIN strategy_instance si ON si.strategy_instance_id = sie.strategy_instance_id
+        SELECT sie.trade_id, sie.split_quantity, si.label, si.strategy_opportunity_id
+        FROM {TRADE_EXECUTION} sie
+        LEFT JOIN trade si ON si.trade_id = sie.trade_id
         WHERE sie.account_id = %s AND sie.exec_id = %s
-        ORDER BY sie.allocated_quantity IS NOT NULL, sie.strategy_instance_id
+        ORDER BY sie.split_quantity IS NOT NULL, sie.trade_id
         """,
         (account_id, exec_id),
     )
@@ -1749,7 +1749,7 @@ def patch_execution(status_config: Any, account_executions_id: int, fields: Dict
     same patch, is WriteConflict. The instance must exist and be on the execution's account,
     and splits must name distinct instances of that account and add up to the execution's
     quantity (WriteInvalid otherwise). The write goes to this env's
-    strategy_instance_execution by (account_id, exec_id), so a TWS row and its Flex twin
+    trade_execution by (account_id, exec_id), so a TWS row and its Flex twin
     change together. The fill's own columns (time, price, quantity ...) are not patchable
     here: ``update_one_execution`` keeps them. Needs the status config (two databases).
     Raises WriteInvalid, WriteNotFound, WriteConflict, WriteFailed.
@@ -1828,7 +1828,7 @@ def delete_execution_strict(status_config: Any, account_executions_id: int) -> D
     FK and would be left pointing at nothing (``delete_one_execution`` leaves them). The
     commission row (keyed by ``exec_id``) is removed only when no other raw row -- the
     same fill recorded by TWS and by Flex -- still carries that ``exec_id``. Needs the
-    status config. The attribution (this env's strategy_instance_execution) goes too unless
+    status config. The attribution (this env's trade_execution) goes too unless
     the twin still carries the (account_id, exec_id); ``allocations_removed`` counts the
     split rows removed. Raises WriteNotFound, WriteConflict, WriteFailed.
     """

@@ -19,6 +19,11 @@ TD-56 (position categories; table and ``id`` PK unchanged, Owner 2026-10-03):
 - UNIQUE ``preference_position_categories_name_uq (name)``: the name is the key the symbol
   order is stored under, so two categories may not share it.
 
+Naming R3 (core 0.45.0) renamed the columns and constraints above (``strategy_instance_id`` ->
+``trade_id``, ``*_strategy_instance_id_fkey`` -> ``*_trade_id_fkey``, the referenced table
+``strategy_instance`` -> ``trade``); the statements below use the new names. The CHECK keeps its
+name ``strategy_plan_filled_instance_ck`` (the rename step does not touch it).
+
 TD-71: CHECK ``strategy_opportunity_scope_type_ck``: ``scope_type`` is NULL, 'watchlist_stk'
 or 'explicit_symbols'.
 
@@ -40,17 +45,17 @@ from typing import Any, List, Tuple
 _RESTRICT_FKS: Tuple[Tuple[str, str, str, str, str], ...] = (
     (
         "strategy_plan",
-        "strategy_plan_strategy_instance_id_fkey",
-        "strategy_instance_id",
-        "strategy_instance",
-        "strategy_instance_id",
+        "strategy_plan_trade_id_fkey",
+        "trade_id",
+        "trade",
+        "trade_id",
     ),
     (
         "trade_review",
-        "trade_review_strategy_instance_id_fkey",
-        "strategy_instance_id",
-        "strategy_instance",
-        "strategy_instance_id",
+        "trade_review_trade_id_fkey",
+        "trade_id",
+        "trade",
+        "trade_id",
     ),
 )
 
@@ -58,7 +63,7 @@ _RESTRICT_FKS: Tuple[Tuple[str, str, str, str, str], ...] = (
 PLAN_FILLED_INSTANCE_CK = "strategy_plan_filled_instance_ck"
 OPPORTUNITY_SCOPE_TYPE_CK = "strategy_opportunity_scope_type_ck"
 _CHECKS: Tuple[Tuple[str, str, str], ...] = (
-    ("strategy_plan", PLAN_FILLED_INSTANCE_CK, "(status = 'filled') = (strategy_instance_id IS NOT NULL)"),
+    ("strategy_plan", PLAN_FILLED_INSTANCE_CK, "(status = 'filled') = (trade_id IS NOT NULL)"),
     (
         "strategy_opportunity",
         OPPORTUNITY_SCOPE_TYPE_CK,

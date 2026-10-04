@@ -30,15 +30,16 @@ _TABLES = (
     "watchlist",
 )
 
-# bifrost_{dev,stg,prod} as read 2026-10-03, rebuilt on top of the DDL.
+# bifrost_{dev,stg,prod} as read 2026-10-03, rebuilt on top of the DDL (under the names
+# naming R3 gave the columns and constraints, core 0.45.0).
 _LEGACY = (
-    "ALTER TABLE strategy_plan DROP CONSTRAINT strategy_plan_strategy_instance_id_fkey, "
-    "ADD CONSTRAINT strategy_plan_strategy_instance_id_fkey FOREIGN KEY (strategy_instance_id) "
-    "REFERENCES strategy_instance(strategy_instance_id) ON DELETE SET NULL",
+    "ALTER TABLE strategy_plan DROP CONSTRAINT strategy_plan_trade_id_fkey, "
+    "ADD CONSTRAINT strategy_plan_trade_id_fkey FOREIGN KEY (trade_id) "
+    "REFERENCES trade(trade_id) ON DELETE SET NULL",
     f"ALTER TABLE strategy_plan DROP CONSTRAINT {PLAN_FILLED_INSTANCE_CK}",
-    "ALTER TABLE trade_review DROP CONSTRAINT trade_review_strategy_instance_id_fkey, "
-    "ADD CONSTRAINT trade_review_strategy_instance_id_fkey FOREIGN KEY (strategy_instance_id) "
-    "REFERENCES strategy_instance(strategy_instance_id) ON DELETE CASCADE",
+    "ALTER TABLE trade_review DROP CONSTRAINT trade_review_trade_id_fkey, "
+    "ADD CONSTRAINT trade_review_trade_id_fkey FOREIGN KEY (trade_id) "
+    "REFERENCES trade(trade_id) ON DELETE CASCADE",
     f"ALTER TABLE strategy_opportunity DROP CONSTRAINT {OPPORTUNITY_SCOPE_TYPE_CK}",
     "ALTER TABLE preference_position_category_tags ALTER COLUMN category_id TYPE integer",
     "ALTER TABLE watchlist ALTER COLUMN category_id TYPE integer",
@@ -90,9 +91,9 @@ def test_the_ddl_declares_what_the_plan_approved(pg_conn) -> None:
     with pg_conn.cursor() as cur:
         cur.execute(
             "SELECT conname, confdeltype FROM pg_constraint WHERE conname IN "
-            "('strategy_plan_strategy_instance_id_fkey', 'trade_review_strategy_instance_id_fkey') ORDER BY 1"
+            "('strategy_plan_trade_id_fkey', 'trade_review_trade_id_fkey') ORDER BY 1"
         )
-        assert cur.fetchall() == [("strategy_plan_strategy_instance_id_fkey", "r"), ("trade_review_strategy_instance_id_fkey", "r")]
+        assert cur.fetchall() == [("strategy_plan_trade_id_fkey", "r"), ("trade_review_trade_id_fkey", "r")]
         for name in (PLAN_FILLED_INSTANCE_CK, OPPORTUNITY_SCOPE_TYPE_CK, CATEGORY_NAME_UQ):
             assert _validated(cur, name) is True
         cur.execute(

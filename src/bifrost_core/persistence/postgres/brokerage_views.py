@@ -3,8 +3,12 @@
 Split out of ``brokerage_ddl`` (which keeps re-exporting these names) so that module
 stays under the 800-line code-health limit; nothing here changed when it moved.
 Golden Source builds the views over ``raw_broker.executions_raw_*``; each env builds
-them over its FDW tables with ``env=True`` (attribution from strategy_instance_execution,
-TD-09).
+them over its FDW tables with ``env=True`` (attribution from trade_execution, TD-09).
+
+Naming R3 (core 0.45.0) changed the env views' columns, not Golden Source's: the
+attribution is ``trade_id`` (the Trade), IB's TradeID / RelatedTradeID are ``ib_trade_id``
+/ ``ib_related_trade_id``, and ``strategy_instance_id`` (= ``trade_id``) stays one version
+for pods on core < 0.45.0 (dropped in R4). Golden Source's views keep the vendor names.
 """
 
 from __future__ import annotations
@@ -13,7 +17,7 @@ from typing import Any
 
 from bifrost_core.persistence.postgres.brokerage_tables import (
     BROKERAGE_ENV_VIEWS,
-    INSTANCE_EXECUTION,
+    TRADE_EXECUTION,
 )
 
 _EXEC_CANONICAL_COLS = (
@@ -30,30 +34,36 @@ _EXEC_CANONICAL_COLS = (
 )
 
 
-def _env_attributed(rows_sql: str) -> str:
-    """Wrap a set of raw execution rows with this env's attribution (TD-09).
+# Env view output for the raw columns renamed by naming R3 (core 0.45.0). The Golden Source
+# attribution column ``strategy_instance_id`` becomes this env's ``trade_id`` plus its
+# one-version alias; the opportunity is the trade's.
+_ENV_RENAMED = {
+    "trade_id": "u.trade_id AS ib_trade_id",
+    "related_trade_id": "u.related_trade_id AS ib_related_trade_id",
+    "strategy_opportunity_id": "tr.strategy_opportunity_id",
+    "strategy_instance_id": "te.trade_id, te.trade_id AS strategy_instance_id",
+}
 
-    ``rows_sql`` selects ``account_executions_id`` plus the canonical columns. The two
-    Golden Source attribution columns are replaced: ``strategy_instance_id`` from the
-    whole-fill row of ``public.strategy_instance_execution`` on (account_id, exec_id),
-    ``strategy_opportunity_id`` from that instance. Column names and order are unchanged.
+
+def _env_attributed(rows_sql: str) -> str:
+    """Wrap a set of raw execution rows with this env's attribution (TD-09, R3).
+
+    ``rows_sql`` selects ``account_executions_id`` plus the canonical columns. Output, in
+    the canonical order: IB's ``trade_id`` / ``related_trade_id`` as ``ib_trade_id`` /
+    ``ib_related_trade_id``; ``strategy_opportunity_id`` from the trade; in place of the
+    Golden Source ``strategy_instance_id``, ``trade_id`` from the whole-fill row of
+    ``public.trade_execution`` on (account_id, exec_id), then ``strategy_instance_id``
+    (= ``trade_id``, one version). Every name appears once (TD-13).
     """
     cols = [c.strip() for c in _EXEC_CANONICAL_COLS.split(",") if c.strip()]
-    out = []
-    for c in cols:
-        if c == "strategy_instance_id":
-            out.append("sie.strategy_instance_id")
-        elif c == "strategy_opportunity_id":
-            out.append("si.strategy_opportunity_id")
-        else:
-            out.append(f"u.{c}")
+    out = [_ENV_RENAMED.get(c, f"u.{c}") for c in cols]
     return (
         f"SELECT u.account_executions_id, {', '.join(out)}\n"
         f"        FROM ({rows_sql}) u\n"
-        f"        LEFT JOIN public.{INSTANCE_EXECUTION} sie\n"
-        "          ON sie.account_id = u.account_id AND sie.exec_id = u.exec_id\n"
-        "         AND sie.allocated_quantity IS NULL\n"
-        "        LEFT JOIN public.strategy_instance si ON si.strategy_instance_id = sie.strategy_instance_id"
+        f"        LEFT JOIN public.{TRADE_EXECUTION} te\n"
+        "          ON te.account_id = u.account_id AND te.exec_id = u.exec_id\n"
+        "         AND te.split_quantity IS NULL\n"
+        "        LEFT JOIN public.trade tr ON tr.trade_id = te.trade_id"
     )
 
 
@@ -62,8 +72,9 @@ def _create_brokerage_views(cur: Any, schema: str, *, env: bool = False) -> None
 
     Golden Source (``env=False``): the attribution columns are the raw tables' own (no
     longer written since TD-09; kept for the rollback window). Per-env DBs (``env=True``,
-    over the FDW tables): attribution comes from this env's ``strategy_instance_execution``,
-    and two env-only views are added -- ``executions_tws`` and ``instance_allocations``.
+    over the FDW tables): attribution comes from this env's ``trade_execution``, and three
+    env-only views are added -- ``executions_tws``, ``trade_fill_splits`` and the
+    one-version compatibility view ``instance_allocations`` over it (old column names).
     """
     cols = _EXEC_CANONICAL_COLS
     for name in BROKERAGE_ENV_VIEWS:
@@ -161,15 +172,15 @@ def _create_brokerage_views(cur: Any, schema: str, *, env: bool = False) -> None
         """
     cur.execute(f"CREATE OR REPLACE VIEW {schema}.executions_tws AS {body(tws_rows)}")
 
-    # Split rows, one per raw representation of the fill, in the shape readers joined
-    # account_execution_instance_allocation by (account_executions_id, account_id).
+    # Split rows, one per raw representation of the fill (Flex id, TWS -id, journal
+    # -(1e9+id)), so readers join them by (account_executions_id, account_id).
     cur.execute(
         f"""
-        CREATE OR REPLACE VIEW {schema}.instance_allocations AS
-        SELECT s.account_id, x.account_executions_id, s.strategy_instance_id,
-               s.allocated_quantity::double precision AS allocated_quantity,
+        CREATE OR REPLACE VIEW {schema}.trade_fill_splits AS
+        SELECT s.account_id, x.account_executions_id, s.trade_id,
+               s.split_quantity::double precision AS quantity,
                s.exec_id
-        FROM public.{INSTANCE_EXECUTION} s
+        FROM public.{TRADE_EXECUTION} s
         JOIN (
             SELECT executions_raw_flex_id AS account_executions_id, account_id, exec_id
             FROM {schema}.executions_raw_flex
@@ -180,6 +191,15 @@ def _create_brokerage_views(cur: Any, schema: str, *, env: bool = False) -> None
             SELECT -(1000000000 + executions_raw_journal_id), account_id, exec_id
             FROM {schema}.executions_raw_journal
         ) x ON x.account_id = s.account_id AND x.exec_id = s.exec_id
-        WHERE s.allocated_quantity IS NOT NULL
+        WHERE s.split_quantity IS NOT NULL
+        """
+    )
+    # One version (naming R3 -> R4): the old view name and columns, for pods on core < 0.45.0.
+    cur.execute(
+        f"""
+        CREATE OR REPLACE VIEW {schema}.instance_allocations AS
+        SELECT account_id, account_executions_id, trade_id AS strategy_instance_id,
+               quantity AS allocated_quantity, exec_id
+        FROM {schema}.trade_fill_splits
         """
     )

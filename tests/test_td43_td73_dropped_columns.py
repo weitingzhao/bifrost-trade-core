@@ -23,7 +23,8 @@ from bifrost_core.monitor.schemas.strategies import StrategyInstanceCreateBody, 
 from bifrost_core.monitor.schemas.trade_reviews import TradeReviewBody
 from write_fakes import FakeConn, Reply
 
-DROPPED = {"strategy_plan": "filled_at", "strategy_instance": "notes", "trade_review": "note"}
+# strategy_instance is ``trade`` since naming R3 (core 0.45.0, persistence/postgres/trade_ddl.py).
+DROPPED = {"strategy_plan": "filled_at", "trade": "notes", "trade_review": "note"}
 PERSISTENCE = Path(strategy_plan.__file__).resolve().parents[2] / "persistence"
 
 
@@ -34,7 +35,7 @@ def _create_table_body(text: str, table: str) -> str:
 
 
 def test_fresh_ddl_has_none_of_the_three_columns() -> None:
-    ddl = (PERSISTENCE / "postgres" / "ddl.py").read_text(encoding="utf-8")
+    ddl = (PERSISTENCE / "postgres" / "trade_ddl.py").read_text(encoding="utf-8")
     for table, column in DROPPED.items():
         body = _create_table_body(ddl, table)
         assert not re.search(rf"^\s*{column}\s", body, re.M), f"{table}.{column} is back in the DDL"
@@ -65,13 +66,13 @@ def test_review_columns_and_patchables_drop_note() -> None:
 
 
 def test_instance_reads_and_create_do_not_name_notes() -> None:
-    conn = FakeConn([("INSERT INTO strategy_instance", Reply(one=(41,)))])
+    conn = FakeConn([("INSERT INTO trade ", Reply(one=(41,)))])
     assert strategy_instance.create_instance(conn, 7, "U0000001", 1_788_000_000, label="ZZQ put") == 41
-    sql, params = conn.statement("INSERT INTO strategy_instance")
+    sql, params = conn.statement("INSERT INTO trade ")
     assert "notes" not in sql and len(params) == 4
-    conn = FakeConn([("FROM strategy_instance si", Reply(one=None))])
+    conn = FakeConn([("FROM trade si", Reply(one=None))])
     assert strategy_instance.get_instance_by_id(conn, 41) is None
-    assert "notes" not in conn.statement("FROM strategy_instance si")[0]
+    assert "notes" not in conn.statement("FROM trade si")[0]
     for fn in (strategy_instance.create_instance, strategy_instance.update_instance,
                StatusReader.create_strategy_instance, StatusReader.update_strategy_instance):
         assert "notes" not in inspect.signature(fn).parameters, fn.__qualname__

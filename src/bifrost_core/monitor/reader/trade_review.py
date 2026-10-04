@@ -33,8 +33,11 @@ logger = logging.getLogger(__name__)
 TAG_MAX = 40
 TAG_LEN_MAX = 60
 
+# Read back under the names the rows have carried since core 0.42.0 (``_row_out`` adds the
+# new ones beside them); the columns are trade_id / tags_*_json since naming R3 (core 0.45.0).
 _COLUMNS = """
-    trade_review_id, strategy_instance_id, tags_added, tags_dropped,
+    trade_review_id, trade_id AS strategy_instance_id,
+    tags_added_json AS tags_added, tags_dropped_json AS tags_dropped,
     reviewed_at, created_at, updated_at
 """
 
@@ -121,16 +124,16 @@ def save_review(
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(
                 f"""
-                INSERT INTO trade_review (strategy_instance_id, tags_added, tags_dropped, reviewed_at)
+                INSERT INTO trade_review (trade_id, tags_added_json, tags_dropped_json, reviewed_at)
                 VALUES (
                     %(id)s,
                     COALESCE(%(added)s::jsonb, '[]'::jsonb),
                     COALESCE(%(dropped)s::jsonb, '[]'::jsonb),
                     CASE WHEN %(reviewed)s IS TRUE THEN now() ELSE NULL END
                 )
-                ON CONFLICT (strategy_instance_id) DO UPDATE SET
-                    tags_added   = COALESCE(%(added)s::jsonb, trade_review.tags_added),
-                    tags_dropped = COALESCE(%(dropped)s::jsonb, trade_review.tags_dropped),
+                ON CONFLICT (trade_id) DO UPDATE SET
+                    tags_added_json   = COALESCE(%(added)s::jsonb, trade_review.tags_added_json),
+                    tags_dropped_json = COALESCE(%(dropped)s::jsonb, trade_review.tags_dropped_json),
                     reviewed_at  = CASE
                         WHEN %(reviewed)s IS TRUE THEN COALESCE(trade_review.reviewed_at, now())
                         WHEN %(reviewed)s IS FALSE THEN NULL
@@ -203,8 +206,8 @@ def patch_review(conn_or_config: Any, strategy_instance_id: int, fields: Dict[st
     for name in ("tags_added", "tags_dropped"):
         if name in fields:
             values[name] = json.dumps(_patch_tags(fields[name], name))
-            insert_cols[name] = f"%({name})s::jsonb"
-            updates.append(f"{name} = EXCLUDED.{name}")
+            insert_cols[f"{name}_json"] = f"%({name})s::jsonb"
+            updates.append(f"{name}_json = EXCLUDED.{name}_json")
     if "reviewed" in fields:
         values["reviewed"] = ws.boolean(fields["reviewed"], "reviewed")
         insert_cols["reviewed_at"] = "CASE WHEN %(reviewed)s THEN now() ELSE NULL END"
@@ -212,17 +215,17 @@ def patch_review(conn_or_config: Any, strategy_instance_id: int, fields: Dict[st
             "reviewed_at = CASE WHEN %(reviewed)s THEN COALESCE(trade_review.reviewed_at, now()) ELSE NULL END"
         )
     updates.append("updated_at = now()")
-    columns = ["strategy_instance_id", *insert_cols.keys()]
+    columns = ["trade_id", *insert_cols.keys()]
     placeholders = ["%(id)s", *insert_cols.values()]
     sql = (
         f"INSERT INTO trade_review ({', '.join(columns)}) VALUES ({', '.join(placeholders)}) "
-        f"ON CONFLICT (strategy_instance_id) DO UPDATE SET {', '.join(updates)} "
+        f"ON CONFLICT (trade_id) DO UPDATE SET {', '.join(updates)} "
         f"RETURNING {_COLUMNS}"
     )
     with ws.write_connection(conn_or_config, what) as conn, ws.write_transaction(conn, what, on_fk="not_found"):
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(
-                "SELECT 1 FROM strategy_instance WHERE strategy_instance_id = %(id)s",
+                "SELECT 1 FROM trade WHERE trade_id = %(id)s",
                 values,
             )
             if cur.fetchone() is None:

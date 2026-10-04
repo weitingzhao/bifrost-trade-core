@@ -54,7 +54,7 @@ _LEG_RIGHTS = ("C", "P")
 # so moving the instance's open moves it too. Only a filled plan has an instance (CHECK
 # strategy_plan_filled_instance_ck), so every other plan reads null. The column is not named
 # anywhere since core 0.43.0 and is dropped by an Owner db-step after that release.
-# Plan `p` LEFT JOIN instance `i`; filters and order name `p.`.
+# Plan `p` LEFT JOIN trade `i`; filters and order name `p.`.
 _PLAN_COLUMNS = """
     p.strategy_plan_id, p.account_id, p.symbol, p.structure_label,
     p.strategy_structure_id, p.strategy_opportunity_id,
@@ -62,9 +62,9 @@ _PLAN_COLUMNS = """
     p.target_kind, p.target_value, p.stop_kind, p.stop_value, p.exit_by,
     p.rationale, p.source_kind, p.source_ref, p.source_json,
     p.status, p.expires_at, p.intended_at, i.opened_at AS filled_at, p.cancelled_at,
-    p.strategy_instance_id, p.parent_strategy_plan_id, p.created_at, p.updated_at
+    p.trade_id AS strategy_instance_id, p.parent_strategy_plan_id, p.created_at, p.updated_at
 """
-_PLAN_FROM = "strategy_plan p LEFT JOIN strategy_instance i ON i.strategy_instance_id = p.strategy_instance_id"
+_PLAN_FROM = "strategy_plan p LEFT JOIN trade i ON i.trade_id = p.trade_id"
 
 # Columns a draft may replace. `status` and the timestamps are the state
 # machine's, not the caller's.
@@ -426,8 +426,8 @@ def link_fill(
                     f"This plan is {row['status']}. Only an intended plan can be linked to a fill."
                 )
             cur.execute(
-                "SELECT account_id FROM strategy_instance "
-                "WHERE strategy_instance_id = %s",
+                "SELECT account_id FROM trade "
+                "WHERE trade_id = %s",
                 (strategy_instance_id,),
             )
             instance = cur.fetchone()
@@ -439,7 +439,7 @@ def link_fill(
                     f"and the plan to {row['account_id']}."
                 )
             cur.execute(
-                "UPDATE strategy_plan SET status = 'filled', strategy_instance_id = %s, "
+                "UPDATE strategy_plan SET status = 'filled', trade_id = %s, "
                 "updated_at = now() WHERE strategy_plan_id = %s",
                 (strategy_instance_id, strategy_plan_id),
             )

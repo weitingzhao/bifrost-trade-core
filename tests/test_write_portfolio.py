@@ -206,10 +206,10 @@ def _env(**over: Any) -> FakeConn:
     """The env database: instance check, split count, attribution read-back and writes."""
     return FakeConn(
         [
-            ("SELECT account_id, strategy_opportunity_id FROM strategy_instance", over.get("instance", Reply(one=(ACCOUNT, 5)))),
-            ("SELECT count(*) FROM strategy_instance_execution", over.get("splits", Reply(one=(0,)))),
-            ("FROM strategy_instance_execution sie", over.get("read", Reply(all=[(41, None, "L", 5)]))),
-            ("INSERT INTO strategy_instance_execution", over.get("insert", Reply())),
+            ("SELECT account_id, strategy_opportunity_id FROM trade", over.get("instance", Reply(one=(ACCOUNT, 5)))),
+            ("SELECT count(*) FROM trade_execution", over.get("splits", Reply(one=(0,)))),
+            ("FROM trade_execution sie", over.get("read", Reply(all=[(41, None, "L", 5)]))),
+            ("INSERT INTO trade_execution", over.get("insert", Reply())),
         ]
     )
 
@@ -229,8 +229,8 @@ def test_patch_execution_sets_direct_attribution_and_returns_it(two_dbs) -> None
         "fill_splits": [],
     }
     # TD-09: this env's table, keyed by the fill; Golden Source is only read.
-    sql, params = env.statement("INSERT INTO strategy_instance_execution")
-    assert "ON CONFLICT (account_id, exec_id) WHERE allocated_quantity IS NULL" in sql
+    sql, params = env.statement("INSERT INTO trade_execution")
+    assert "ON CONFLICT (account_id, exec_id) WHERE split_quantity IS NULL" in sql
     assert params == (ACCOUNT, EXEC, 41)
     assert not golden.ran("UPDATE raw_broker")
     assert golden.commits == 1 and env.commits == 1 and golden.closed and env.closed
@@ -240,8 +240,8 @@ def test_patch_execution_null_clears_the_whole_fill_row(two_dbs) -> None:
     env, golden = _env(read=Reply(all=[])), _golden()
     two_dbs(env, golden)
     out = accounts.patch_execution(CFG, 77, {"strategy_instance_id": None})
-    sql, params = env.statement("DELETE FROM strategy_instance_execution")
-    assert "allocated_quantity IS NULL" in sql and params == (ACCOUNT, EXEC)
+    sql, params = env.statement("DELETE FROM trade_execution")
+    assert "split_quantity IS NULL" in sql and params == (ACCOUNT, EXEC)
     assert out["strategy_instance_id"] is None and out["strategy_opportunity_id"] is None
     # strategy_opportunity_id: null alone changes nothing.
     env, golden = _env(), _golden()
@@ -309,9 +309,9 @@ def test_patch_execution_replacing_splits_with_a_direct_id(two_dbs) -> None:
     env, golden = _env(splits=Reply(one=(2,))), _golden()
     two_dbs(env, golden)
     accounts.patch_execution(CFG, 77, {"instance_allocations": [], "strategy_instance_id": 41})
-    sql, params = env.statement("DELETE FROM strategy_instance_execution")
-    assert "allocated_quantity IS NOT NULL" in sql and params == (ACCOUNT, EXEC)
-    assert env.statement("INSERT INTO strategy_instance_execution")[1] == (ACCOUNT, EXEC, 41)
+    sql, params = env.statement("DELETE FROM trade_execution")
+    assert "split_quantity IS NOT NULL" in sql and params == (ACCOUNT, EXEC)
+    assert env.statement("INSERT INTO trade_execution")[1] == (ACCOUNT, EXEC, 41)
     # the splits go first: the whole-fill row may name an instance a split named
     ran = [sql for sql, _ in env.executed]
     assert ran.index(sql) < next(i for i, x in enumerate(ran) if x.startswith("INSERT"))
@@ -325,9 +325,9 @@ def test_patch_execution_splits_replace_the_whole_fill_row(two_dbs) -> None:
         77,
         {"instance_allocations": [{"strategy_instance_id": 41, "allocated_quantity": 1.5}, {"strategy_instance_id": 42, "allocated_quantity": 0.5}]},
     )
-    deletes = [sql for sql, _ in env.executed if sql.startswith("DELETE FROM strategy_instance_execution")]
+    deletes = [sql for sql, _ in env.executed if sql.startswith("DELETE FROM trade_execution")]
     assert any("IS NOT NULL" in d for d in deletes) and any("IS NULL" in d and "NOT NULL" not in d for d in deletes)
-    inserts = [p for sql, p in env.executed if sql.startswith("INSERT INTO strategy_instance_execution")]
+    inserts = [p for sql, p in env.executed if sql.startswith("INSERT INTO trade_execution")]
     assert inserts == [(ACCOUNT, EXEC, 41, 1.5), (ACCOUNT, EXEC, 42, 0.5)]
     assert out["strategy_instance_id"] is None
     assert out["instance_allocations"] == [
@@ -348,7 +348,7 @@ def test_delete_execution_strict(two_dbs) -> None:
     env = FakeConn(
         [
             ("FROM account_execution_option_stock_link", Reply(one=(0,))),
-            ("DELETE FROM strategy_instance_execution", Reply(all=[(True,), (True,)])),
+            ("DELETE FROM trade_execution", Reply(all=[(True,), (True,)])),
         ]
     )
     two_dbs(env, golden)
@@ -359,7 +359,7 @@ def test_delete_execution_strict(two_dbs) -> None:
     }
     sql, params = golden.statement("DELETE FROM raw_broker.commissions")
     assert sql.count("NOT EXISTS") == 3 and params == [EXEC] * 4
-    assert env.statement("DELETE FROM strategy_instance_execution")[1] == (ACCOUNT, EXEC)
+    assert env.statement("DELETE FROM trade_execution")[1] == (ACCOUNT, EXEC)
     assert golden.commits == 1 and env.commits == 1
 
 
@@ -368,7 +368,7 @@ def test_delete_execution_strict_keeps_the_attribution_of_a_surviving_twin(two_d
     env = FakeConn([("FROM account_execution_option_stock_link", Reply(one=(0,)))])
     two_dbs(env, golden)
     assert accounts.delete_execution_strict(CFG, 77)["allocations_removed"] == 0
-    assert not env.ran("DELETE FROM strategy_instance_execution")
+    assert not env.ran("DELETE FROM trade_execution")
 
 
 def test_delete_execution_strict_refusals(two_dbs) -> None:

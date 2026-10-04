@@ -87,8 +87,8 @@ def _seed_rule_chain(db: _Savepointed) -> dict:
     gate = _one(db, "INSERT INTO gate_safety_strategy (name) VALUES ('TD15 gate') RETURNING gate_safety_strategy_id")[0]
     opp = _one(db, "INSERT INTO strategy_opportunity (name, strategy_structure_id, default_gate_safety_strategy_id, scope_type) "
                    "VALUES ('TD15 opp', %s, %s, 'explicit_symbols') RETURNING strategy_opportunity_id", (struct, gate))[0]
-    inst = _one(db, "INSERT INTO strategy_instance (strategy_opportunity_id, account_id, opened_at, label) "
-                    "VALUES (%s, %s, now(), 'L') RETURNING strategy_instance_id", (opp, ACCOUNT))[0]
+    inst = _one(db, "INSERT INTO trade (strategy_opportunity_id, account_id, opened_at, label) "
+                    "VALUES (%s, %s, now(), 'L') RETURNING trade_id", (opp, ACCOUNT))[0]
     alloc = _one(db, "INSERT INTO strategy_allocation (name, gate_safety_strategy_id, max_positions, max_bp_pct) "
                      "VALUES ('TD15 alloc', %s, 3, 20) RETURNING strategy_allocation_id", (gate,))[0]
     return {"tpl": tpl, "struct": struct, "gate": gate, "opp": opp, "inst": inst, "alloc": alloc}
@@ -193,13 +193,13 @@ def test_instance_delete_reads_this_envs_attribution(db) -> None:
     _one(db, "INSERT INTO raw_broker.executions_raw_flex (exec_id, account_id, symbol, strategy_instance_id) "
              "VALUES ('td15.e9', %s, 'TDXV', %s)", (ACCOUNT, ids["inst"]))
     assert strategy_instance.count_attributed_executions(CFG, ids["inst"]) == 0
-    _one(db, "INSERT INTO strategy_instance_execution (account_id, exec_id, strategy_instance_id) "
+    _one(db, "INSERT INTO trade_execution (account_id, exec_id, trade_id) "
              "VALUES (%s, 'td15.e1', %s), (%s, 'td15.e2', %s)", (ACCOUNT, ids["inst"], ACCOUNT, ids["inst"]))
     assert strategy_instance.count_attributed_executions(CFG, ids["inst"]) == 2
     with pytest.raises(WriteConflict, match="^2 fills are attributed to this trade.$"):
         strategy_instance.delete_instance_strict(CFG, ids["inst"])
-    assert _one(db, "SELECT 1 FROM strategy_instance WHERE strategy_instance_id = %s", (ids["inst"],)) == (1,)
-    _one(db, "DELETE FROM strategy_instance_execution WHERE exec_id LIKE 'td15.%%'")
+    assert _one(db, "SELECT 1 FROM trade WHERE trade_id = %s", (ids["inst"],)) == (1,)
+    _one(db, "DELETE FROM trade_execution WHERE exec_id LIKE 'td15.%%'")
     assert strategy_instance.delete_instance_strict(CFG, ids["inst"])["deleted"] == "hard"
 
 

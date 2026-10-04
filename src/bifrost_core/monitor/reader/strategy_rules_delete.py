@@ -6,7 +6,7 @@ without Undo. So these are hard deletes, and every one of them first asks the
 only question that can still stop it — is the object in use? An object in use
 is refused with the reason, in words the Desk shows as they are:
 
-- an opportunity with trades (``strategy_instance`` rows) — its trades would
+- an opportunity with trades (``trade`` rows) — its trades would
   lose their rule. Its allocation memberships go with it (the junction
   cascades), and a plan that pointed at it keeps its text but drops the link.
 - the allocation the daemon runs (`settings.active_strategy_allocation_id`,
@@ -77,7 +77,7 @@ def _delete(status_config: Optional[dict], table: str, key: str, row_id: int, ch
 def _check_opportunity(strategy_opportunity_id: int):
     def check(cur: Any) -> None:
         cur.execute(
-            "SELECT count(*) FROM strategy_instance WHERE strategy_opportunity_id = %s",
+            "SELECT count(*) FROM trade WHERE strategy_opportunity_id = %s",
             (strategy_opportunity_id,),
         )
         trades = int(cur.fetchone()[0])

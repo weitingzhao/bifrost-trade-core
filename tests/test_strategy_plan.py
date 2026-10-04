@@ -234,7 +234,7 @@ def test_link_fill_sets_filled_and_the_instance_together(conn) -> None:
     fake = conn([{"status": "intended", "account_id": "U1"}, {"account_id": "U1"}])
     assert strategy_plan.link_fill(CFG, 1, 7) is True
     sql, params = fake.cur.executed[-1]
-    assert "status = 'filled'" in sql and "strategy_instance_id = %s" in sql
+    assert "status = 'filled'" in sql and "trade_id = %s" in sql
     # TD-43 (core 0.41.0): filled_at is no longer written; it reads as the instance's opened_at.
     assert "filled_at" not in sql
     assert params == (7, 1)
@@ -323,7 +323,7 @@ def test_rows_carry_the_status_a_reader_should_see(conn) -> None:
     # a plan is derived from its instance or its opportunity.
     sql = fake.cur.executed[0][0]
     assert sql.upper().count(" JOIN ") == 1
-    assert "i.opened_at AS filled_at" in sql and "LEFT JOIN strategy_instance i" in sql
+    assert "i.opened_at AS filled_at" in sql and "LEFT JOIN trade i" in sql
 
 
 def test_a_broken_read_is_an_error_not_an_empty_desk(conn, monkeypatch) -> None:

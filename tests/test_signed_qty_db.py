@@ -20,7 +20,6 @@ from typing import Any, Dict, List
 import pytest
 from psycopg2.extras import RealDictCursor, execute_values
 
-from bifrost_core.persistence.postgres import td09_attribution
 from bifrost_core.persistence.postgres.brokerage_ddl import _create_brokerage_views, ensure_brokerage_schema
 from bifrost_core.portfolio.reader import executions as executions_reader
 from bifrost_core.portfolio.reader import option_stock_link as link_reader
@@ -72,8 +71,8 @@ def test_sql_matches_python(pg_conn: Any) -> None:
 
 @pytest.fixture
 def book(pg_conn: Any) -> Dict[str, Any]:
-    """Golden Source rows stored the way they were before TD-09, moved into this env's
-    strategy_instance_execution by the TD-09 load; the env ``brokerage.*`` views over them."""
+    """Golden Source rows stored the way they were before TD-09, their trades copied into this
+    env's trade_execution as the TD-09 load did; the env ``brokerage.*`` views over them."""
     ensure_brokerage_schema(pg_conn, log=lambda m: None)
     ids: Dict[str, Any] = {}
     with pg_conn.cursor() as cur:
@@ -132,10 +131,19 @@ def book(pg_conn: Any) -> Dict[str, Any]:
                     "VALUES ('TD30', %s, 'explicit_symbols') RETURNING strategy_opportunity_id", (struct,))
         opp = cur.fetchone()[0]
         for si in (11, 12):
-            cur.execute("INSERT INTO strategy_instance (strategy_instance_id, strategy_opportunity_id, account_id, opened_at) "
+            cur.execute("INSERT INTO trade (trade_id, strategy_opportunity_id, account_id, opened_at) "
                         "VALUES (%s, %s, %s, now())", (si, opp, ACCOUNT))
-        for stmt in td09_attribution.load_statements("brokerage"):
-            cur.execute(stmt)
+        # Each fill's trade, from the raw rows' frozen column into this env's trade_execution
+        # (what the one-off TD-09 load did; the exec ids here are all distinct).
+        cur.execute(
+            "INSERT INTO trade_execution (account_id, exec_id, trade_id) "
+            "SELECT account_id, exec_id, strategy_instance_id FROM raw_broker.executions_raw_flex "
+            "WHERE strategy_instance_id IS NOT NULL "
+            "UNION ALL SELECT account_id, exec_id, strategy_instance_id FROM raw_broker.executions_raw_tws "
+            "WHERE strategy_instance_id IS NOT NULL "
+            "UNION ALL SELECT account_id, exec_id, strategy_instance_id FROM raw_broker.executions_raw_journal "
+            "WHERE strategy_instance_id IS NOT NULL"
+        )
         _create_brokerage_views(cur, "brokerage", env=True)
     return ids
 

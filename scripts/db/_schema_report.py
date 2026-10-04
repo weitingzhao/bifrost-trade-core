@@ -20,7 +20,7 @@ EXPECTED_TABLES_BY_CATEGORY: Dict[str, List[str]] = {
     ],
     "execution": [
         "account_execution_instance_allocation",
-        "strategy_instance_execution",
+        "trade_execution",
         "account_execution_option_stock_link",
     ],
     "gate_safety": [
@@ -39,10 +39,12 @@ EXPECTED_TABLES_BY_CATEGORY: Dict[str, List[str]] = {
     "strategy": [
         "strategy_allocation",
         "strategy_allocation_opportunity",
-        "strategy_instance",
         "strategy_opportunity",
+        "strategy_plan",
         "strategy_structure",
         "strategy_template",
+        "trade",
+        "trade_review",
     ],
     "watchlist": ["watchlist"],
 }

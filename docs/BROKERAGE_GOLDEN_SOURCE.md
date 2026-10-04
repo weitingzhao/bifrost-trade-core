@@ -84,19 +84,39 @@ environment's `strategy_instance` and read as a different (or missing) instance 
 2026-10-03 five instance ids (158–162) named different trades in DEV and PROD, and 40 instances still carried
 an opportunity id their environment had since changed.
 
-**Since core 0.37.0** each environment keeps its own attribution in `public.strategy_instance_execution`,
-keyed by the fill (`account_id`, `exec_id`) — a TWS row and its Flex twin share it — with a composite FK to that
-environment's `strategy_instance (strategy_instance_id, account_id)`; see [DATABASE.md](DATABASE.md#strategy_instance_execution-core-0370).
-The per-env `brokerage.executions*` views take `strategy_instance_id` from it and `strategy_opportunity_id`
-from that instance. The columns here were kept, unwritten, as the rollback path; clearing or dropping them is a
-separate Owner decision. The one-off move is `td09_attribution` (`scripts/db/td09_migrate_attribution.py`).
+**Since core 0.37.0** each environment keeps its own attribution in `public.trade_execution` (named
+`strategy_instance_execution` until naming R3, core 0.45.0), keyed by the fill (`account_id`, `exec_id`) — a TWS
+row and its Flex twin share it — with a composite FK to that environment's `trade (trade_id, account_id)`; see
+[DATABASE.md](DATABASE.md#trade_execution-core-0370-as-strategy_instance_execution-renamed-in-0450). The columns here
+were kept, unwritten, as the rollback path; clearing or dropping them is a separate Owner decision (D10′-A). The
+one-off move was `td09_attribution` (`scripts/db/td09_migrate_attribution.py`, retired in core 0.45.0 after it ran
+on dev / stg / prod on 2026-10-03; it is in git history up to tag v0.44.0).
+
+### Env view columns (per-env `brokerage.executions*`, naming R3, core 0.45.0)
+
+The Golden Source views (`raw_broker.executions`, `_final`, `_fly`) keep the vendor-shaped names (§7 exemption of
+the database-design standard). Each env's `brokerage.executions` / `executions_final` / `executions_fly` /
+`executions_tws` are built over the FDW tables (`brokerage_views._create_brokerage_views(env=True)`) with the same
+columns in the same order, except:
+
+| Golden Source column | Env view column(s) | Meaning in the env view |
+|----------------------|--------------------|-------------------------|
+| `trade_id` | `ib_trade_id` | IB Flex TradeID (vendor); renamed so the env has one `trade_id` (TD-13) |
+| `related_trade_id` | `ib_related_trade_id` | IB Flex RelatedTradeID (vendor) |
+| `strategy_opportunity_id` | `strategy_opportunity_id` | The env trade's opportunity (not the frozen raw column) |
+| `strategy_instance_id` | `trade_id`, then `strategy_instance_id` | `trade_id`: the env's Trade from the whole-fill row of `public.trade_execution`; `strategy_instance_id` (= `trade_id`) only for one version, for pods on core < 0.45.0 — R4 drops it |
+
+Env-only views: `brokerage.trade_fill_splits` (`account_id`, `account_executions_id`, `trade_id`, `quantity`,
+`exec_id` — one row per raw representation of each split fill) and, one version, `brokerage.instance_allocations`
+over it with core 0.44.0's columns (`strategy_instance_id`, `allocated_quantity`). Before R3 (core 0.37.0–0.44.0) the
+env views had Golden Source's columns exactly, with `strategy_instance_id` meaning this env's attribution.
 
 ## Bridge tables (per-env)
 
-- `strategy_instance_execution` (core 0.37.0) — the strategy attribution of a fill, whole or split; keyed by
-  (`account_id`, `exec_id`), composite FK to `strategy_instance`
+- `trade_execution` (core 0.37.0 as `strategy_instance_execution`; renamed in 0.45.0) — the trade attribution of
+  a fill, whole or split (`split_quantity`); keyed by (`account_id`, `exec_id`), composite FK to `trade`
 - `account_execution_instance_allocation` — **frozen since core 0.37.0**: the splits before TD-09, keyed by the
-  unified execution id; no longer written or read (the migration read it)
+  unified execution id; no longer written or read (the TD-09 migration read it); dropped in naming R4
 - `account_execution_option_stock_link` — option execution ↔ stock fill(s) of its exercise / assignment;
   no FK at all (both ends are unified execution ids)
 

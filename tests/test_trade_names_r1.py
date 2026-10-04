@@ -66,7 +66,7 @@ def test_execution_rows_carry_trade_names() -> None:
 
 
 def test_attached_splits_come_as_fill_splits_too() -> None:
-    conn = FakeConn([("FROM brokerage.instance_allocations", Reply(all=[{"account_executions_id": 7, **SPLIT}]))])
+    conn = FakeConn([("FROM brokerage.trade_fill_splits", Reply(all=[{"account_executions_id": 7, **SPLIT}]))])
     ex = [{"account_executions_id": 7}, {"account_executions_id": 8}]
     executions_reader.attach_instance_allocations(conn, ex)
     assert ex[0]["instance_allocations"][0]["strategy_instance_id"] == 41
@@ -123,7 +123,7 @@ def test_patch_execution_takes_trade_id(two_dbs) -> None:  # noqa: F811
     out = accounts.patch_execution(CFG, 77, {"strategy_opportunity_id": 5, "trade_id": 41})
     assert out["trade_id"] == out["strategy_instance_id"] == 41
     assert out["fill_splits"] == out["instance_allocations"] == []
-    _, params = env.statement("INSERT INTO strategy_instance_execution")
+    _, params = env.statement("INSERT INTO trade_execution")
     assert params == (ACCOUNT, "0000e1.01", 41)
 
 
@@ -146,7 +146,7 @@ def test_review_rows_and_writes_take_the_json_names() -> None:
 def test_review_patch_takes_tags_added_json() -> None:
     returned = {"trade_review_id": 1, "strategy_instance_id": 41, "tags_added": ["b"], "tags_dropped": [],
                 "reviewed_at": None, "created_at": None, "updated_at": None}
-    conn = FakeConn([("SELECT 1 FROM strategy_instance", Reply(one=(1,))), ("INSERT INTO trade_review", Reply(one=returned))])
+    conn = FakeConn([("SELECT 1 FROM trade WHERE trade_id", Reply(one=(1,))), ("INSERT INTO trade_review", Reply(one=returned))])
     out = trade_review.patch_review(conn, 41, {"tags_added_json": ["b"]})
     sql, params = conn.statement("INSERT INTO trade_review")
     assert "tags_added" in sql and params["tags_added"] == '["b"]'

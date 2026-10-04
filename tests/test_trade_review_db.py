@@ -50,8 +50,8 @@ def _instance(pg_conn) -> int:
         )
         opportunity_id = cur.fetchone()[0]
         cur.execute(
-            "INSERT INTO strategy_instance (strategy_opportunity_id, account_id, opened_at) "
-            "VALUES (%s, 'TEST-REVIEW', %s) RETURNING strategy_instance_id",
+            "INSERT INTO trade (strategy_opportunity_id, account_id, opened_at) "
+            "VALUES (%s, 'TEST-REVIEW', %s) RETURNING trade_id",
             (opportunity_id, datetime(2026, 1, 5, tzinfo=timezone.utc)),
         )
         return cur.fetchone()[0]

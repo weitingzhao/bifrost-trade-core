@@ -82,7 +82,7 @@ def test_ddl_creates_the_table_and_its_three_indexes(pg_conn) -> None:
     assert {
         "strategy_plan_status_created",
         "strategy_plan_symbol",
-        "strategy_plan_instance",
+        "strategy_plan_trade",
     } <= names
 
 
@@ -120,14 +120,14 @@ def test_a_plan_walks_draft_to_intended_to_filled(plans, pg_conn) -> None:
         )
         opportunity_id = cur.fetchone()[0]
         cur.execute(
-            "INSERT INTO strategy_instance (strategy_opportunity_id, account_id, opened_at) "
-            "VALUES (%s, 'TEST-PLANS', %s) RETURNING strategy_instance_id",
+            "INSERT INTO trade (strategy_opportunity_id, account_id, opened_at) "
+            "VALUES (%s, 'TEST-PLANS', %s) RETURNING trade_id",
             (opportunity_id, opened),
         )
         instance_id = cur.fetchone()[0]
         cur.execute(
-            "INSERT INTO strategy_instance (strategy_opportunity_id, account_id, opened_at) "
-            "VALUES (%s, 'OTHER-ACCOUNT', %s) RETURNING strategy_instance_id",
+            "INSERT INTO trade (strategy_opportunity_id, account_id, opened_at) "
+            "VALUES (%s, 'OTHER-ACCOUNT', %s) RETURNING trade_id",
             (opportunity_id, opened),
         )
         other_instance_id = cur.fetchone()[0]

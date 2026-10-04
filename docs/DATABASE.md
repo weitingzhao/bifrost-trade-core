@@ -66,8 +66,9 @@ Qualified names: [`brokerage_tables.py`](../src/bifrost_core/persistence/postgre
 
 Writers connect to Golden Source with `psycopg2.connect(**_get_golden_source_conn_params(config))`
 ([`connection.py`](../src/bifrost_core/persistence/postgres/connection.py)) and write `raw_broker.*` (`GOLDEN_*`
-names). Readers stay on the per-env connection and JOIN `brokerage.*` via FDW. Strategy attribution is per-env
-(`strategy_instance_execution`, core 0.37.0); nothing writes Golden Source's `strategy_*` columns any more.
+names). Readers stay on the per-env connection and JOIN `brokerage.*` via FDW. Trade attribution is per-env
+(`trade_execution`, core 0.37.0 as `strategy_instance_execution`, renamed in naming R3, core 0.45.0); nothing writes
+Golden Source's `strategy_*` columns any more.
 
 Process IPC (heartbeat / run_status / control) is **not** in PostgreSQL. `_ensure_tables()` does not create the retired `daemon_*` / `account_sync_*` IPC tables.
 
@@ -92,9 +93,19 @@ Retired (merged into `gate_safety_strategy` in core `0.8.1`): `gate_safety_state
 
 `settings.active_gate_safety_strategy_id` points at the active set. Opportunity / allocation tables keep FK `*_gate_safety_strategy_id`.
 
-## Strategy tables (7 tables)
+## Strategy tables (6 tables) and the Trade entity
 
-The seven `strategy_*` tables on the live DB, plus `trade_review` (strategy-adjacent, documented below).
+The six rule-chain `strategy_*` tables, `strategy_plan`, and the Trade entity: `trade`, its fill attribution
+`trade_execution` and `trade_review` (all documented below). **Naming R3 (core 0.45.0)** renamed the entity —
+`strategy_instance` → `trade` and `strategy_instance_execution` → `trade_execution` — with their columns
+(`strategy_instance_id` → `trade_id`, `allocated_quantity` → `split_quantity`, `trade_review.tags_*` → `tags_*_json`),
+sequences, constraints and indexes, in one Owner-run transaction per env
+([`rename_trade_entity.py`](../src/bifrost_core/persistence/postgres/rename_trade_entity.py)). For one version
+(R3 → R4) `public.strategy_instance` and `public.strategy_instance_execution` are **compatibility views** with the
+old column names (auto-updatable; for pods still on core < 0.45.0), and so is `brokerage.instance_allocations`.
+`_ensure_tables` creates the new names on a fresh database and **refuses to run** (RuntimeError, before any change)
+while `strategy_instance` is still a table. API keys are unchanged: reader rows keep `strategy_instance_id` beside
+`trade_id` (SQL aliases the new columns to the old keys) until R4.
 Every column is in the [appendix](#appendix--public-columns-bifrost_dev-2026-10-01).
 
 | Table | jsonb / notes |
@@ -104,7 +115,7 @@ Every column is in the [appendix](#appendix--public-columns-bifrost_dev-2026-10-
 | `strategy_opportunity` | `symbols_json`, `entry_conditions_json`; FK to a structure and a default gate set |
 | `strategy_allocation` | scalar limits (`max_positions`, `max_bp_pct`); optional gate set |
 | `strategy_allocation_opportunity` | N:M junction allocation ↔ opportunity (`sort_order`); both FKs ON DELETE CASCADE |
-| `strategy_instance` | one traded instance of an opportunity in one account — see below |
+| `trade` | (was `strategy_instance`) one trade opened under an opportunity in one account — see below |
 | `strategy_plan` | `legs_json`, `source_json`; structured trade plans — **advisory, no execution consumer (D10)** |
 
 **Legs and `params_json` (TD-44, core 0.41.0).** There are two kinds of leg, not three copies of one:
@@ -123,14 +134,15 @@ CHECK `strategy_opportunity_scope_type_ck` and by core (`''` is stored as NULL; 
 `symbols_json` is what the rule covers either way — `scope_type` only says where the symbols came from — and
 `watchlist_stk` needs at least one symbol (core refuses an empty one).
 
-### `strategy_instance`
+### `trade` (was `strategy_instance`; renamed in core **0.45.0**)
 
 One position the desk actually opened under an opportunity, in one IB account. Executions are attributed to
-it, plans that were filled point at it, and Review keeps one verdict per instance.
+it, plans that were filled point at it, and Review keeps one verdict per trade. DDL:
+[`trade_ddl.py`](../src/bifrost_core/persistence/postgres/trade_ddl.py).
 
 | Column | Meaning |
 |--------|---------|
-| `strategy_instance_id` | PK |
+| `trade_id` | PK (bigserial, sequence `trade_trade_id_seq`; constraint `trade_pkey`). Was `strategy_instance_id` |
 | `strategy_opportunity_id` | NOT NULL, FK → `strategy_opportunity` **ON DELETE RESTRICT** (an opportunity with instances cannot be deleted) |
 | `account_id` | IB account. An execution can be allocated to the instance only when its account matches |
 | `opened_at` | When the position was opened (NOT NULL). A filled plan's `filled_at` reads as this value (not stored since 0.41.0) |
@@ -138,7 +150,8 @@ it, plans that were filled point at it, and Review keeps one verdict per instanc
 | ~~`notes`~~ | **Dropped (TD-73).** Not read or written since 0.43.0 and not created on a fresh database; existing databases lose it in the Owner db-step after that release (infra `scripts/release/db-steps.d/2026-10-03-td43-td73-drop-columns.md`). A trade's notes live in the Research journal (`journal.note`, ref `inst`) |
 | `created_at` / `updated_at` | Row timestamps |
 
-Indexes: `(strategy_opportunity_id)`, `(account_id, opened_at)`. Nothing in the schema limits an
+Indexes: `trade_opportunity_id (strategy_opportunity_id)`, `trade_account_opened (account_id, opened_at)`; FK
+`trade_strategy_opportunity_id_fkey`; UNIQUE `trade_id_account_uq (trade_id, account_id)`. Nothing in the schema limits an
 opportunity/account pair to one open instance, and nothing should: PROD has pairs with two open at once (rolls,
 parallel trades).
 
@@ -149,38 +162,53 @@ instance's OPT fills (whole fills their quantity, split fills the instance's sha
 expiry with no closing fill — counted as closed, `closed_on` = the last expiry), `closed` (every leg flat,
 `closed_on` = the last day a leg went flat). One rule for Rules, Review, Risk › Limits and the research MCP.
 
-Referenced by: `strategy_instance_execution (strategy_instance_id, account_id)` (ON DELETE RESTRICT; the
-UNIQUE `(strategy_instance_id, account_id)` constraint `strategy_instance_id_account_uq` exists for it),
-`strategy_plan.strategy_instance_id` (**RESTRICT** since 0.41.0; SET NULL before), `trade_review.strategy_instance_id`
-(**RESTRICT** since 0.41.0, CASCADE before; UNIQUE), and the frozen `account_execution_instance_allocation.strategy_instance_id`
-(ON DELETE RESTRICT). So an instance a plan was filled by, or one with a review, cannot be deleted
-(`delete_instance_strict` answers 409 naming which).
+Referenced by: `trade_execution (trade_id, account_id)` (`trade_execution_trade_fk`, ON DELETE RESTRICT; the
+UNIQUE `trade_id_account_uq` exists for it), `strategy_plan.trade_id` (`strategy_plan_trade_id_fkey`, **RESTRICT**
+since 0.41.0; SET NULL before), `trade_review.trade_id` (`trade_review_trade_id_fkey`, **RESTRICT** since 0.41.0,
+CASCADE before; UNIQUE `trade_review_trade_id_key`), and the frozen `account_execution_instance_allocation.strategy_instance_id`
+(its column and FK keep their names; dropped in R4). So a trade a plan was filled by, or one with a review, cannot be
+deleted (`delete_instance_strict` answers 409 naming which).
 
-### `strategy_instance_execution` (core **0.37.0**)
+**Compatibility view `public.strategy_instance` (R3 → R4 only).** `SELECT trade_id AS strategy_instance_id,
+strategy_opportunity_id, account_id, opened_at, label, created_at, updated_at FROM trade` — no `notes` (dropped
+2026-10-03). Auto-updatable: a pod on core 0.44.0 creates, updates, locks and deletes trades through it (rehearsed).
+Made by the rename step, not by `_ensure_tables`; R4 drops it.
+
+### `trade_execution` (core **0.37.0** as `strategy_instance_execution`; renamed in **0.45.0**)
 
 Which trade a fill belongs to, in this environment (TD-09). Before 0.37.0 this was two columns on Golden
 Source's raw rows, shared by all three environments, plus `account_execution_instance_allocation` for splits.
 
 | Column | Meaning |
 |--------|---------|
-| `strategy_instance_execution_id` | PK |
+| `trade_execution_id` | PK (sequence `trade_execution_trade_execution_id_seq`). Was `strategy_instance_execution_id` |
 | `account_id`, `exec_id` | The fill. A TWS row and its Flex twin share `exec_id`, so one row attributes both; a raw row without `exec_id` cannot be attributed |
-| `strategy_instance_id` | NOT NULL. With `account_id`, FK → `strategy_instance (strategy_instance_id, account_id)` **ON DELETE RESTRICT**: the fill's account must be the instance's |
-| `allocated_quantity` | NULL = the whole fill. Otherwise this instance's share of a split (signed like the fill; CHECK ≠ 0) |
+| `trade_id` | NOT NULL. With `account_id`, FK `trade_execution_trade_fk` → `trade (trade_id, account_id)` **ON DELETE RESTRICT**: the fill's account must be the trade's. Was `strategy_instance_id` |
+| `split_quantity` | NULL = the whole fill. Otherwise this trade's share of a fill split (signed like the fill; CHECK `trade_execution_qty_ck` ≠ 0). Was `allocated_quantity` (TD-82: "allocation" is the capital rule only) |
 | `created_at` / `updated_at` | Row timestamps |
 
-Constraints: UNIQUE `(account_id, exec_id, strategy_instance_id)`; partial UNIQUE `(account_id, exec_id) WHERE
-allocated_quantity IS NULL` (one whole-fill row per fill); index `(strategy_instance_id)`. A fill is attributed
-whole or split, never both — the writers keep that (`accounts.py`), not a trigger. The opportunity is not stored:
-it is the instance's.
+Constraints: `trade_execution_pkey`; UNIQUE `trade_execution_uq (account_id, exec_id, trade_id)`; partial UNIQUE
+`trade_execution_whole_uq (account_id, exec_id) WHERE split_quantity IS NULL` (one whole-fill row per fill); index
+`trade_execution_trade_ix (trade_id)`. A fill is attributed whole or split, never both — the writers keep that
+(`accounts.py`), not a trigger. The opportunity is not stored: it is the trade's. Constants:
+`brokerage_tables.TRADE_EXECUTION` (`INSTANCE_EXECUTION` is its one-version alias).
 
-Read through the per-env views (built in `brokerage_ddl._create_brokerage_views(..., env=True)` with the FDW
-tables): `brokerage.executions` / `executions_final` / `executions_fly` take `strategy_instance_id` from the
-whole-fill row and `strategy_opportunity_id` from its instance; `brokerage.executions_tws` is every TWS raw row the
-same way (the `tws_raw` scope); `brokerage.instance_allocations` gives the split rows once per raw representation
-(Flex id, TWS −id, journal −(1e9+id)) in the old split table's shape (`account_id`, `account_executions_id`,
-`strategy_instance_id`, `allocated_quantity`, plus `exec_id`). `setup_fdw_foreign_tables` refuses to run before this
-table exists.
+Read through the per-env views (built in `brokerage_views._create_brokerage_views(..., env=True)` with the FDW
+tables): `brokerage.executions` / `executions_final` / `executions_fly` take `trade_id` from the whole-fill row and
+`strategy_opportunity_id` from its trade, and rename IB's columns `ib_trade_id` / `ib_related_trade_id` (TD-13: one
+`trade_id`); for one version they also carry `strategy_instance_id` (= `trade_id`) right after it.
+`brokerage.executions_tws` is every TWS raw row the same way (the `tws_raw` scope); `brokerage.trade_fill_splits`
+gives the split rows once per raw representation (Flex id, TWS −id, journal −(1e9+id)): `account_id`,
+`account_executions_id`, `trade_id`, `quantity` (float8), `exec_id` (`brokerage_tables.TRADE_FILL_SPLITS`;
+`INSTANCE_ALLOCATION` is its alias). `brokerage.instance_allocations` is the one-version compatibility view over it
+with core 0.44.0's columns (`strategy_instance_id`, `allocated_quantity`). `setup_fdw_foreign_tables` refuses to
+run before `trade_execution` exists.
+
+**Compatibility view `public.strategy_instance_execution` (R3 → R4 only).** `SELECT trade_execution_id AS
+strategy_instance_execution_id, account_id, exec_id, trade_id AS strategy_instance_id, split_quantity AS
+allocated_quantity, created_at, updated_at FROM trade_execution`. Auto-updatable; core 0.44.0's whole-fill upsert
+`INSERT … ON CONFLICT (account_id, exec_id) WHERE allocated_quantity IS NULL DO UPDATE …` works through it —
+PostgreSQL maps the arbiter onto `trade_execution_whole_uq` (rehearsed on 16 and 17, insert and conflict arms).
 
 ### `strategy_plan` (core **0.22.0**)
 
@@ -197,8 +225,8 @@ it exists. Orders are placed in TWS.
 | `source_kind` / `source_ref` / `source_json` | Where the plan came from, and the provenance chain as it stood: `[{kind, text, ref?, to?}]` |
 | `status` | `draft` → `intended` → `filled`, or `cancelled` from either of the first two. No delete |
 | `expires_at` | **`expired` is not a stored status**: `status='intended'` with `expires_at < now()` reads `effective_status='expired'` |
-| `strategy_instance_id` | The instance the plan turned into, FK ON DELETE RESTRICT. CHECK `strategy_plan_filled_instance_ck`: `(status = 'filled') = (strategy_instance_id IS NOT NULL)` — `link_fill` sets both |
-| `filled_at` | **Not a column (TD-43).** Reads return the linked instance's `opened_at` (`LEFT JOIN strategy_instance`; only a filled plan has one, so every other plan reads null) and moving the open moves it. Not written since 0.41.0, not named at all since 0.43.0 and not created on a fresh database; existing databases lose the column in the Owner db-step after 0.43.0 (infra `scripts/release/db-steps.d/2026-10-03-td43-td73-drop-columns.md`) |
+| `trade_id` | The trade the plan turned into (was `strategy_instance_id`, renamed in 0.45.0), FK `strategy_plan_trade_id_fkey` ON DELETE RESTRICT; index `strategy_plan_trade` (partial, non-null). CHECK `strategy_plan_filled_instance_ck` (name kept): `(status = 'filled') = (trade_id IS NOT NULL)` — `link_fill` sets both |
+| `filled_at` | **Not a column (TD-43).** Reads return the linked trade's `opened_at` (`LEFT JOIN trade`; only a filled plan has one, so every other plan reads null) and moving the open moves it. Not written since 0.41.0, not named at all since 0.43.0 and not created on a fresh database; existing databases lose the column in the Owner db-step after 0.43.0 (infra `scripts/release/db-steps.d/2026-10-03-td43-td73-drop-columns.md`) |
 | `parent_strategy_plan_id` | The plan this one rolls. An intended plan is frozen — roll it rather than edit it |
 
 State machine and reads: [`strategy_plan.py`](../src/bifrost_core/monitor/reader/strategy_plan.py).
@@ -216,9 +244,9 @@ stamp and keeps the tags.
 
 | Column | Meaning |
 |--------|---------|
-| `strategy_instance_id` | UNIQUE, FK → `strategy_instance` ON DELETE RESTRICT (CASCADE before 0.41.0: a review is never deleted with its instance) |
-| `tags_added` | Tags the rules missed, as the trader wrote them (jsonb string array) |
-| `tags_dropped` | Keys of derived tags the trader says do not apply (jsonb string array) |
+| `trade_id` | UNIQUE (`trade_review_trade_id_key`), FK `trade_review_trade_id_fkey` → `trade` ON DELETE RESTRICT (CASCADE before 0.41.0: a review is never deleted with its trade). Was `strategy_instance_id` |
+| `tags_added_json` | Tags the rules missed, as the trader wrote them (jsonb string array). Was `tags_added` |
+| `tags_dropped_json` | Keys of derived tags the trader says do not apply (jsonb string array). Was `tags_dropped` |
 | ~~`note`~~ | **Dropped (TD-73).** Not read or written since 0.43.0 (a `note` key is refused) and not created on a fresh database; existing databases lose it in the Owner db-step after that release. A trade's notes live in the Research journal |
 | `reviewed_at` | Stamped on confirm (a second confirm keeps the first stamp); NULL = awaiting |
 
@@ -327,6 +355,7 @@ Reads and writes: [`saved_search.py`](../src/bifrost_core/monitor/reader/saved_s
 | — | 0.42.0 | No DDL. **Naming program R0 + R1 (decision pack 2026-10-03, D1–D11).** **R0, public response change (D9, TD-19):** the old keys go — `trade_count` from the performance summary, every `realized_by_*` row and the calendar rows (`fill_count` stays), `calendar_by_sec_type` OPT pair rows keep only `pair_count`, and the win-rate rows lose `total_instances` (`total_trades` stays). The writers' user-facing reasons say trade and fill instead of strategy instance / execution (`No trade 41.`, `3 fills are attributed to this trade.`, `This fill is split across 2 trades; send fill_splits: [] …`). **R1, additive:** new `monitor.reader.trade_names`; every reader row that carries an instance key now carries the trade name beside it with the same value — `trade_id` (= `strategy_instance_id`), `trade_label`, `trade_opened_at_epoch`, `fill_splits: [{trade_id, quantity, strategy_opportunity_id?, trade_label?}]` beside `instance_allocations`, `realized_by_trade` beside `realized_by_strategy_instance`, and on `trade_review` rows `tags_added_json` / `tags_dropped_json` beside `tags_added` / `tags_dropped`; strict deletes answer `trade_id` too. Writers (`insert_one_execution`, `update_one_execution`, `patch_execution`, `patch_review`, `PlanLinkFillBody`) take the new names as well; when both are sent the new one wins. IB's TradeID is not read by any Trade-side SQL, so `trade_id` in a reader row is always the Trade. New `monitor.reader.data_probe` + `StatusReader.get_data_probe()` (D8-A): activity per source, a sample count and the selective-clone groups (seed + FK closure from `pg_constraint`) so the Ops platform stops naming Trade tables. The tables keep their names until R3. Affected downstreams: **api** 0.7.0 (new routes and names, floor `bifrost-core>=0.42.0`); frontend — none required (it reads `fill_count` / `total_trades` since fe a25c2e8d); worker / Research / platform — none |
 | Wave 15 | 0.43.0 | **Column drops (TD-43 option B step 3/4, TD-73 option A; Owner-approved 2026-10-03).** `strategy_plan.filled_at`, `strategy_instance.notes` and `trade_review.note` leave `_ensure_tables` (a fresh database never has them) and core stops naming them: `filled_at` stays in plan reads as the instance's `opened_at` (unchanged since 0.41.0); `create_instance` / `update_instance` / `StatusReader.create_strategy_instance` / `update_strategy_instance` lose the `notes` parameter, `INSTANCE_PATCHABLE` loses `notes`, `REVIEW_PATCHABLE` and `_COLUMNS` lose `note`; `patch_instance` / `patch_review` / `save_review` refuse a `notes` / `note` key (WriteInvalid, naming the Research journal) rather than drop it; `StrategyInstanceCreateBody` / `StrategyInstanceUpdateBody` / `TradeReviewBody` lose the fields. Works with the columns present or absent, so the release goes first; **the DROP is not in db-init** — it is an Owner db-step run after the deliver (infra `scripts/release/db-steps.d/2026-10-03-td43-td73-drop-columns.md`: one transaction, refuses while any value is non-null; 0 non-null on DEV / STG / PROD, read 2026-10-03). Nothing in db-init adds them back (tested). Rollback after the drop: `ADD COLUMN` (and backfill `filled_at` from the instance's `opened_at` for filled plans), only needed below core 0.41.0. Affected downstreams: **api** 0.7.1 (floor `bifrost-core>=0.43.0`: `notes` / `note` leave the request bodies and `TradeRow`); frontend — none (reads `filled_at` from the API, sends no `notes` / `note`); worker / Research / platform — none |
 | — | 0.44.0 | No DDL. **Data probe publishes the optionable watchlist (Owner 2026-10-03, option A), additive.** `read_data_probe` / `StatusReader.get_data_probe()` gain `watchlist: {label: "optionable_stocks", symbols, count}` — `upper(trim(symbol))` of `watchlist` rows with `sec_type = 'STK' AND optionable AND trim(symbol) <> ''`, distinct and sorted; a missing table is `symbols: null, count: null, detail: "missing"`, never an empty list. The Ops platform's `GET /api/v1/watchlist/union` reads it over HTTP instead of selecting from `public.watchlist` by pod exec. Affected downstreams: **api** 0.7.2 (floor `bifrost-core>=0.44.0`; the route passes the reader's dict through); platform reads the new key; frontend / worker / Research — none |
+| Naming R3 | 0.45.0 | **DDL by an Owner step, not db-init (naming program R3; decision pack 2026-10-03 D1-A, D2-A, D7-A; Owner-approved).** Renames, one transaction per env ([`rename_trade_entity.py`](../src/bifrost_core/persistence/postgres/rename_trade_entity.py), `scripts/db/rename_trade_entity.py --env dev|stg|prod [--commit]`, ROLLBACK unless `--commit`; infra `scripts/release/db-steps.d/2026-10-04-r3-rename-trade-entity.md`): `strategy_instance` → **`trade`** (`strategy_instance_id` → `trade_id`; sequence, `trade_pkey`, `trade_id_account_uq`, `trade_strategy_opportunity_id_fkey`, indexes `trade_opportunity_id` / `trade_account_opened`); `strategy_instance_execution` → **`trade_execution`** (`trade_execution_id`, `trade_id`, `allocated_quantity` → **`split_quantity`**; sequence, `trade_execution_pkey` / `_trade_fk` / `_uq` / `_qty_ck`, indexes `trade_execution_whole_uq` / `_trade_ix`); `strategy_plan.strategy_instance_id` → `trade_id` (`strategy_plan_trade_id_fkey`, index `strategy_plan_trade`; the CHECK keeps its name `strategy_plan_filled_instance_ck`); `trade_review.strategy_instance_id` → `trade_id` (`trade_review_trade_id_fkey` / `_key`), `tags_added` / `tags_dropped` → `tags_added_json` / `tags_dropped_json`. No data is rewritten. **Env views:** `brokerage.executions` / `_final` / `_fly` / `_tws` output `trade_id` (the Trade), `ib_trade_id` / `ib_related_trade_id` (IB's TradeID / RelatedTradeID; Golden Source's own views keep the vendor names) and, one version, `strategy_instance_id` (= `trade_id`); new view **`brokerage.trade_fill_splits`** (`account_id, account_executions_id, trade_id, quantity, exec_id`). **Compatibility objects, one version (R4 drops them):** views `public.strategy_instance` (no `notes`), `public.strategy_instance_execution` (old column names, auto-updatable — core 0.44.0's whole-fill upsert `ON CONFLICT … WHERE allocated_quantity IS NULL` works through it) and `brokerage.instance_allocations` (over `trade_fill_splits`). Code: every SQL statement uses the new names and aliases them back to the row keys the API serves (unchanged: `strategy_instance_id` beside `trade_id` until R4); new [`trade_ddl.py`](../src/bifrost_core/persistence/postgres/trade_ddl.py) (the entity's DDL, moved out of `ddl.py`); `brokerage_tables.TRADE_EXECUTION` / `TRADE_FILL_SPLITS` (old `INSTANCE_EXECUTION` / `INSTANCE_ALLOCATION` alias them one version; `COMPAT_INSTANCE_ALLOCATIONS` names the compatibility view); `trade_ddl.TRADE_EXECUTION_DDL` (`STRATEGY_INSTANCE_EXECUTION_DDL` alias); wave 14 names the renamed constraints; `data_probe` picks the trade table from candidates (`trade`, then `strategy_instance`) and only a real table — never the compatibility view — seeds a clone group. **`_ensure_tables` refuses** (RuntimeError before its first change) while `public.strategy_instance` is a base table; `setup_fdw_foreign_tables` checks `public.trade_execution`. Retired: `td09_attribution` and `scripts/db/td09_migrate_attribution.py` (ran on dev / stg / prod 2026-10-03; they named the old tables). Reverse: `--reverse` (`rename_trade_entity_reverse.py`, embeds core 0.44.0's env view SQL) — run it **before** going back to core 0.44.0, whose db-init fails on the compatibility views. Rehearsed on DEV's schema (Postgres 16 and 17, DEV and STG/PROD view owners): dry run changes nothing; commit keeps every count; 0.45.0 db-init is a no-op after it; reverse restores an identical `pg_dump --schema-only`. Affected downstreams: **api** 0.7.3 (floor `bifrost-core>=0.45.0`; no SQL of its own); **platform** (reads only `/api/ops/data-probe`: `clone_groups[trades]` now seeds `trade`); worker / Flex / Research / frontend — none (they do not name these tables) |
 
 
 ## Brokerage tables
@@ -356,10 +385,12 @@ it. It is kept, not dropped, because the values are the only map back to the old
 
 Bridge tables remain per-env:
 
-- `strategy_instance_execution` (core 0.37.0) — see [above](#strategy_instance_execution-core-0370); keyed by the
-  fill (`account_id`, `exec_id`), not by a view id
+- `trade_execution` (core 0.37.0 as `strategy_instance_execution`, renamed in 0.45.0) — see
+  [above](#trade_execution-core-0370-as-strategy_instance_execution-renamed-in-0450); keyed by the fill
+  (`account_id`, `exec_id`), not by a view id
 - `account_execution_instance_allocation` — **frozen since core 0.37.0**: the splits before TD-09, keyed by the
-  unified `account_executions_id`. Kept for the rollback window; not written or read
+  unified `account_executions_id`. Not written or read; its FK follows `trade` (column name unchanged). Dropped in
+  naming R4 (D7-A, after exporting its rows)
 - `account_execution_option_stock_link` — links an option execution to the stock fill(s) of its exercise or
   assignment (`role` ∈ exercise · assignment); no FK at all
 
@@ -446,7 +477,9 @@ See also [BROKERAGE_GOLDEN_SOURCE.md](BROKERAGE_GOLDEN_SOURCE.md), [DAEMON_IPC_R
 
 ## Appendix — public columns (bifrost_dev, 2026-10-01)
 
-Generated from DEV `information_schema.columns` + `pg_constraint` on 2026-10-01 — the 18 base tables in `public`.
+Generated from DEV `information_schema.columns` + `pg_constraint` on 2026-10-01 — the 18 base tables in `public`;
+`trade`, `strategy_plan.trade_id` and `trade_review` are shown under their naming R3 names (core 0.45.0), and
+`trade_execution` (TD-09, after this snapshot) is documented in the section above.
 STG / PROD run the same `_ensure_tables()`; when a table here disagrees with `ddl.py`, the live DB wins and
 this appendix is stale — regenerate it. Meaning of the jsonb columns and the state machines is in the sections
 above; this is the type-level reference. "Unified execution id" = `brokerage.executions.account_executions_id`:
@@ -468,7 +501,7 @@ The one public view, `v_us_equity_universe`, is `market.v_us_equity_universe` (`
 | `account_execution_instance_allocation_id` | int8 | no | bigserial; PK |
 | `account_id` | text | no |  |
 | `account_executions_id` | int8 | no | UNIQUE (account_executions_id, strategy_instance_id); unified id of `brokerage.executions` (see below); no FK — the execution lives in Golden Source |
-| `strategy_instance_id` | int8 | no | UNIQUE (account_executions_id, strategy_instance_id); FK → `strategy_instance.strategy_instance_id` ON DELETE RESTRICT |
+| `strategy_instance_id` | int8 | no | UNIQUE (account_executions_id, strategy_instance_id); FK → `trade.trade_id` ON DELETE RESTRICT (column name kept: the table is frozen and goes in R4) |
 | `allocated_quantity` | float8 | no | signed share of the fill; the rows of one execution must sum to its signed quantity (checked in core, not by the DB) |
 | `created_at` | timestamptz | no | `now()` |
 | `updated_at` | timestamptz | no | `now()` |
@@ -590,16 +623,16 @@ The one public view, `v_us_equity_universe`, is `market.v_us_equity_universe` (`
 | `strategy_opportunity_id` | int8 | no | PK (strategy_allocation_id, strategy_opportunity_id); FK → `strategy_opportunity.strategy_opportunity_id` ON DELETE CASCADE |
 | `sort_order` | int4 | no | `0` |
 
-#### `strategy_instance`
+#### `trade` (was `strategy_instance`; after R3 that name is a compatibility view)
 
 | Column | Type | Null | Default / notes |
 |--------|------|------|-----------------|
-| `strategy_instance_id` | int8 | no | bigserial; PK |
+| `trade_id` | int8 | no | bigserial; PK (was `strategy_instance_id`) |
 | `strategy_opportunity_id` | int8 | no | FK → `strategy_opportunity.strategy_opportunity_id` ON DELETE RESTRICT |
 | `account_id` | text | no | IB account the instance trades in; allocation rows must match it |
 | `opened_at` | timestamptz | no | when the position was opened; a filled `strategy_plan.filled_at` is this value |
 | `label` | text | yes |  |
-| `notes` | text | yes | dropped after core 0.43.0 (TD-73); not on a fresh database |
+| `notes` | text | yes | dropped 2026-10-03 (TD-73); not on a fresh database |
 | `created_at` | timestamptz | no | `now()` |
 | `updated_at` | timestamptz | no | `now()` |
 
@@ -646,7 +679,7 @@ The one public view, `v_us_equity_universe`, is `market.v_us_equity_universe` (`
 | `intended_at` | timestamptz | yes |  |
 | `filled_at` | timestamptz | yes | not written since 0.41.0, not named since 0.43.0 (reads take the instance's `opened_at`); dropped after core 0.43.0 (TD-43); not on a fresh database |
 | `cancelled_at` | timestamptz | yes |  |
-| `strategy_instance_id` | int8 | yes | FK → `strategy_instance.strategy_instance_id` ON DELETE RESTRICT; CHECK `strategy_plan_filled_instance_ck` (set exactly when `status = 'filled'`) |
+| `trade_id` | int8 | yes | FK → `trade.trade_id` ON DELETE RESTRICT (was `strategy_instance_id`); CHECK `strategy_plan_filled_instance_ck` (set exactly when `status = 'filled'`) |
 | `parent_strategy_plan_id` | int8 | yes | FK → `strategy_plan.strategy_plan_id` ON DELETE SET NULL |
 | `created_at` | timestamptz | no | `now()` |
 | `updated_at` | timestamptz | no | `now()` |
@@ -696,10 +729,10 @@ The one public view, `v_us_equity_universe`, is `market.v_us_equity_universe` (`
 | Column | Type | Null | Default / notes |
 |--------|------|------|-----------------|
 | `trade_review_id` | int8 | no | bigserial; PK |
-| `strategy_instance_id` | int8 | no | FK → `strategy_instance.strategy_instance_id` ON DELETE RESTRICT; UNIQUE |
-| `tags_added` | jsonb | no | `'[]'` |
-| `tags_dropped` | jsonb | no | `'[]'` |
-| `note` | text | yes | dropped after core 0.43.0 (TD-73); not on a fresh database |
+| `trade_id` | int8 | no | FK → `trade.trade_id` ON DELETE RESTRICT; UNIQUE (was `strategy_instance_id`) |
+| `tags_added_json` | jsonb | no | `'[]'` (was `tags_added`) |
+| `tags_dropped_json` | jsonb | no | `'[]'` (was `tags_dropped`) |
+| `note` | text | yes | dropped 2026-10-03 (TD-73); not on a fresh database |
 | `reviewed_at` | timestamptz | yes | NULL = awaiting review |
 | `created_at` | timestamptz | no | `now()` |
 | `updated_at` | timestamptz | no | `now()` |

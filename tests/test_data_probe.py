@@ -1,8 +1,8 @@
 """data_probe (D8-A): what the Ops platform reads instead of naming Trade tables.
 
 The unit tests script the database; the ``db`` tests run the FK closure on the real
-schema, where ``trades`` must hold every table ``TRUNCATE strategy_instance CASCADE``
-would empty.
+schema, where ``trades`` must hold every table ``TRUNCATE trade CASCADE`` would empty
+(``strategy_instance`` before naming R3; a compatibility view of that name is never a seed).
 """
 
 from __future__ import annotations
@@ -19,15 +19,17 @@ from write_fakes import FakeConn, Reply
 STAMP = datetime(2031, 3, 4, 14, 30, tzinfo=timezone.utc)
 
 
-def _scripted(missing: str = "") -> FakeConn:
-    rules = []
-    if missing:
-        rules.append(("SELECT to_regclass(%s) IS NOT NULL", Reply(one=(False,), once=True)))
+IS_TABLE = "SELECT EXISTS (SELECT 1 FROM pg_class WHERE oid = to_regclass(%s)"
+
+
+def _scripted(missing: int = 0) -> FakeConn:
+    """``missing``: how many of the first table lookups answer "no such table"."""
+    rules = [(IS_TABLE, Reply(one=(False,), once=True)) for _ in range(missing)]
     rules += [
-        ("SELECT to_regclass(%s) IS NOT NULL", Reply(one=(True,))),
+        (IS_TABLE, Reply(one=(True,))),
         ("SELECT max(", Reply(one=(STAMP,))),
-        ("SELECT count(*) FROM strategy_instance", Reply(one=(12,))),
-        ("WITH RECURSIVE closure", Reply(all=[("strategy_instance",), ("strategy_plan",), ("trade_review",)])),
+        ("SELECT count(*) FROM trade", Reply(one=(12,))),
+        ("WITH RECURSIVE closure", Reply(all=[("strategy_plan",), ("trade",), ("trade_execution",), ("trade_review",)])),
         ("SELECT DISTINCT upper(trim(symbol))", Reply(all=[("QQAA",), ("QQBB",)])),
     ]
     return FakeConn(rules)
@@ -45,7 +47,7 @@ def test_the_probe_answers_by_role() -> None:
     trades = out["clone_groups"][0]
     assert trades["name"] == "trades"
     # the seed first, then what references it
-    assert trades["tables"] == ["strategy_instance", "strategy_plan", "trade_review"]
+    assert trades["tables"] == ["trade", "strategy_plan", "trade_execution", "trade_review"]
     assert [g["name"] for g in out["clone_groups"]] == ["trades", "rules", "position_categories", "watchlist"]
     assert out["watchlist"] == {"label": "optionable_stocks", "symbols": ["QQAA", "QQBB"], "count": 2}
 
@@ -60,16 +62,33 @@ def test_the_watchlist_filter_is_the_platforms_old_select() -> None:
 
 
 def test_a_missing_watchlist_is_null_not_an_empty_list() -> None:
-    conn = FakeConn([("SELECT to_regclass(%s) IS NOT NULL", Reply(one=(False,)))])
+    conn = FakeConn([(IS_TABLE, Reply(one=(False,)))])
     with conn.cursor() as cur:
         out = data_probe._watchlist(cur)
     assert out == {"label": "optionable_stocks", "symbols": None, "count": None, "detail": "missing"}
 
 
 def test_a_missing_source_is_reported_not_dropped() -> None:
-    out = data_probe.read_data_probe(_scripted(missing="first"))
+    # neither trade nor strategy_instance is a table
+    out = data_probe.read_data_probe(_scripted(missing=2))
     assert out["activity"][0] == {"source": "trades", "last_ts": None, "detail": "missing"}
     assert len(out["activity"]) == 3
+
+
+def test_a_database_before_r3_answers_with_strategy_instance() -> None:
+    """Not renamed yet (or rolled back): ``trade`` is no table, ``strategy_instance`` is."""
+    conn = _scripted(missing=1)
+    out = data_probe.read_data_probe(conn)
+    assert out["activity"][0] == {"source": "trades", "last_ts": "2031-03-04T14:30:00Z"}
+    looked_up = [params[0] for text, params in conn.executed if text.startswith(IS_TABLE)]
+    assert looked_up[:2] == ["trade", "strategy_instance"]
+    assert any("FROM strategy_instance" in text for text, _ in conn.executed)
+
+
+def test_the_trade_table_is_named_trade_first() -> None:
+    assert data_probe.TRADE_TABLES == ("trade", "strategy_instance")
+    assert data_probe.CLONE_GROUPS[0][1] == (data_probe.TRADE_TABLES,)
+    assert data_probe.SAMPLE == ("trades", data_probe.TRADE_TABLES)
 
 
 def test_the_reader_turns_a_failed_read_into_read_failed(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -87,9 +106,10 @@ def test_the_trades_group_is_what_truncate_cascade_would_empty(pg_conn) -> None:
     out = data_probe.read_data_probe(pg_conn)
     groups = {g["name"]: g for g in out["clone_groups"]}
     trades = groups["trades"]["tables"]
-    assert trades[0] == "strategy_instance"
-    for child in ("strategy_instance_execution", "strategy_plan", "trade_review"):
+    assert trades[0] == "trade"
+    for child in ("trade_execution", "strategy_plan", "trade_review", "account_execution_instance_allocation"):
         assert child in trades
+    assert "strategy_instance" not in trades  # a compatibility view is never cloned
     # The opportunity group holds the trades group: a trade references its opportunity.
     assert set(trades) <= set(groups["rules"]["tables"])
     assert groups["watchlist"]["tables"][0] == "watchlist"

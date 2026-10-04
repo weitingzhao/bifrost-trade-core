@@ -28,7 +28,8 @@ ACCT = "U0000001"
 CFG = {"sink": "postgres"}
 RAW = ("executions_raw_flex", "executions_raw_tws", "executions_raw_journal")
 OPENED = datetime(2026, 9, 1, 14, 30, tzinfo=timezone.utc)
-DROPPED = (("strategy_plan", "filled_at", "timestamptz"), ("strategy_instance", "notes", "text"), ("trade_review", "note", "text"))
+# strategy_instance is ``trade`` since naming R3 (core 0.45.0).
+DROPPED = (("strategy_plan", "filled_at", "timestamptz"), ("trade", "notes", "text"), ("trade_review", "note", "text"))
 
 
 class _Savepointed:
@@ -61,7 +62,7 @@ def _present(conn: Any) -> Dict[str, bool]:
         cur.execute(
             "SELECT table_name || '.' || column_name FROM information_schema.columns "
             "WHERE table_schema = 'public' AND (table_name, column_name) IN "
-            "(('strategy_plan', 'filled_at'), ('strategy_instance', 'notes'), ('trade_review', 'note'))"
+            "(('strategy_plan', 'filled_at'), ('trade', 'notes'), ('trade_review', 'note'))"
         )
         found = {r[0] for r in cur.fetchall()}
     return {f"{t}.{c}": f"{t}.{c}" in found for t, c, _ in DROPPED}
@@ -176,6 +177,6 @@ def test_old_columns_stay_unwritten_while_they_exist(db, pg_conn) -> None:
     )[0]
     strategy_plan.link_fill(CFG, plan, inst)
     trade_review.patch_review(CFG, inst, {"reviewed": True})
-    assert _one(db, "SELECT count(notes) FROM strategy_instance") == (0,)
+    assert _one(db, "SELECT count(notes) FROM trade") == (0,)
     assert _one(db, "SELECT count(filled_at) FROM strategy_plan") == (0,)
     assert _one(db, "SELECT count(note) FROM trade_review") == (0,)

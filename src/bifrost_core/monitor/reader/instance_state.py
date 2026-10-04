@@ -6,7 +6,7 @@ and Review's ``instanceOf``):
 
 - The instance's OPT fills are grouped per contract (``contract_key``; when it is empty,
   ``SYMBOL|OPT|YYYYMMDD|STRIKE|R`` from the fill's parts). A fill attributed whole counts
-  its quantity; a split fill counts the instance's share (``allocated_quantity``). Buys
+  its quantity; a split fill counts the instance's share (``split_quantity``). Buys
   (BUY / BOT / B) add, sells (SELL / SLD / S) subtract.
 - A leg is flat when ``|net| < 1e-9``; its last fill date (``trade_date``, else the fill
   time's New York date) is the day it went flat.
@@ -31,7 +31,7 @@ from datetime import date, datetime
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 from zoneinfo import ZoneInfo
 
-from bifrost_core.persistence.postgres.brokerage_tables import EXECUTIONS, INSTANCE_EXECUTION
+from bifrost_core.persistence.postgres.brokerage_tables import EXECUTIONS, TRADE_EXECUTION
 
 INSTANCE_STATES = ("no_fills", "open", "expired", "closed")
 CLOSED_STATES = ("expired", "closed")
@@ -100,7 +100,7 @@ def derive_state(legs: Iterable[InstanceLeg], today: date) -> Tuple[str, Optiona
 # Flex row, else the TWS row, plus journal rows), joined on the fill's (account_id, exec_id).
 _LEGS_SQL = f"""
     WITH fills AS (
-        SELECT sie.strategy_instance_id AS sid,
+        SELECT sie.trade_id AS sid,
                COALESCE(
                    NULLIF(trim(e.contract_key), ''),
                    split_part(COALESCE(e.symbol, ''), ' ', 1) || '|OPT|'
@@ -112,12 +112,12 @@ _LEGS_SQL = f"""
                CASE WHEN upper(trim(COALESCE(e.side, ''))) IN ('BUY', 'BOT', 'B') THEN 1
                     WHEN upper(trim(COALESCE(e.side, ''))) IN ('SELL', 'SLD', 'S') THEN -1
                     ELSE 0 END
-                 * abs(COALESCE(sie.allocated_quantity::double precision, e.quantity, 0)) AS signed_qty,
+                 * abs(COALESCE(sie.split_quantity::double precision, e.quantity, 0)) AS signed_qty,
                COALESCE(e.trade_date, (e.exec_time AT TIME ZONE 'America/New_York')::date) AS fill_on
-        FROM {INSTANCE_EXECUTION} sie
+        FROM {TRADE_EXECUTION} sie
         JOIN {EXECUTIONS} e ON e.account_id = sie.account_id AND e.exec_id = sie.exec_id
         WHERE upper(trim(COALESCE(e.sec_type, ''))) = 'OPT'
-          AND (%(ids)s::bigint[] IS NULL OR sie.strategy_instance_id = ANY(%(ids)s::bigint[]))
+          AND (%(ids)s::bigint[] IS NULL OR sie.trade_id = ANY(%(ids)s::bigint[]))
     )
     SELECT sid, contract_key, min(expiry) AS expiry, sum(signed_qty) AS net_qty, max(fill_on) AS last_fill_on
     FROM fills
