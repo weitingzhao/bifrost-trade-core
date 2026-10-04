@@ -34,7 +34,6 @@ from bifrost_core.persistence.postgres.brokerage_tables import (
 from bifrost_core.monitor.reader import market as market_module
 from bifrost_core.monitor.reader import write_support as ws
 from bifrost_core.monitor.reader.errors import WriteConflict, WriteFailed, WriteInvalid, WriteNotFound
-from bifrost_core.monitor.reader.trade_names import add_trade_names, fields_as_instance
 from bifrost_core.portfolio.contract_key import TWS_SOURCES, tws_execution_opt_key
 from bifrost_core.portfolio.signed_qty import signed_qty
 from bifrost_core.portfolio.reader.accounts_helpers import (
@@ -66,8 +65,8 @@ def _normalized_signed_qty_from_raw(source: Any, side: Any, quantity: Any) -> fl
 # rows carry their share. Golden Source's raw strategy_* columns are no longer written.
 
 OPPORTUNITY_ONLY = (
-    "A fill is attributed to a trade (strategy_instance_id); its opportunity is the trade's. "
-    "Send strategy_instance_id."
+    "A fill is attributed to a trade (trade_id); its opportunity is the trade's. "
+    "Send trade_id."
 )
 
 
@@ -158,13 +157,13 @@ def _direct_instance(fields: Dict[str, Any]) -> Tuple[bool, Optional[int], Optio
     The opportunity is the instance's and is not stored; sent alone (non-null) it is
     refused by the callers (OPPORTUNITY_ONLY). ``strategy_opportunity_id: null`` alone
     changes nothing."""
-    touches = "strategy_instance_id" in fields
-    inst = fields.get("strategy_instance_id")
+    touches = "trade_id" in fields
+    inst = fields.get("trade_id")
     opp = fields.get("strategy_opportunity_id")
     return touches, (int(inst) if inst is not None else None), (int(opp) if opp is not None else None)
 
 
-def _apply_instance_allocations_on_cursor(
+def _apply_fill_splits_on_cursor(
     cur: Any,
     account_executions_id: int,
     raw_tbl: str,
@@ -195,8 +194,8 @@ def _apply_instance_allocations_on_cursor(
     for item in body_allocations:
         if not isinstance(item, dict):
             return False
-        si_raw = item.get("strategy_instance_id")
-        aq_raw = item.get("allocated_quantity")
+        si_raw = item.get("trade_id")
+        aq_raw = item.get("quantity")
         if si_raw is None or aq_raw is None:
             return False
         try:
@@ -233,7 +232,7 @@ def _apply_instance_allocations_on_cursor(
     return True
 
 
-def replace_execution_instance_allocations(
+def replace_execution_fill_splits(
     status_config: dict,
     account_executions_id: int,
     body_allocations: Any,
@@ -251,7 +250,7 @@ def replace_execution_instance_allocations(
         golden = ws.open_conn(status_config, golden=True)
         try:
             with conn.cursor() as cur, golden.cursor() as gcur:
-                if not _apply_instance_allocations_on_cursor(
+                if not _apply_fill_splits_on_cursor(
                     cur, account_executions_id, raw_tbl, pk_col, pk_val, body_allocations, raw_cur=gcur
                 ):
                     conn.rollback()
@@ -264,7 +263,7 @@ def replace_execution_instance_allocations(
             conn.close()
             golden.close()
     except Exception as e:
-        logger.warning("replace_execution_instance_allocations failed: %s", e)
+        logger.warning("replace_execution_fill_splits failed: %s", e)
         return False
 
 
@@ -635,9 +634,9 @@ def get_accounts_from_tables(
                             f"""
                             SELECT u.contract_key,
                                    u.strategy_opportunity_id,
-                                   u.trade_id AS strategy_instance_id,
+                                   u.trade_id,
                                    so.name AS strategy_opportunity_name,
-                                   si.label AS strategy_instance_label
+                                   si.label AS trade_label
                             FROM (
                                 SELECT DISTINCT contract_key, strategy_opportunity_id, trade_id
                                 FROM (
@@ -669,13 +668,12 @@ def get_accounts_from_tables(
                             link: Dict[str, Any] = {}
                             if sl_row.get("strategy_opportunity_id") is not None:
                                 link["strategy_opportunity_id"] = int(sl_row["strategy_opportunity_id"])
-                            if sl_row.get("strategy_instance_id") is not None:
-                                link["strategy_instance_id"] = int(sl_row["strategy_instance_id"])
+                            if sl_row.get("trade_id") is not None:
+                                link["trade_id"] = int(sl_row["trade_id"])
                             if sl_row.get("strategy_opportunity_name"):
                                 link["strategy_opportunity_name"] = str(sl_row["strategy_opportunity_name"]).strip()
-                            if sl_row.get("strategy_instance_label"):
-                                link["strategy_instance_label"] = str(sl_row["strategy_instance_label"]).strip()
-                            add_trade_names(link)  # trade_id / trade_label beside them (naming R1)
+                            if sl_row.get("trade_label"):
+                                link["trade_label"] = str(sl_row["trade_label"]).strip()
                             if link:
                                 strat_links_map.setdefault(ck, []).append(link)
                 except Exception as sl_err:
@@ -1163,7 +1161,7 @@ def insert_one_execution(status_config: dict, body: Dict[str, Any]) -> Optional[
     若未提供 exec_id 则生成 manual_<uuid> 以便可写 commission 表。"""
     if not status_config or (status_config.get("sink") != "postgres" and not status_config.get("postgres")):
         return None
-    body = fields_as_instance(body)  # trade_id / fill_splits read as the instance names (naming R1)
+    # trade_id / fill_splits only (strategy_instance_id / instance_allocations before core 0.47.0, naming R4).
     account_id = body.get("account_id") or ""
     exec_time = body.get("time")
     symbol = (body.get("symbol") or "").strip()
@@ -1188,10 +1186,10 @@ def insert_one_execution(status_config: dict, body: Dict[str, Any]) -> Optional[
     if raw_extra is not None and not isinstance(raw_extra, str):
         raw_extra = json.dumps(raw_extra) if raw_extra else None
     try:
-        _, strategy_instance_id, strategy_opportunity_id = _direct_instance(body)
+        _, trade_id, strategy_opportunity_id = _direct_instance(body)
     except (TypeError, ValueError):
         return None
-    if strategy_instance_id is None and strategy_opportunity_id is not None:
+    if trade_id is None and strategy_opportunity_id is not None:
         logger.warning("insert_one_execution refused: %s", OPPORTUNITY_ONLY)
         return None
     exec_dt = _exec_time_to_dt(exec_time)
@@ -1248,23 +1246,23 @@ def insert_one_execution(status_config: dict, body: Dict[str, Any]) -> Optional[
                         """,
                         (exec_id, commission, currency or None, realized_pnl),
                     )
-                if new_id is not None and strategy_instance_id is not None:
+                if new_id is not None and trade_id is not None:
                     acc_key = str(account_id or "").strip()
-                    problem = _instance_problem(env_cur, strategy_instance_id, acc_key, strategy_opportunity_id)
+                    problem = _instance_problem(env_cur, trade_id, acc_key, strategy_opportunity_id)
                     if problem is not None:
                         logger.warning("insert_one_execution refused: %s", problem)
                         env_conn.rollback()
                         golden.rollback()
                         return None
-                    _set_whole_attribution(env_cur, acc_key, exec_id, strategy_instance_id)
-                if new_id is not None and body.get("instance_allocations") is not None:
-                    ia = body.get("instance_allocations")
+                    _set_whole_attribution(env_cur, acc_key, exec_id, trade_id)
+                if new_id is not None and body.get("fill_splits") is not None:
+                    ia = body.get("fill_splits")
                     if not isinstance(ia, list):
                         env_conn.rollback()
                         golden.rollback()
                         return None
                     rtbl, rpkc, rpkv = _raw_table_pk_for_account_executions_id(new_id)
-                    if not _apply_instance_allocations_on_cursor(
+                    if not _apply_fill_splits_on_cursor(
                         env_cur, new_id, rtbl, rpkc, rpkv, ia, raw_cur=cur
                     ):
                         env_conn.rollback()
@@ -1421,12 +1419,12 @@ def upsert_account_transactions(status_config: dict, rows: List[Dict[str, Any]])
 
 
 def update_one_execution(status_config: dict, account_executions_id: int, body: Dict[str, Any]) -> bool:
-    """R-A2 扩展：按 account_executions_id 更新一条执行记录（手动修正）。写入物理表 executions_raw_flex / executions_raw_tws / executions_raw_journal（与 account_executions 视图编码一致）；不可 UPDATE 联合视图本身。body 可含任意子集：time, symbol, … strategy_opportunity_id, strategy_instance_id；以及 commission, realized_pnl, currency（写 account_execution_commissions）。"""
+    """R-A2 扩展：按 account_executions_id 更新一条执行记录（手动修正）。写入物理表 executions_raw_flex / executions_raw_tws / executions_raw_journal（与 account_executions 视图编码一致）；不可 UPDATE 联合视图本身。body 可含任意子集：time, symbol, … strategy_opportunity_id, trade_id；以及 commission, realized_pnl, currency（写 account_execution_commissions）。"""
     if not status_config or (status_config.get("sink") != "postgres" and not status_config.get("postgres")):
         return False
-    body = fields_as_instance(body)  # trade_id / fill_splits read as the instance names (naming R1)
+    # trade_id / fill_splits only (strategy_instance_id / instance_allocations before core 0.47.0, naming R4).
     # 可更新列（与 raw 表一致）
-    # strategy_opportunity_id / strategy_instance_id go to this env's
+    # strategy_opportunity_id / trade_id go to this env's
     # trade_execution (TD-09), not to the raw row.
     exec_cols = ("exec_time", "symbol", "sec_type", "side", "quantity", "price", "account_id", "source", "expiry", "strike", "option_right", "exchange", "order_id", "cum_qty", "contract_key")
     commission_keys = ("commission", "realized_pnl", "currency")
@@ -1502,18 +1500,18 @@ def update_one_execution(status_config: dict, account_executions_id: int, body: 
                         return False
                 elif (
                     not any(k in body for k in commission_keys)
-                    and "instance_allocations" not in body
+                    and "fill_splits" not in body
                     and not touches_whole
                 ):
                     return False
-                if "instance_allocations" in body:
-                    ia = body.get("instance_allocations")
+                if "fill_splits" in body:
+                    ia = body.get("fill_splits")
                     if ia is not None and not isinstance(ia, list):
                         golden.rollback()
                         env_conn.rollback()
                         return False
                     if ia is not None:
-                        if not _apply_instance_allocations_on_cursor(
+                        if not _apply_fill_splits_on_cursor(
                             env_cur, account_executions_id, raw_tbl, pk_col, pk_val, ia, raw_cur=cur
                         ):
                             golden.rollback()
@@ -1526,9 +1524,9 @@ def update_one_execution(status_config: dict, account_executions_id: int, body: 
                         return False
                     if direct_instance is not None:
                         problem = _instance_problem(env_cur, direct_instance, new_account, direct_opportunity)
-                        if problem is None and body.get("instance_allocations"):
+                        if problem is None and body.get("fill_splits"):
                             problem = "send fill_splits or trade_id, not both"
-                        if problem is None and "instance_allocations" not in body:
+                        if problem is None and "fill_splits" not in body:
                             if _split_count(env_cur, new_account, exec_id_key):
                                 problem = "the fill is split across trades; send fill_splits: []"
                         if problem is not None:
@@ -1614,7 +1612,7 @@ def delete_one_execution(status_config: dict, account_executions_id: int) -> boo
 # (TD-09). Both writers below hold one transaction on each, check everything before
 # writing, and commit Golden Source first, as update_one_execution / delete_one_execution do.
 
-EXECUTION_PATCHABLE = ("strategy_opportunity_id", "strategy_instance_id", "instance_allocations")
+EXECUTION_PATCHABLE = ("strategy_opportunity_id", "trade_id", "fill_splits")
 _GOLDEN_RAW_TABLES = (
     GOLDEN_EXECUTIONS_RAW_TWS,
     GOLDEN_EXECUTIONS_RAW_FLEX,
@@ -1642,38 +1640,36 @@ def _execution_attribution(env_cur: Any, account_executions_id: int, account_id:
             whole = (int(r[0]), opp)
             continue
         item: Dict[str, Any] = {
-            "strategy_instance_id": int(r[0]),
-            "allocated_quantity": float(r[1]),
+            "trade_id": int(r[0]),
+            "quantity": float(r[1]),
             "strategy_opportunity_id": opp,
         }
         if r[2] is not None and str(r[2]).strip():
-            item["strategy_instance_label"] = str(r[2]).strip()
+            item["trade_label"] = str(r[2]).strip()
         allocations.append(item)
-    return add_trade_names(
-        {
-            "account_executions_id": int(account_executions_id),
-            "account_id": account_id,
-            "strategy_opportunity_id": whole[1] if whole else None,
-            "strategy_instance_id": whole[0] if whole else None,
-            "instance_allocations": allocations,
-        }
-    )
+    return {
+        "account_executions_id": int(account_executions_id),
+        "account_id": account_id,
+        "strategy_opportunity_id": whole[1] if whole else None,
+        "trade_id": whole[0] if whole else None,
+        "fill_splits": allocations,
+    }
 
 
 def patch_execution(status_config: Any, account_executions_id: int, fields: Dict[str, Any]) -> Dict[str, Any]:
     """Change an execution's strategy attribution; return its attribution fields.
 
-    Returns ``{account_executions_id, account_id, strategy_opportunity_id, strategy_instance_id,
-    instance_allocations: [{strategy_instance_id, allocated_quantity, strategy_opportunity_id,
-    strategy_instance_label?}]}`` -- the attribution keys of a GET /executions item -- with
-    ``trade_id`` and ``fill_splits: [{trade_id, quantity, ...}]`` beside them (naming R1).
+    Returns ``{account_executions_id, account_id, strategy_opportunity_id, trade_id,
+    fill_splits: [{trade_id, quantity, strategy_opportunity_id,
+    trade_label?}]}`` -- the attribution keys of a GET /executions item (the instance names
+    beside them before core 0.47.0, naming R4).
 
-    Patchable: ``strategy_instance_id`` (null clears the whole-fill attribution),
+    Patchable: ``trade_id`` (null clears the whole-fill attribution),
     ``strategy_opportunity_id`` (not stored -- it is the instance's: sent with an instance it
-    must match it, sent alone it is WriteInvalid unless null) and ``instance_allocations``
+    must match it, sent alone it is WriteInvalid unless null) and ``fill_splits``
     (the splits, replaced whole; ``[]`` removes them). An execution is attributed one way or
     the other: non-empty splits together with an instance is WriteInvalid; setting an
-    instance on an execution that has splits, without ``instance_allocations: []`` in the
+    instance on an execution that has splits, without ``fill_splits: []`` in the
     same patch, is WriteConflict. The instance must exist and be on the execution's account,
     and splits must name distinct instances of that account and add up to the execution's
     quantity (WriteInvalid otherwise). The write goes to this env's
@@ -1683,15 +1679,15 @@ def patch_execution(status_config: Any, account_executions_id: int, fields: Dict
     Raises WriteInvalid, WriteNotFound, WriteConflict, WriteFailed.
     """
     what = f"execution {account_executions_id}"
-    # trade_id / fill_splits ({trade_id, quantity}) are taken too; the new name wins (naming R1).
-    fields = ws.check_fields(fields_as_instance(fields), EXECUTION_PATCHABLE, "execution")
+    # strategy_instance_id / instance_allocations are unknown keys since core 0.47.0 (naming R4).
+    fields = ws.check_fields(fields, EXECUTION_PATCHABLE, "execution")
     direct: Dict[str, Any] = {}
-    for name in ("strategy_opportunity_id", "strategy_instance_id"):
+    for name in ("strategy_opportunity_id", "trade_id"):
         if name in fields:
             direct[name] = ws.row_id(fields[name], name, nullable=True)
     splits: Optional[List[Dict[str, Any]]] = None
-    if "instance_allocations" in fields:
-        splits = ws.list_value(fields["instance_allocations"], "instance_allocations")
+    if "fill_splits" in fields:
+        splits = ws.list_value(fields["fill_splits"], "fill_splits")
         if any(not isinstance(item, dict) for item in splits):
             raise WriteInvalid("fill_splits must be a list of {trade_id, quantity}.")
     touches_whole, instance_id, opportunity_id = _direct_instance(direct)
@@ -1726,7 +1722,7 @@ def patch_execution(status_config: Any, account_executions_id: int, fields: Dict
                                 "send fill_splits: [] with the trade to replace the split."
                             )
                 if splits is not None:
-                    if not _apply_instance_allocations_on_cursor(
+                    if not _apply_fill_splits_on_cursor(
                         ecur, account_executions_id, raw_tbl, pk_col, pk_val, splits, raw_cur=gcur
                     ):
                         raise WriteInvalid(

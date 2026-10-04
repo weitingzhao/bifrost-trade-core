@@ -89,18 +89,13 @@ class PlanUpdateBody(BaseModel):
 class PlanLinkFillBody(BaseModel):
     """Say which open trade this plan turned into. The fill happened in TWS.
 
-    ``trade_id`` is the name (naming R1, core 0.42.0); ``strategy_instance_id`` is still
-    read for one release and loses when both are sent. Either way both are set after
-    validation, so a caller may read either."""
+    ``trade_id`` (``strategy_instance_id`` was read beside it from core 0.42.0 to 0.46.x;
+    naming R4 drops it)."""
 
     trade_id: Optional[int] = None
-    strategy_instance_id: Optional[int] = None
 
     @model_validator(mode="after")
     def _one_trade(self) -> "PlanLinkFillBody":
         if self.trade_id is None:
-            self.trade_id = self.strategy_instance_id
-        if self.trade_id is None:
             raise ValueError("trade_id is required")
-        self.strategy_instance_id = self.trade_id
         return self

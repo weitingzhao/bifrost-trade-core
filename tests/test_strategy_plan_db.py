@@ -137,7 +137,7 @@ def test_a_plan_walks_draft_to_intended_to_filled(plans, pg_conn) -> None:
     assert plans.link_fill(cfg, plan_id, instance_id) is True
     row = plans.get_plan(cfg, plan_id)
     assert row["status"] == "filled"
-    assert row["strategy_instance_id"] == instance_id
+    assert row["trade_id"] == instance_id
     # The fill time is the instance's own open, not the moment someone linked it.
     assert abs((row["filled_at"] - opened).total_seconds()) < 1
     with pytest.raises(PlanRuleError, match="cannot be cancelled"):

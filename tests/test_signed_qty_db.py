@@ -177,7 +177,7 @@ def _legacy_attribution(conn: Any) -> Dict[tuple, float]:
     with conn.cursor() as cur:
         cur.execute(
             f"""
-            SELECT e.contract_key, e.strategy_instance_id, SUM({LEGACY_FINAL_ROW})
+            SELECT e.contract_key, e.trade_id, SUM({LEGACY_FINAL_ROW})
             FROM brokerage.executions_final e WHERE e.account_id = %s AND e.sec_type = 'STK'
             GROUP BY 1, 2
             UNION ALL
@@ -193,9 +193,9 @@ def _legacy_attribution(conn: Any) -> Dict[tuple, float]:
 def test_attribution_sum_is_unchanged(pg_conn: Any, book: Dict[str, Any]) -> None:
     rows = executions_reader.get_position_instance_attribution(pg_conn, account_id=ACCOUNT)
     got = {
-        (r["contract_key"], r["strategy_instance_id"]): float(r["open_qty_est"])
+        (r["contract_key"], r["trade_id"]): float(r["open_qty_est"])
         for r in rows
-        if r.get("strategy_instance_id") is not None
+        if r.get("trade_id") is not None
     }
     assert got == _legacy_attribution(pg_conn)
     assert got == {

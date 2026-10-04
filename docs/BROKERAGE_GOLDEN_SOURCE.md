@@ -104,19 +104,20 @@ columns in the same order, except:
 | `trade_id` | `ib_trade_id` | IB Flex TradeID (vendor); renamed so the env has one `trade_id` (TD-13) |
 | `related_trade_id` | `ib_related_trade_id` | IB Flex RelatedTradeID (vendor) |
 | `strategy_opportunity_id` | `strategy_opportunity_id` | The env trade's opportunity (not the frozen raw column) |
-| `strategy_instance_id` | `trade_id`, then `strategy_instance_id` | `trade_id`: the env's Trade from the whole-fill row of `public.trade_execution`; `strategy_instance_id` (= `trade_id`) only for one version, for pods on core < 0.45.0 — R4 drops it |
+| `strategy_instance_id` | `trade_id` | The env's Trade from the whole-fill row of `public.trade_execution` (core 0.45.0–0.46.x also output `strategy_instance_id` = `trade_id` after it, for pods on core < 0.45.0; naming R4, core 0.47.0, dropped it) |
 
 Env-only views: `brokerage.trade_fill_splits` (`account_id`, `account_executions_id`, `trade_id`, `quantity`,
-`exec_id` — one row per raw representation of each split fill) and, one version, `brokerage.instance_allocations`
-over it with core 0.44.0's columns (`strategy_instance_id`, `allocated_quantity`). Before R3 (core 0.37.0–0.44.0) the
-env views had Golden Source's columns exactly, with `strategy_instance_id` meaning this env's attribution.
+`exec_id` — one row per raw representation of each split fill). Core 0.45.0–0.46.x also made
+`brokerage.instance_allocations` over it with core 0.44.0's columns; the naming R4 step (core 0.47.0) drops it and
+rebuilds the env views (db-init's FDW step is skipped in dev / stg / prod). Before R3 (core 0.37.0–0.44.0) the env views had Golden Source's columns exactly, with `strategy_instance_id`
+meaning this env's attribution.
 
 ## Bridge tables (per-env)
 
 - `trade_execution` (core 0.37.0 as `strategy_instance_execution`; renamed in 0.45.0) — the trade attribution of
   a fill, whole or split (`split_quantity`); keyed by (`account_id`, `exec_id`), composite FK to `trade`
-- `account_execution_instance_allocation` — **frozen since core 0.37.0**: the splits before TD-09, keyed by the
-  unified execution id; no longer written or read (the TD-09 migration read it); dropped in naming R4
+- `account_execution_instance_allocation` — the splits before TD-09, keyed by the unified execution id; frozen from
+  core 0.37.0, no longer created from 0.47.0 and dropped by the Owner's naming R4 step after a CSV export (D7-A)
 - `account_execution_option_stock_link` — option execution ↔ stock fill(s) of its exercise / assignment;
   no FK at all (both ends are unified execution ids)
 

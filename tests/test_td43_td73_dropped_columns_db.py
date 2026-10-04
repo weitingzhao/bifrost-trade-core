@@ -140,7 +140,7 @@ def test_trade_plan_and_review_round_trip(db) -> None:
     assert inst is not None
     row = strategy_instance.get_instance_by_id(db, inst)
     assert row["label"] == "ZZQ Oct 40P" and "notes" not in row
-    assert [r["strategy_instance_id"] for r in strategy_instance.list_instances(db, account_id=ACCT)] == [inst]
+    assert [r["trade_id"] for r in strategy_instance.list_instances(db, account_id=ACCT)] == [inst]
     row = strategy_instance.patch_instance(CFG, inst, {"label": "ZZQ roll"})
     assert row["label"] == "ZZQ roll"
 
@@ -157,10 +157,10 @@ def test_trade_plan_and_review_round_trip(db) -> None:
     strategy_instance.patch_instance(CFG, inst, {"opened_at": moved.isoformat()})
     assert [p["filled_at"] for p in strategy_plan.list_plans(CFG, status="filled", account_id=ACCT)] == [moved]
 
-    review = trade_review.patch_review(CFG, inst, {"tags_added": ["early exit"], "reviewed": True})
+    review = trade_review.patch_review(CFG, inst, {"tags_added_json": ["early exit"], "reviewed": True})
     assert review["reviewed"] is True and "note" not in review
     assert trade_review.save_review(CFG, inst, {"reviewed": False})["reviewed"] is False
-    assert [r["strategy_instance_id"] for r in trade_review.list_reviews(CFG)] == [inst]
+    assert [r["trade_id"] for r in trade_review.list_reviews(CFG)] == [inst]
 
 
 def test_old_columns_stay_unwritten_while_they_exist(db, pg_conn) -> None:

@@ -158,10 +158,10 @@ def test_plan_patch_and_strict_delete_in_postgres(db) -> None:
 
 def test_review_patch_in_postgres(db) -> None:
     ids = _seed_rule_chain(db)
-    row = trade_review.patch_review(db, ids["inst"], {"tags_added": ["early exit"]})
-    assert row["tags_added"] == ["early exit"] and "note" not in row and row["reviewed"] is False
+    row = trade_review.patch_review(db, ids["inst"], {"tags_added_json": ["early exit"]})
+    assert row["tags_added_json"] == ["early exit"] and "note" not in row and row["reviewed"] is False
     row = trade_review.patch_review(db, ids["inst"], {"reviewed": True})
-    assert row["tags_added"] == ["early exit"] and row["reviewed"] is True
+    assert row["tags_added_json"] == ["early exit"] and row["reviewed"] is True
     with pytest.raises(WriteNotFound):
         trade_review.patch_review(db, 2_000_000_000, {"reviewed": True})
 
@@ -199,14 +199,14 @@ def test_execution_patch_and_strict_delete_in_postgres(db) -> None:
     ids = _seed_rule_chain(db)
     raw_id = _one(db, "INSERT INTO raw_broker.executions_raw_flex (exec_id, account_id, symbol, side, quantity, source) "
                       "VALUES ('td15.e3', %s, 'TDXV', 'BUY', 2, 'flex') RETURNING executions_raw_flex_id", (ACCOUNT,))[0]
-    out = accounts.patch_execution(CFG, raw_id, {"strategy_opportunity_id": ids["opp"], "strategy_instance_id": ids["inst"]})
-    assert out["strategy_instance_id"] == ids["inst"] and out["instance_allocations"] == []
+    out = accounts.patch_execution(CFG, raw_id, {"strategy_opportunity_id": ids["opp"], "trade_id": ids["inst"]})
+    assert out["trade_id"] == ids["inst"] and out["fill_splits"] == []
     out = accounts.patch_execution(
-        CFG, raw_id, {"instance_allocations": [{"strategy_instance_id": ids["inst"], "allocated_quantity": 2}]}
+        CFG, raw_id, {"fill_splits": [{"trade_id": ids["inst"], "quantity": 2}]}
     )
-    assert out["strategy_instance_id"] is None and out["instance_allocations"][0]["allocated_quantity"] == 2.0
+    assert out["trade_id"] is None and out["fill_splits"][0]["quantity"] == 2.0
     with pytest.raises(WriteConflict, match="split across 1 trade"):
-        accounts.patch_execution(CFG, raw_id, {"strategy_instance_id": ids["inst"]})
+        accounts.patch_execution(CFG, raw_id, {"trade_id": ids["inst"]})
     _one(db, "INSERT INTO raw_broker.commissions (exec_id, commission) VALUES ('td15.e3', 1)")
     out = accounts.delete_execution_strict(CFG, raw_id)
     assert out == {"deleted": "hard", "account_executions_id": raw_id, "allocations_removed": 1}

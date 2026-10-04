@@ -27,7 +27,7 @@ _FILL_LISTS = (
     "realized_by_sec_type",
     "realized_by_account_and_sec_type",
     "realized_by_strategy_opportunity",
-    "realized_by_strategy_instance",
+    "realized_by_trade",
     "realized_by_trade",
     "calendar",
 )
@@ -40,7 +40,7 @@ def _rows(perf: Dict[str, Any]) -> Iterable[Dict[str, Any]]:
     yield from (r for r in perf["calendar_by_sec_type"] if r["sec_type"] != "OPT")
 
 
-@pytest.mark.parametrize("kw", [{}, {"strategy_instance_id": 11}, {"source_scope": "on_the_fly"}])
+@pytest.mark.parametrize("kw", [{}, {"trade_id": 11}, {"source_scope": "on_the_fly"}])
 def test_every_fill_count_is_named(monkeypatch: pytest.MonkeyPatch, kw: Dict[str, Any]) -> None:
     perf = _perf(monkeypatch, NEW_BOOK, **kw)
     rows = list(_rows(perf))

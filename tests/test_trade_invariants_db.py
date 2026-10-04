@@ -158,7 +158,7 @@ def test_a_filled_plan_reads_its_instance_open_and_keeps_its_instance(db, monkey
     plan = _intended_plan(db)
     assert strategy_plan.link_fill(CFG, plan, inst) is True
     row = strategy_plan.get_plan(CFG, plan)
-    assert row["status"] == "filled" and row["strategy_instance_id"] == inst
+    assert row["status"] == "filled" and row["trade_id"] == inst
     assert row["filled_at"] == OPENED
     # Not stored at all since core 0.43.0: a fresh schema has no such column (TD-43).
     assert _one(db, "SELECT count(*) FROM information_schema.columns WHERE table_schema = 'public' "
@@ -190,8 +190,8 @@ def test_a_review_is_never_deleted_with_its_instance(db) -> None:
 
 def test_an_instance_nothing_points_at_is_still_deleted(db) -> None:
     inst = _instance(db, _opportunity(db))
-    # naming R1 (core 0.42.0): the answer carries trade_id beside strategy_instance_id
-    assert strategy_instance.delete_instance_strict(CFG, inst) == {"deleted": "hard", "strategy_instance_id": inst, "trade_id": inst}
+    # naming R4 (core 0.47.0): the answer names the trade only
+    assert strategy_instance.delete_instance_strict(CFG, inst) == {"deleted": "hard", "trade_id": inst}
 
 
 # --- TD-43: derived state ------------------------------------------------------------------
@@ -220,7 +220,7 @@ def test_the_instance_list_carries_the_state_its_fills_say(db) -> None:
         empty: ("no_fills", None),
         split: ("closed", date(2026, 9, 20)),
     }
-    rows = {r["strategy_instance_id"]: r for r in strategy_instance.list_instances(db, strategy_opportunity_id=opp)}
+    rows = {r["trade_id"]: r for r in strategy_instance.list_instances(db, strategy_opportunity_id=opp)}
     assert rows[closed]["state"] == "closed" and rows[closed]["closed_on"] == "2026-09-12"
     assert rows[empty]["state"] == "no_fills" and rows[empty]["closed_on"] is None
     assert rows[open_]["state"] == "open"

@@ -10,7 +10,6 @@ from bifrost_core.persistence.postgres.wave11_migrations import migrate_wave11_d
 from bifrost_core.persistence.postgres.wave13_migrations import migrate_wave13_reconcile_legacy_schema
 from bifrost_core.persistence.postgres.wave14_migrations import migrate_wave14_trade_invariants
 from bifrost_core.persistence.postgres.trade_ddl import (  # noqa: F401 - re-exported
-    STRATEGY_INSTANCE_EXECUTION_DDL,
     TRADE_EXECUTION_DDL,
     ensure_trade_tables,
     refuse_unmigrated_trade_entity,
@@ -18,8 +17,8 @@ from bifrost_core.persistence.postgres.trade_ddl import (  # noqa: F401 - re-exp
 
 # IB / brokerage tables live in bifrost_golden_source.raw_broker.* (see brokerage_ddl.py).
 # Per-env DBs expose them via postgres_fdw. Do not recreate in public.
-# Bridge tables (account_execution_instance_allocation, account_execution_option_stock_link)
-# stay in per-env public — the first FKs trade (trade_ddl).
+# Bridge tables (trade_execution, account_execution_option_stock_link) stay in per-env
+# public — trade_execution FKs trade (trade_ddl).
 _BROKERAGE_MIGRATED_TABLES = frozenset(
     {
         "daemon_open_orders",

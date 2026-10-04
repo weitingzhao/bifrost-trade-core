@@ -209,8 +209,8 @@ class _AllocCursor:
 )
 def test_allocation_sum_check(stored: Any, side: str, source: Any, splits: List[float], ok: bool) -> None:
     cur = _AllocCursor((ACCOUNT, stored, side, source, "td.e1"))
-    body = [{"strategy_instance_id": 10 + i, "allocated_quantity": q} for i, q in enumerate(splits)]
-    got = accounts_reader._apply_instance_allocations_on_cursor(
+    body = [{"trade_id": 10 + i, "quantity": q} for i, q in enumerate(splits)]
+    got = accounts_reader._apply_fill_splits_on_cursor(
         cur, -7, "raw_broker.executions_raw_tws", "executions_raw_tws_id", 7, body
     )
     assert got is ok
@@ -237,15 +237,15 @@ def _book(sign_rule: Any) -> List[Dict[str, Any]]:
         row = {
             "account_executions_id": eid, "account_id": ACCOUNT, "source": src, "sec_type": sec,
             "side": side, "quantity": sign_rule(src, side, q), "price": price, "commission": comm,
-            "realized_pnl": rp, "strategy_instance_id": si, "time": 1_790_000_000.0 + 3600 * i,
+            "realized_pnl": rp, "trade_id": si, "time": 1_790_000_000.0 + 3600 * i,
             "contract_key": f"ZZZ|{sec}|20261120|50|C" if sec == "OPT" else "ZZZ|STK|||",
             "strike": 50 if sec == "OPT" else None, "option_right": "C" if sec == "OPT" else None,
-            "instance_allocations": [],
+            "fill_splits": [],
         }
         if eid == 5:  # split across two instances, signed the way the form sends it
-            row["instance_allocations"] = [
-                {"strategy_instance_id": 11, "allocated_quantity": -1.0, "strategy_opportunity_id": 3},
-                {"strategy_instance_id": 12, "allocated_quantity": -3.0, "strategy_opportunity_id": 3},
+            row["fill_splits"] = [
+                {"trade_id": 11, "quantity": -1.0, "strategy_opportunity_id": 3},
+                {"trade_id": 12, "quantity": -3.0, "strategy_opportunity_id": 3},
             ]
         out.append(row)
     return out
@@ -271,7 +271,7 @@ def _perf(monkeypatch: pytest.MonkeyPatch, book: List[Dict[str, Any]], **kw: Any
     return executions_reader.get_performance_stats(object(), since_ts=1.0, until_ts=2e9, **kw)
 
 
-@pytest.mark.parametrize("kw", [{}, {"strategy_instance_id": 11}, {"source_scope": "on_the_fly"}])
+@pytest.mark.parametrize("kw", [{}, {"trade_id": 11}, {"source_scope": "on_the_fly"}])
 def test_performance_is_unchanged(monkeypatch: pytest.MonkeyPatch, kw: Dict[str, Any]) -> None:
     old = _perf(monkeypatch, OLD_BOOK, **kw)
     new = _perf(monkeypatch, NEW_BOOK, **kw)

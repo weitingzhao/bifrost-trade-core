@@ -218,7 +218,7 @@ def _batch_max_risk(
                 account_id=None,
                 limit=50000,
                 strategy_opportunity_id=None,
-                strategy_instance_id=int(sid),
+                trade_id=int(sid),
                 source_scope="performance_book",
             )
             sliced = [sl for ex in raw if (sl := slice_execution_for_instance_opt_view(ex, int(sid))) is not None]
@@ -313,7 +313,7 @@ def compute_win_rate_by_structure(
     if not active:
         return empty
 
-    ids = [i["strategy_instance_id"] for i in active]
+    ids = [i["trade_id"] for i in active]
     cost_by_id = _batch_underlying_cost(conn, ids)
     max_risk_by_id = _batch_max_risk(conn, ids, cost_by_id, since_ts=since_ts, until_ts=until_ts)
 
@@ -321,7 +321,7 @@ def compute_win_rate_by_structure(
     all_flat: List[Dict[str, Any]] = []
 
     for inst in active:
-        sid = inst["strategy_instance_id"]
+        sid = inst["trade_id"]
         structure_name = (inst.get("strategy_structure_name") or "Unknown").strip() or "Unknown"
 
         net_pnl = compute_instance_exec_derived_net_pnl(conn, sid, since_ts=since_ts, until_ts=until_ts)

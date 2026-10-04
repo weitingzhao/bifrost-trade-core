@@ -50,20 +50,18 @@ TRADE_EXECUTION = "trade_execution"
 # quantity, exec_id). A local view over the FDW tables, rebuilt with them
 # (``brokerage_ddl._create_brokerage_views``).
 TRADE_FILL_SPLITS = f"{SCHEMA}.trade_fill_splits"
-# Old names, one version (naming R3 -> R4). The constants point at the new objects: their
-# columns are the new ones. The old *objects* stay one version too, as compatibility views
-# with the old column names, for pods still on core < 0.45.0: public.strategy_instance and
-# public.strategy_instance_execution (made by scripts/db/rename_trade_entity.py) and
-# brokerage.instance_allocations (made with the env views, over trade_fill_splits).
-INSTANCE_EXECUTION = TRADE_EXECUTION
-INSTANCE_ALLOCATION = TRADE_FILL_SPLITS
-COMPAT_INSTANCE_ALLOCATIONS = f"{SCHEMA}.instance_allocations"
+# Naming R4 (core 0.47.0) removed the one-version names of R3: the constants
+# INSTANCE_EXECUTION / INSTANCE_ALLOCATION / COMPAT_INSTANCE_ALLOCATIONS, the env view
+# brokerage.instance_allocations (no longer made; RETIRED_ENV_VIEWS drops it wherever the env
+# views are rebuilt) and the compatibility views public.strategy_instance /
+# public.strategy_instance_execution. The Owner's R4 db-step (drop_trade_compat) drops all
+# three and rebuilds the env views in dev / stg / prod, whose db-init skips its FDW step.
 # TWS raw rows with the synthetic account_executions_id and this env's attribution
 # (the ``tws_raw`` scope and the position attribution's no-Flex branch).
 EXECUTIONS_TWS = f"{SCHEMA}.executions_tws"
-# Before TD-09: per-env splits keyed by account_executions_id. Frozen: no reader, no writer
-# (its two rows per env are in trade_execution); dropped in naming R4 (D7-A).
-LEGACY_INSTANCE_ALLOCATION = "account_execution_instance_allocation"
+# Before TD-09 the splits were account_execution_instance_allocation (per env, keyed by
+# account_executions_id). Frozen since core 0.37.0; core 0.47.0 no longer creates it and the
+# Owner's R4 db-step drops it after a CSV export (D7-A).
 OPTION_STOCK_LINK = "account_execution_option_stock_link"
 
 # Legacy public names → brokerage qualified (for migration scripts / docs)
@@ -103,10 +101,7 @@ BROKERAGE_VIEWS: tuple[str, ...] = (
 )
 
 # Per-env only: they join this env's attribution table (not on Golden Source).
-# instance_allocations is the one-version compatibility view over trade_fill_splits (R3);
-# it is listed first so a plain DROP of the list in order never trips on the dependency.
 BROKERAGE_ENV_VIEWS: tuple[str, ...] = (
-    "instance_allocations",
     "executions_tws",
     "trade_fill_splits",
 )

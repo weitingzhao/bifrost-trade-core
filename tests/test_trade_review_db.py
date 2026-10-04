@@ -72,12 +72,12 @@ def test_a_review_is_written_kept_confirmed_and_reopened(reviews, pg_conn) -> No
     cfg = {"sink": "postgres"}
     inst = _instance(pg_conn)
 
-    row = reviews.save_review(cfg, inst, {"tags_added": ["late exit"], "tags_dropped": ["held_to_expiry"]})
-    assert row["tags_added"] == ["late exit"] and row["reviewed"] is False
+    row = reviews.save_review(cfg, inst, {"tags_added_json": ["late exit"], "tags_dropped_json": ["held_to_expiry"]})
+    assert row["tags_added_json"] == ["late exit"] and row["reviewed"] is False
 
     # A field left out keeps what is stored.
     row = reviews.save_review(cfg, inst, {"reviewed": True})
-    assert row["tags_added"] == ["late exit"] and row["tags_dropped"] == ["held_to_expiry"]
+    assert row["tags_added_json"] == ["late exit"] and row["tags_dropped_json"] == ["held_to_expiry"]
     stamped = row["reviewed_at"]
     assert stamped is not None
 
@@ -86,9 +86,9 @@ def test_a_review_is_written_kept_confirmed_and_reopened(reviews, pg_conn) -> No
 
     # Reopening clears the stamp and keeps the tags.
     row = reviews.save_review(cfg, inst, {"reviewed": False})
-    assert row["reviewed"] is False and row["tags_added"] == ["late exit"]
+    assert row["reviewed"] is False and row["tags_added_json"] == ["late exit"]
 
-    assert [r["strategy_instance_id"] for r in reviews.list_reviews(cfg)].count(inst) == 1
+    assert [r["trade_id"] for r in reviews.list_reviews(cfg)].count(inst) == 1
 
 
 def test_a_review_for_an_instance_that_does_not_exist_is_refused(reviews) -> None:

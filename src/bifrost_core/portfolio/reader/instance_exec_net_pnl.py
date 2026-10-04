@@ -7,7 +7,6 @@ import math
 from collections import defaultdict
 from typing import Any, Dict, List, Optional, Tuple
 
-from bifrost_core.monitor.reader.trade_names import add_trade_names
 from bifrost_core.portfolio.reader.executions import get_executions
 from bifrost_core.portfolio.reader.option_stock_link import get_option_stock_links_bulk
 
@@ -32,24 +31,24 @@ def slice_execution_for_instance_opt_view(ex: Dict[str, Any], instance_id: int) 
         sid = int(instance_id)
     except (TypeError, ValueError):
         return None
-    allocs = ex.get("instance_allocations") or []
+    allocs = ex.get("fill_splits") or []
     if allocs:
         denom = 0.0
         for a in allocs:
-            denom += abs(_f(a.get("allocated_quantity"), 0.0))
+            denom += abs(_f(a.get("quantity"), 0.0))
         if denom <= NET_QTY_EPS:
             return None
         mine = None
         for a in allocs:
             try:
-                if int(a.get("strategy_instance_id")) == sid:
+                if int(a.get("trade_id")) == sid:
                     mine = a
                     break
             except (TypeError, ValueError):
                 continue
         if mine is None:
             return None
-        alloc_qty = _f(mine.get("allocated_quantity"), 0.0)
+        alloc_qty = _f(mine.get("quantity"), 0.0)
         if not math.isfinite(alloc_qty):
             return None
         w = abs(alloc_qty) / denom
@@ -99,13 +98,13 @@ def slice_execution_for_instance_opt_view(ex: Dict[str, Any], instance_id: int) 
                 pass
         else:
             out["strategy_opportunity_name"] = None
-        out["strategy_instance_id"] = sid
-        lbl = mine.get("strategy_instance_label")
+        out["trade_id"] = sid
+        lbl = mine.get("trade_label")
         if lbl is not None and str(lbl).strip():
-            out["strategy_instance_label"] = str(lbl).strip()
-        out["instance_allocations"] = None
-        return add_trade_names(out)
-    si = ex.get("strategy_instance_id")
+            out["trade_label"] = str(lbl).strip()
+        out["fill_splits"] = None
+        return out
+    si = ex.get("trade_id")
     if si is not None:
         try:
             if int(si) == sid:
@@ -251,18 +250,18 @@ def _slippage_usd_from_link_entry(entry: Dict[str, Any]) -> float:
 
 def compute_instance_exec_derived_net_pnl(
     conn: Any,
-    strategy_instance_id: int,
+    trade_id: int,
     since_ts: Optional[float] = None,
     until_ts: Optional[float] = None,
 ) -> float:
     """
     OPT: premium ± commission groups; non-OPT: DB realized_pnl; plus prorated option–stock slippage.
-    Same window and book as GET /executions?source_scope=performance_book&strategy_instance_id=…
+    Same window and book as GET /executions?source_scope=performance_book&trade_id=…
     """
     if conn is None:
         return 0.0
     try:
-        sid = int(strategy_instance_id)
+        sid = int(trade_id)
     except (TypeError, ValueError):
         return 0.0
     raw = get_executions(
@@ -272,7 +271,7 @@ def compute_instance_exec_derived_net_pnl(
         account_id=None,
         limit=50000,
         strategy_opportunity_id=None,
-        strategy_instance_id=sid,
+        trade_id=sid,
         source_scope="performance_book",
     )
     sliced: List[Dict[str, Any]] = []

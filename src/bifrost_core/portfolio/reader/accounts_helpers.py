@@ -6,7 +6,6 @@ import math
 from datetime import date, datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
-from bifrost_core.monitor.reader.trade_names import add_trade_names
 from bifrost_core.persistence.postgres.brokerage_tables import ACCOUNT
 from bifrost_core.portfolio.contract_key import read_fallback_opt_key
 from bifrost_core.portfolio.quote_freshness import LIVE_QUOTE_MAX_AGE_SEC
@@ -432,8 +431,6 @@ def _rows_to_executions(rows: Any, cur: Any) -> List[Dict[str, Any]]:
             except (TypeError, ValueError):
                 pass
         _fill_contract_key_for_opt(d)
-        # trade_id / trade_label / trade_opened_at_epoch beside the instance keys (R1).
-        add_trade_names(d)
         out.append(d)
     return out
 

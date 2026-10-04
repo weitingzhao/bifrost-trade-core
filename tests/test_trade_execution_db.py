@@ -141,9 +141,9 @@ def test_env_views_read_this_env_and_ignore_golden_source_columns(db) -> None:
     _fill(db, "executions_raw_tws", "td09.v2")  # TWS only, unattributed
     _one(db, "INSERT INTO trade_execution (account_id, exec_id, trade_id) VALUES (%s, 'td09.v1', %s)",
          (ACCT, inst))
-    rows = _all(db, "SELECT account_executions_id, trade_id, strategy_opportunity_id, strategy_instance_id "
+    rows = _all(db, "SELECT account_executions_id, trade_id, strategy_opportunity_id "
                     "FROM brokerage.executions WHERE exec_id LIKE 'td09.v%%' ORDER BY exec_id")
-    assert [r[1:] for r in rows] == [(inst, opp, inst), (None, None, None)]  # the alias copies trade_id
+    assert [r[1:] for r in rows] == [(inst, opp), (None, None)]
     assert rows[0][0] == flex  # the Flex row shadows its TWS twin, as before
     assert _all(db, "SELECT trade_id FROM brokerage.executions_final WHERE exec_id = 'td09.v1'") == [(inst,)]
     tws_rows = _all(db, "SELECT account_executions_id, trade_id FROM brokerage.executions_tws "
@@ -155,9 +155,9 @@ def test_env_views_read_this_env_and_ignore_golden_source_columns(db) -> None:
     gs = [r[0] for r in _all(db, "SELECT column_name FROM information_schema.columns WHERE table_schema = 'raw_broker' "
                                  "AND table_name = 'executions' ORDER BY ordinal_position")]
     # Golden Source's names, in its order, but IB's TradeID / RelatedTradeID as ib_* and the
-    # attribution as trade_id, followed by its one-version alias (naming R3)
+    # attribution as trade_id (naming R3; its one-version alias went in R4)
     renamed = {"trade_id": ["ib_trade_id"], "related_trade_id": ["ib_related_trade_id"],
-               "strategy_instance_id": ["trade_id", "strategy_instance_id"]}
+               "strategy_instance_id": ["trade_id"]}
     assert cols == [n for c in gs for n in renamed.get(c, [c])]
 
 
@@ -166,21 +166,20 @@ def test_split_rows_reach_every_representation_of_the_fill(db) -> None:
     a, b = _instance(db, opp), _instance(db, opp)
     flex = _fill(db, "executions_raw_flex", "td09.s1", qty=3.0)
     tws = _fill(db, "executions_raw_tws", "td09.s1", qty=3.0)
-    out = accounts.patch_execution(CFG, -tws, {"instance_allocations": [
-        {"strategy_instance_id": a, "allocated_quantity": 1}, {"strategy_instance_id": b, "allocated_quantity": 2}]})
-    assert [x["strategy_instance_id"] for x in out["instance_allocations"]] == [a, b]
+    out = accounts.patch_execution(CFG, -tws, {"fill_splits": [
+        {"trade_id": a, "quantity": 1}, {"trade_id": b, "quantity": 2}]})
+    assert [x["trade_id"] for x in out["fill_splits"]] == [a, b]
     got = _all(db, "SELECT account_executions_id, trade_id, quantity FROM brokerage.trade_fill_splits "
                    "WHERE exec_id = 'td09.s1' ORDER BY 1, 2")
     assert got == [(-tws, a, 1.0), (-tws, b, 2.0), (flex, a, 1.0), (flex, b, 2.0)]
-    # the one-version compatibility view shows the same rows under core 0.44.0's names
-    assert _all(db, "SELECT account_executions_id, strategy_instance_id, allocated_quantity FROM brokerage.instance_allocations "
-                    "WHERE exec_id = 'td09.s1' ORDER BY 1, 2") == got
+    # naming R4: R3's compatibility view is gone
+    assert _all(db, "SELECT to_regclass('brokerage.instance_allocations')") == [(None,)]
     assert _all(db, "SELECT trade_id FROM brokerage.executions WHERE exec_id = 'td09.s1'") == [(None,)]
     # a whole-fill instance on a split fill is refused until the splits are cleared
     with pytest.raises(WriteConflict, match="split across 2 trades"):
-        accounts.patch_execution(CFG, flex, {"strategy_instance_id": a})
-    out = accounts.patch_execution(CFG, flex, {"instance_allocations": [], "strategy_instance_id": a})
-    assert out["strategy_instance_id"] == a and out["instance_allocations"] == []
+        accounts.patch_execution(CFG, flex, {"trade_id": a})
+    out = accounts.patch_execution(CFG, flex, {"fill_splits": [], "trade_id": a})
+    assert out["trade_id"] == a and out["fill_splits"] == []
     assert _all(db, "SELECT count(*) FROM trade_execution WHERE exec_id = 'td09.s1'") == [(1,)]
 
 
@@ -188,13 +187,13 @@ def test_writers_never_touch_golden_source_columns(db) -> None:
     opp = _opportunity(db, "w")
     inst = _instance(db, opp)
     flex = _fill(db, "executions_raw_flex", "td09.w1")
-    accounts.patch_execution(CFG, flex, {"strategy_opportunity_id": opp, "strategy_instance_id": inst})
-    with pytest.raises(WriteInvalid, match="Send strategy_instance_id"):
+    accounts.patch_execution(CFG, flex, {"strategy_opportunity_id": opp, "trade_id": inst})
+    with pytest.raises(WriteInvalid, match="Send trade_id"):
         accounts.patch_execution(CFG, flex, {"strategy_opportunity_id": opp})
-    assert accounts.update_one_execution(CFG, flex, {"price": 2.5, "strategy_instance_id": inst})
+    assert accounts.update_one_execution(CFG, flex, {"price": 2.5, "trade_id": inst})
     new_id = accounts.insert_one_execution(CFG, {"account_id": ACCT, "time": 1_700_000_000, "symbol": "TDXV",
                                                  "side": "BUY", "quantity": 1, "price": 1, "source": "journal_closed",
-                                                 "strategy_instance_id": inst})
+                                                 "trade_id": inst})
     assert new_id is not None
     assert accounts.insert_one_execution(CFG, {"account_id": ACCT, "time": 1_700_000_000, "symbol": "TDXV", "side": "BUY",
                                                "quantity": 1, "price": 1, "strategy_opportunity_id": opp}) is None
@@ -214,9 +213,9 @@ def test_instance_delete_counts_this_env(db) -> None:
     inst = _instance(db, opp)
     flex = _fill(db, "executions_raw_flex", "td09.d1")
     _fill(db, "executions_raw_tws", "td09.d1")
-    accounts.patch_execution(CFG, flex, {"strategy_instance_id": inst})
+    accounts.patch_execution(CFG, flex, {"trade_id": inst})
     assert strategy_instance.count_attributed_executions(CFG, inst) == 1  # the twins are one fill
     with pytest.raises(WriteConflict, match="^1 fill is attributed to this trade.$"):
         strategy_instance.delete_instance_strict(CFG, inst)
-    accounts.patch_execution(CFG, flex, {"strategy_instance_id": None})
+    accounts.patch_execution(CFG, flex, {"trade_id": None})
     assert strategy_instance.delete_instance_strict(CFG, inst)["deleted"] == "hard"

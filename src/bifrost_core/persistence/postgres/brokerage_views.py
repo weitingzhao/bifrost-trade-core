@@ -7,8 +7,11 @@ them over its FDW tables with ``env=True`` (attribution from trade_execution, TD
 
 Naming R3 (core 0.45.0) changed the env views' columns, not Golden Source's: the
 attribution is ``trade_id`` (the Trade), IB's TradeID / RelatedTradeID are ``ib_trade_id``
-/ ``ib_related_trade_id``, and ``strategy_instance_id`` (= ``trade_id``) stays one version
-for pods on core < 0.45.0 (dropped in R4). Golden Source's views keep the vendor names.
+/ ``ib_related_trade_id``. Golden Source's views keep the vendor names. The one-version
+``strategy_instance_id`` (= ``trade_id``) column and ``brokerage.instance_allocations`` went in
+naming R4 (core 0.47.0). ``setup_fdw_foreign_tables`` drops and rebuilds these views, but in
+dev / stg / prod db-init's FDW step stops before it (``must be owner of foreign server``), so
+the views there are rebuilt by the Owner's R4 step (``drop_trade_compat``), as R3's were.
 """
 
 from __future__ import annotations
@@ -35,14 +38,19 @@ _EXEC_CANONICAL_COLS = (
 
 
 # Env view output for the raw columns renamed by naming R3 (core 0.45.0). The Golden Source
-# attribution column ``strategy_instance_id`` becomes this env's ``trade_id`` plus its
-# one-version alias; the opportunity is the trade's.
+# attribution column ``strategy_instance_id`` (frozen) becomes this env's ``trade_id``; the
+# opportunity is the trade's.
 _ENV_RENAMED = {
     "trade_id": "u.trade_id AS ib_trade_id",
     "related_trade_id": "u.related_trade_id AS ib_related_trade_id",
     "strategy_opportunity_id": "tr.strategy_opportunity_id",
-    "strategy_instance_id": "te.trade_id, te.trade_id AS strategy_instance_id",
+    "strategy_instance_id": "te.trade_id",
 }
+
+
+# Env views a release no longer makes, dropped by name (not left to a CASCADE) so db-init
+# removes them on its next run: R3's compatibility view over trade_fill_splits (naming R4).
+RETIRED_ENV_VIEWS: tuple[str, ...] = ("instance_allocations",)
 
 
 def _env_attributed(rows_sql: str) -> str:
@@ -52,8 +60,7 @@ def _env_attributed(rows_sql: str) -> str:
     the canonical order: IB's ``trade_id`` / ``related_trade_id`` as ``ib_trade_id`` /
     ``ib_related_trade_id``; ``strategy_opportunity_id`` from the trade; in place of the
     Golden Source ``strategy_instance_id``, ``trade_id`` from the whole-fill row of
-    ``public.trade_execution`` on (account_id, exec_id), then ``strategy_instance_id``
-    (= ``trade_id``, one version). Every name appears once (TD-13).
+    ``public.trade_execution`` on (account_id, exec_id). Every name appears once (TD-13).
     """
     cols = [c.strip() for c in _EXEC_CANONICAL_COLS.split(",") if c.strip()]
     out = [_ENV_RENAMED.get(c, f"u.{c}") for c in cols]
@@ -72,11 +79,13 @@ def _create_brokerage_views(cur: Any, schema: str, *, env: bool = False) -> None
 
     Golden Source (``env=False``): the attribution columns are the raw tables' own (no
     longer written since TD-09; kept for the rollback window). Per-env DBs (``env=True``,
-    over the FDW tables): attribution comes from this env's ``trade_execution``, and three
-    env-only views are added -- ``executions_tws``, ``trade_fill_splits`` and the
-    one-version compatibility view ``instance_allocations`` over it (old column names).
+    over the FDW tables): attribution comes from this env's ``trade_execution``, and two
+    env-only views are added -- ``executions_tws`` and ``trade_fill_splits``. Dropping
+    ``trade_fill_splits`` CASCADE also drops R3's ``instance_allocations`` where it is left.
     """
     cols = _EXEC_CANONICAL_COLS
+    for name in RETIRED_ENV_VIEWS if env else ():
+        cur.execute(f"DROP VIEW IF EXISTS {schema}.{name}")
     for name in BROKERAGE_ENV_VIEWS:
         cur.execute(f"DROP VIEW IF EXISTS {schema}.{name} CASCADE")
     cur.execute(f"DROP VIEW IF EXISTS {schema}.executions_fly CASCADE")
@@ -192,14 +201,5 @@ def _create_brokerage_views(cur: Any, schema: str, *, env: bool = False) -> None
             FROM {schema}.executions_raw_journal
         ) x ON x.account_id = s.account_id AND x.exec_id = s.exec_id
         WHERE s.split_quantity IS NOT NULL
-        """
-    )
-    # One version (naming R3 -> R4): the old view name and columns, for pods on core < 0.45.0.
-    cur.execute(
-        f"""
-        CREATE OR REPLACE VIEW {schema}.instance_allocations AS
-        SELECT account_id, account_executions_id, trade_id AS strategy_instance_id,
-               quantity AS allocated_quantity, exec_id
-        FROM {schema}.trade_fill_splits
         """
     )

@@ -217,14 +217,11 @@ def _env(**over: Any) -> FakeConn:
 def test_patch_execution_sets_direct_attribution_and_returns_it(two_dbs) -> None:
     env, golden = _env(), _golden()
     two_dbs(env, golden)
-    out = accounts.patch_execution(CFG, 77, {"strategy_opportunity_id": 5, "strategy_instance_id": 41})
+    out = accounts.patch_execution(CFG, 77, {"strategy_opportunity_id": 5, "trade_id": 41})
     assert out == {
         "account_executions_id": 77,
         "account_id": ACCOUNT,
         "strategy_opportunity_id": 5,
-        "strategy_instance_id": 41,
-        "instance_allocations": [],
-        # naming R1 (core 0.42.0): the trade names beside them
         "trade_id": 41,
         "fill_splits": [],
     }
@@ -239,10 +236,10 @@ def test_patch_execution_sets_direct_attribution_and_returns_it(two_dbs) -> None
 def test_patch_execution_null_clears_the_whole_fill_row(two_dbs) -> None:
     env, golden = _env(read=Reply(all=[])), _golden()
     two_dbs(env, golden)
-    out = accounts.patch_execution(CFG, 77, {"strategy_instance_id": None})
+    out = accounts.patch_execution(CFG, 77, {"trade_id": None})
     sql, params = env.statement("DELETE FROM trade_execution")
     assert "split_quantity IS NULL" in sql and params == (ACCOUNT, EXEC)
-    assert out["strategy_instance_id"] is None and out["strategy_opportunity_id"] is None
+    assert out["trade_id"] is None and out["strategy_opportunity_id"] is None
     # strategy_opportunity_id: null alone changes nothing.
     env, golden = _env(), _golden()
     two_dbs(env, golden)
@@ -257,58 +254,58 @@ def test_patch_execution_refusals(two_dbs) -> None:
         accounts.patch_execution(CFG, 77, {"price": 1.0})
     with pytest.raises(WriteInvalid, match="one way or the other"):
         accounts.patch_execution(
-            CFG, 77, {"strategy_instance_id": 41, "instance_allocations": [{"strategy_instance_id": 41, "allocated_quantity": 1}]}
+            CFG, 77, {"trade_id": 41, "fill_splits": [{"trade_id": 41, "quantity": 1}]}
         )
     with pytest.raises(WriteInvalid, match=r"send \[\]"):
-        accounts.patch_execution(CFG, 77, {"instance_allocations": None})
+        accounts.patch_execution(CFG, 77, {"fill_splits": None})
     # An opportunity is reached through a trade (TD-09).
-    with pytest.raises(WriteInvalid, match="Send strategy_instance_id"):
+    with pytest.raises(WriteInvalid, match="Send trade_id"):
         accounts.patch_execution(CFG, 77, {"strategy_opportunity_id": 5})
-    with pytest.raises(WriteInvalid, match="Send strategy_instance_id"):
-        accounts.patch_execution(CFG, 77, {"strategy_opportunity_id": 5, "strategy_instance_id": None})
+    with pytest.raises(WriteInvalid, match="Send trade_id"):
+        accounts.patch_execution(CFG, 77, {"strategy_opportunity_id": 5, "trade_id": None})
 
     two_dbs(_env(), _golden())
     with pytest.raises(WriteInvalid, match="under opportunity 5, not 6"):
-        accounts.patch_execution(CFG, 77, {"strategy_opportunity_id": 6, "strategy_instance_id": 41})
+        accounts.patch_execution(CFG, 77, {"strategy_opportunity_id": 6, "trade_id": 41})
 
     two_dbs(_env(), _golden(lock=Reply(one=None)))
     with pytest.raises(WriteNotFound, match="No execution 77"):
-        accounts.patch_execution(CFG, 77, {"strategy_instance_id": 41})
+        accounts.patch_execution(CFG, 77, {"trade_id": 41})
 
     two_dbs(_env(), _golden(lock=Reply(one=(ACCOUNT, 2.0, "BUY", "flex_trades", None))))
     with pytest.raises(WriteInvalid, match="has no exec_id"):
-        accounts.patch_execution(CFG, 77, {"strategy_instance_id": 41})
+        accounts.patch_execution(CFG, 77, {"trade_id": 41})
 
     two_dbs(_env(instance=Reply(one=("U0000002", 5))), _golden())
     with pytest.raises(WriteInvalid, match="belongs to account U0000002"):
-        accounts.patch_execution(CFG, 77, {"strategy_instance_id": 41})
+        accounts.patch_execution(CFG, 77, {"trade_id": 41})
 
     two_dbs(_env(instance=Reply(one=None)), _golden())
     with pytest.raises(WriteInvalid, match="No trade 41"):
-        accounts.patch_execution(CFG, 77, {"strategy_instance_id": 41})
+        accounts.patch_execution(CFG, 77, {"trade_id": 41})
 
     env, golden = _env(splits=Reply(one=(2,))), _golden()
     two_dbs(env, golden)
     with pytest.raises(WriteConflict, match="split across 2 trades"):
-        accounts.patch_execution(CFG, 77, {"strategy_instance_id": 41})
+        accounts.patch_execution(CFG, 77, {"trade_id": 41})
     assert not env.ran("INSERT") and golden.rollbacks == 1 and env.rollbacks == 1
 
     two_dbs(_env(insert=Reply(raises=DB_DOWN)), _golden())
     with pytest.raises(WriteFailed):
-        accounts.patch_execution(CFG, 77, {"strategy_instance_id": 41})
+        accounts.patch_execution(CFG, 77, {"trade_id": 41})
 
     two_dbs(_env(), psycopg2.OperationalError("could not connect"))
     with pytest.raises(WriteFailed, match="Golden Source is unreachable"):
-        accounts.patch_execution(CFG, 77, {"strategy_instance_id": 41})
+        accounts.patch_execution(CFG, 77, {"trade_id": 41})
 
     with pytest.raises(WriteFailed, match="status config is needed"):
-        accounts.patch_execution(FakeConn(), 77, {"strategy_instance_id": 41})
+        accounts.patch_execution(FakeConn(), 77, {"trade_id": 41})
 
 
 def test_patch_execution_replacing_splits_with_a_direct_id(two_dbs) -> None:
     env, golden = _env(splits=Reply(one=(2,))), _golden()
     two_dbs(env, golden)
-    accounts.patch_execution(CFG, 77, {"instance_allocations": [], "strategy_instance_id": 41})
+    accounts.patch_execution(CFG, 77, {"fill_splits": [], "trade_id": 41})
     sql, params = env.statement("DELETE FROM trade_execution")
     assert "split_quantity IS NOT NULL" in sql and params == (ACCOUNT, EXEC)
     assert env.statement("INSERT INTO trade_execution")[1] == (ACCOUNT, EXEC, 41)
@@ -323,24 +320,24 @@ def test_patch_execution_splits_replace_the_whole_fill_row(two_dbs) -> None:
     out = accounts.patch_execution(
         CFG,
         77,
-        {"instance_allocations": [{"strategy_instance_id": 41, "allocated_quantity": 1.5}, {"strategy_instance_id": 42, "allocated_quantity": 0.5}]},
+        {"fill_splits": [{"trade_id": 41, "quantity": 1.5}, {"trade_id": 42, "quantity": 0.5}]},
     )
     deletes = [sql for sql, _ in env.executed if sql.startswith("DELETE FROM trade_execution")]
     assert any("IS NOT NULL" in d for d in deletes) and any("IS NULL" in d and "NOT NULL" not in d for d in deletes)
     inserts = [p for sql, p in env.executed if sql.startswith("INSERT INTO trade_execution")]
     assert inserts == [(ACCOUNT, EXEC, 41, 1.5), (ACCOUNT, EXEC, 42, 0.5)]
-    assert out["strategy_instance_id"] is None
-    assert out["instance_allocations"] == [
-        {"strategy_instance_id": 41, "allocated_quantity": 1.5, "strategy_opportunity_id": 5, "strategy_instance_label": "A"},
-        {"strategy_instance_id": 42, "allocated_quantity": 0.5, "strategy_opportunity_id": 6},
+    assert out["trade_id"] is None
+    assert out["fill_splits"] == [
+        {"trade_id": 41, "quantity": 1.5, "strategy_opportunity_id": 5, "trade_label": "A"},
+        {"trade_id": 42, "quantity": 0.5, "strategy_opportunity_id": 6},
     ]
 
 
 def test_patch_execution_bad_splits_are_invalid(two_dbs, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(accounts, "_apply_instance_allocations_on_cursor", lambda *a, **k: False)
+    monkeypatch.setattr(accounts, "_apply_fill_splits_on_cursor", lambda *a, **k: False)
     two_dbs(_env(), _golden())
     with pytest.raises(WriteInvalid, match="adding up to the fill's quantity"):
-        accounts.patch_execution(CFG, 77, {"instance_allocations": [{"strategy_instance_id": 41, "allocated_quantity": 3}]})
+        accounts.patch_execution(CFG, 77, {"fill_splits": [{"trade_id": 41, "quantity": 3}]})
 
 
 def test_delete_execution_strict(two_dbs) -> None:

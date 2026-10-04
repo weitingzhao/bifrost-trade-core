@@ -8,7 +8,6 @@ from zoneinfo import ZoneInfo
 
 from psycopg2.extras import RealDictCursor
 
-from bifrost_core.monitor.reader.trade_names import fill_split, realized_by_trade
 from bifrost_core.portfolio.contract_key import osi_local_symbol
 from bifrost_core.portfolio.reader import keyset
 from bifrost_core.portfolio.quote_freshness import fresh_quote_sql
@@ -111,8 +110,9 @@ _COMM_NORM_E = (
 _REALIZED_PNL_COALESCE_E = "COALESCE(c.realized_pnl, e.fifo_pnl_realized) AS realized_pnl"
 
 
-def attach_instance_allocations(conn: Any, executions: List[Dict[str, Any]]) -> None:
-    """Populate instance_allocations, and fill_splits beside it, on each execution dict (mutates in place)."""
+def attach_fill_splits(conn: Any, executions: List[Dict[str, Any]]) -> None:
+    """Populate ``fill_splits`` -- ``[{trade_id, quantity, strategy_opportunity_id, trade_label?}]`` -- on each
+    execution dict that has splits (mutates in place). ``instance_allocations`` beside it before core 0.47.0."""
     if not conn or not executions:
         return
     ids: List[int] = []
@@ -130,9 +130,9 @@ def attach_instance_allocations(conn: Any, executions: List[Dict[str, Any]]) -> 
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(
                 f"""
-                SELECT a.account_executions_id, a.trade_id AS strategy_instance_id,
-                       a.quantity AS allocated_quantity,
-                       si.label AS strategy_instance_label, si.strategy_opportunity_id
+                SELECT a.account_executions_id, a.trade_id,
+                       a.quantity,
+                       si.label AS trade_label, si.strategy_opportunity_id
                 FROM {_EXEC_INST_ALLOC_TABLE} a
                 LEFT JOIN trade si ON a.trade_id = si.trade_id
                 WHERE a.account_executions_id = ANY(%s)
@@ -144,7 +144,7 @@ def attach_instance_allocations(conn: Any, executions: List[Dict[str, Any]]) -> 
     except Exception as ex:
         if "does not exist" in str(ex).lower() or "42P01" in str(getattr(ex, "pgcode", "")):
             return
-        logger.debug("attach_instance_allocations failed: %s", ex)
+        logger.debug("attach_fill_splits failed: %s", ex)
         return
     by_eid: Dict[int, List[Dict[str, Any]]] = {}
     for r in rows:
@@ -156,16 +156,16 @@ def attach_instance_allocations(conn: Any, executions: List[Dict[str, Any]]) -> 
             ke = int(eid)
         except (TypeError, ValueError):
             continue
-        sl = d.get("strategy_instance_label")
+        sl = d.get("trade_label")
         item = {
-            "strategy_instance_id": int(d["strategy_instance_id"]),
-            "allocated_quantity": float(d["allocated_quantity"]),
+            "trade_id": int(d["trade_id"]),
+            "quantity": float(d["quantity"]),
             "strategy_opportunity_id": int(d["strategy_opportunity_id"])
             if d.get("strategy_opportunity_id") is not None
             else None,
         }
         if sl is not None and str(sl).strip():
-            item["strategy_instance_label"] = str(sl).strip()
+            item["trade_label"] = str(sl).strip()
         by_eid.setdefault(ke, []).append(item)
     for e in executions:
         eid = e.get("account_executions_id")
@@ -176,35 +176,33 @@ def attach_instance_allocations(conn: Any, executions: List[Dict[str, Any]]) -> 
         except (TypeError, ValueError):
             continue
         if ke in by_eid:
-            e["instance_allocations"] = by_eid[ke]
-            # fill_splits: [{trade_id, quantity, ...}] beside it (naming R1, TD-82).
-            e["fill_splits"] = [fill_split(a) for a in by_eid[ke]]
+            e["fill_splits"] = by_eid[ke]
 
 
-def weight_realized_for_strategy_instance(execution: Dict[str, Any], strategy_instance_id: int) -> float:
-    """Fraction of this execution's realized_pnl/commission attributed to strategy_instance_id (0..1)."""
+def weight_realized_for_trade(execution: Dict[str, Any], trade_id: int) -> float:
+    """Fraction of this execution's realized_pnl/commission attributed to trade_id (0..1)."""
     try:
-        sid = int(strategy_instance_id)
+        sid = int(trade_id)
     except (TypeError, ValueError):
         return 0.0
-    allocs = execution.get("instance_allocations") or []
+    allocs = execution.get("fill_splits") or []
     if allocs:
         denom = 0.0
         for a in allocs:
             try:
-                denom += abs(float(a.get("allocated_quantity") or 0))
+                denom += abs(float(a.get("quantity") or 0))
             except (TypeError, ValueError):
                 pass
         if denom <= 0:
             return 0.0
         for a in allocs:
             try:
-                if int(a.get("strategy_instance_id")) == sid:
-                    return abs(float(a.get("allocated_quantity") or 0)) / denom
+                if int(a.get("trade_id")) == sid:
+                    return abs(float(a.get("quantity") or 0)) / denom
             except (TypeError, ValueError):
                 continue
         return 0.0
-    si = execution.get("strategy_instance_id")
+    si = execution.get("trade_id")
     if si is not None and int(si) == sid:
         return 1.0
     return 0.0
@@ -214,11 +212,11 @@ def _add_realized_splits_to_opp_and_inst(
     e: Dict[str, Any],
     by_opp: Dict[int, Dict[str, Any]],
     by_inst: Dict[int, Dict[str, Any]],
-    only_strategy_instance_id: Optional[int] = None,
+    only_trade_id: Optional[int] = None,
 ) -> None:
-    """Add one execution's realized_pnl/commission into by_opp and by_inst (handles instance_allocations).
+    """Add one execution's realized_pnl/commission into by_opp and by_inst (handles fill_splits).
 
-    When only_strategy_instance_id is set (Performance filter), attribute only to that instance.
+    When only_trade_id is set (Performance filter), attribute only to that instance.
     """
     rp_val = float(e["realized_pnl"]) if e.get("realized_pnl") is not None else 0.0
     comm_val = float(e["commission"]) if e.get("commission") is not None else 0.0
@@ -226,18 +224,18 @@ def _add_realized_splits_to_opp_and_inst(
         rp_val = 0.0
     if not math.isfinite(comm_val):
         comm_val = 0.0
-    raw_allocs = e.get("instance_allocations") or []
+    raw_allocs = e.get("fill_splits") or []
     full_denom = 0.0
     for a in raw_allocs:
         try:
-            full_denom += abs(float(a.get("allocated_quantity") or 0))
+            full_denom += abs(float(a.get("quantity") or 0))
         except (TypeError, ValueError):
             pass
     work_allocs = raw_allocs
-    if only_strategy_instance_id is not None and raw_allocs:
-        sid_f = int(only_strategy_instance_id)
-        work_allocs = [a for a in raw_allocs if int(a.get("strategy_instance_id") or -1) == sid_f]
-    if only_strategy_instance_id is not None and raw_allocs and not work_allocs:
+    if only_trade_id is not None and raw_allocs:
+        sid_f = int(only_trade_id)
+        work_allocs = [a for a in raw_allocs if int(a.get("trade_id") or -1) == sid_f]
+    if only_trade_id is not None and raw_allocs and not work_allocs:
         return
     if work_allocs:
         denom = full_denom if full_denom > 0 else 0.0
@@ -246,8 +244,8 @@ def _add_realized_splits_to_opp_and_inst(
         opp_trade_bump: set = set()
         for a in work_allocs:
             try:
-                w = abs(float(a.get("allocated_quantity") or 0)) / denom
-                si_id = int(a["strategy_instance_id"])
+                w = abs(float(a.get("quantity") or 0)) / denom
+                si_id = int(a["trade_id"])
                 so_id = a.get("strategy_opportunity_id")
             except (TypeError, ValueError, KeyError):
                 continue
@@ -271,7 +269,7 @@ def _add_realized_splits_to_opp_and_inst(
                     opp_trade_bump.add(so_id)
             if si_id not in by_inst:
                 by_inst[si_id] = {
-                    "strategy_instance_id": si_id,
+                    "trade_id": si_id,
                     "total_pnl": 0.0,
                     "commission": 0.0,
                     "net_pnl": 0.0,
@@ -283,9 +281,9 @@ def _add_realized_splits_to_opp_and_inst(
             by_inst[si_id]["fill_count"] += 1
         return
     so_id = e.get("strategy_opportunity_id")
-    si_id = e.get("strategy_instance_id")
-    if only_strategy_instance_id is not None:
-        if si_id is None or int(si_id) != int(only_strategy_instance_id):
+    si_id = e.get("trade_id")
+    if only_trade_id is not None:
+        if si_id is None or int(si_id) != int(only_trade_id):
             return
     if so_id is not None:
         so_id = int(so_id)
@@ -305,7 +303,7 @@ def _add_realized_splits_to_opp_and_inst(
         si_id = int(si_id)
         if si_id not in by_inst:
             by_inst[si_id] = {
-                "strategy_instance_id": si_id,
+                "trade_id": si_id,
                 "total_pnl": 0.0,
                 "commission": 0.0,
                 "net_pnl": 0.0,
@@ -342,7 +340,7 @@ def get_executions(
     account_id: Optional[str] = None,
     limit: Optional[int] = 200,
     strategy_opportunity_id: Optional[int] = None,
-    strategy_instance_id: Optional[int] = None,
+    trade_id: Optional[int] = None,
     source_scope: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     rows = _read_executions(
@@ -352,7 +350,7 @@ def get_executions(
         account_id=account_id,
         limit=limit,
         strategy_opportunity_id=strategy_opportunity_id,
-        strategy_instance_id=strategy_instance_id,
+        trade_id=trade_id,
         source_scope=source_scope,
         after=None,
     )
@@ -368,7 +366,7 @@ def get_executions_page(
     account_id: Optional[str] = None,
     limit: Optional[int] = 200,
     strategy_opportunity_id: Optional[int] = None,
-    strategy_instance_id: Optional[int] = None,
+    trade_id: Optional[int] = None,
     source_scope: Optional[str] = None,
     cursor: Optional[str] = None,
 ) -> Dict[str, Any]:
@@ -395,7 +393,7 @@ def get_executions_page(
         account_id=account_id,
         limit=None if page_limit is None else page_limit + 1,
         strategy_opportunity_id=strategy_opportunity_id,
-        strategy_instance_id=strategy_instance_id,
+        trade_id=trade_id,
         source_scope=source_scope,
         after=after,
     )
@@ -427,7 +425,7 @@ def _read_executions(
     account_id: Optional[str],
     limit: Optional[int],
     strategy_opportunity_id: Optional[int],
-    strategy_instance_id: Optional[int],
+    trade_id: Optional[int],
     source_scope: Optional[str],
     after: Optional[Tuple[Optional[date], Optional[datetime], int]],
 ) -> List[Dict[str, Any]]:
@@ -449,14 +447,14 @@ def _read_executions(
         if strategy_opportunity_id is not None:
             conditions.append("e.strategy_opportunity_id = %s")
             values.append(strategy_opportunity_id)
-        if strategy_instance_id is not None:
+        if trade_id is not None:
             conditions.append(
                 f"(e.trade_id = %s OR EXISTS (SELECT 1 FROM {_EXEC_INST_ALLOC_TABLE} a "
                 f"WHERE a.account_executions_id = e.account_executions_id AND "
                 f"a.account_id IS NOT DISTINCT FROM e.account_id AND a.trade_id = %s))"
             )
-            values.append(strategy_instance_id)
-            values.append(strategy_instance_id)
+            values.append(trade_id)
+            values.append(trade_id)
         pred_e = _source_scope_predicate_e(source_scope)
         if pred_e:
             conditions.append(pred_e)
@@ -482,9 +480,9 @@ def _read_executions(
                            {_REALIZED_PNL_COALESCE_E}, e.contract_key, c.currency, c.yield_, c.yield_redemption_date,
                            e.trade_date, e.report_date, e.settle_date_target, e.transaction_type, e.taxes, e.net_cash,
                            e.raw_extra, {_CREATED_AT_E}, {_EXEC_KEY_SELECT_E},
-                           e.strategy_opportunity_id, e.trade_id AS strategy_instance_id,
-                           so.name AS strategy_opportunity_name, si.label AS strategy_instance_label,
-                           EXTRACT(EPOCH FROM si.opened_at)::bigint AS strategy_instance_opened_at_epoch
+                           e.strategy_opportunity_id, e.trade_id,
+                           so.name AS strategy_opportunity_name, si.label AS trade_label,
+                           EXTRACT(EPOCH FROM si.opened_at)::bigint AS trade_opened_at_epoch
                     FROM {from_table} e
                     LEFT JOIN {COMMISSIONS} c ON e.exec_id = c.exec_id AND e.exec_id IS NOT NULL
                     LEFT JOIN strategy_opportunity so ON e.strategy_opportunity_id = so.strategy_opportunity_id
@@ -532,7 +530,7 @@ def _read_executions(
                     raise
             rows = cur.fetchall()
         out = _rows_to_executions(rows, None)
-        attach_instance_allocations(conn, out)
+        attach_fill_splits(conn, out)
         return out
     except Exception as e:
         logger.debug("get_executions failed: %s", e)
@@ -589,7 +587,7 @@ def get_executions_with_opt_pairs(
     account_id: Optional[str] = None,
     limit: int = 200,
     strategy_opportunity_id: Optional[int] = None,
-    strategy_instance_id: Optional[int] = None,
+    trade_id: Optional[int] = None,
     source_scope: Optional[str] = None,
 ) -> Dict[str, Any]:
     day_executions = get_executions(
@@ -599,7 +597,7 @@ def get_executions_with_opt_pairs(
         account_id=account_id,
         limit=limit,
         strategy_opportunity_id=strategy_opportunity_id,
-        strategy_instance_id=strategy_instance_id,
+        trade_id=trade_id,
         source_scope=source_scope,
     )
     if since_ts is None or until_ts is None:
@@ -613,7 +611,7 @@ def get_executions_with_opt_pairs(
         account_id=account_id,
         limit=5000,
         strategy_opportunity_id=strategy_opportunity_id,
-        strategy_instance_id=strategy_instance_id,
+        trade_id=trade_id,
         source_scope=source_scope,
     )
     pair_map, opt_pairs = _compute_opt_pair_map_and_pairs(all_legs)
@@ -688,7 +686,7 @@ def get_executions_with_opt_pairs_single_query(
     account_id: Optional[str] = None,
     limit: int = 5000,
     strategy_opportunity_id: Optional[int] = None,
-    strategy_instance_id: Optional[int] = None,
+    trade_id: Optional[int] = None,
     source_scope: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     if since_ts is None or until_ts is None or conn is None:
@@ -704,14 +702,14 @@ def get_executions_with_opt_pairs_single_query(
     if strategy_opportunity_id is not None:
         strat_cond += " AND e.strategy_opportunity_id = %s"
         values.append(strategy_opportunity_id)
-    if strategy_instance_id is not None:
+    if trade_id is not None:
         strat_cond += (
             f" AND (e.trade_id = %s OR EXISTS (SELECT 1 FROM {_EXEC_INST_ALLOC_TABLE} a "
             f"WHERE a.account_executions_id = e.account_executions_id AND "
             f"a.account_id IS NOT DISTINCT FROM e.account_id AND a.trade_id = %s))"
         )
-        values.append(strategy_instance_id)
-        values.append(strategy_instance_id)
+        values.append(trade_id)
+        values.append(trade_id)
     src_frag = _source_scope_sql_fragment(source_scope)
     from_table = _exec_from_for_scope(source_scope)
     values2: List[Any] = [since_d, until_d, since_d, until_d]
@@ -719,9 +717,9 @@ def get_executions_with_opt_pairs_single_query(
         values2.append(account_id.strip())
     if strategy_opportunity_id is not None:
         values2.append(strategy_opportunity_id)
-    if strategy_instance_id is not None:
-        values2.append(strategy_instance_id)
-        values2.append(strategy_instance_id)
+    if trade_id is not None:
+        values2.append(trade_id)
+        values2.append(trade_id)
     values2.append(limit)
     sql = f"""
 WITH day_keys AS (
@@ -774,17 +772,17 @@ SELECT * FROM numbered ORDER BY time ASC NULLS LAST LIMIT %s
                         values_fb.append(account_id.strip())
                     if strategy_opportunity_id is not None:
                         values_fb.append(strategy_opportunity_id)
-                    if strategy_instance_id is not None:
-                        values_fb.append(strategy_instance_id)
-                        values_fb.append(strategy_instance_id)
+                    if trade_id is not None:
+                        values_fb.append(trade_id)
+                        values_fb.append(trade_id)
                     values2_fb: List[Any] = [since_d, until_d, since_d, until_d]
                     if account_id and account_id.strip():
                         values2_fb.append(account_id.strip())
                     if strategy_opportunity_id is not None:
                         values2_fb.append(strategy_opportunity_id)
-                    if strategy_instance_id is not None:
-                        values2_fb.append(strategy_instance_id)
-                        values2_fb.append(strategy_instance_id)
+                    if trade_id is not None:
+                        values2_fb.append(trade_id)
+                        values2_fb.append(trade_id)
                     values2_fb.append(limit)
                     sql_fallback = f"""
 WITH day_keys AS (
@@ -832,7 +830,7 @@ SELECT * FROM numbered ORDER BY time ASC NULLS LAST LIMIT %s
                     raise
             rows = cur.fetchall()
         out = _rows_to_executions(rows, None)
-        attach_instance_allocations(conn, out)
+        attach_fill_splits(conn, out)
         return out
     except Exception as e:
         logger.debug("get_executions_with_opt_pairs_single_query failed: %s", e)
@@ -1022,7 +1020,6 @@ def _performance_response_summary_only(
         "realized_by_sec_type": [],
         "realized_by_account_and_sec_type": [],
         "realized_by_strategy_opportunity": [],
-        "realized_by_strategy_instance": [],
         "realized_by_trade": [],
         "calendar": [],
         "calendar_by_sec_type": [],
@@ -1036,11 +1033,11 @@ def _performance_response_summary_only(
 
 def get_performance_instance_summary_only(
     conn: Any,
-    strategy_instance_id: int,
+    trade_id: int,
     since_ts: Optional[float] = None,
     until_ts: Optional[float] = None,
 ) -> Dict[str, Any]:
-    """Aggregate realized PnL for one strategy_instance (includes account_execution_instance_allocation splits)."""
+    """Aggregate realized PnL for one trade (its whole fills and its fill splits)."""
     if conn is None:
         return _performance_response_summary_only(
             fill_count=0,
@@ -1051,7 +1048,7 @@ def get_performance_instance_summary_only(
             loss_count=0,
         )
     try:
-        sid = int(strategy_instance_id)
+        sid = int(trade_id)
     except (TypeError, ValueError):
         return _performance_response_summary_only(
             fill_count=0,
@@ -1069,7 +1066,7 @@ def get_performance_instance_summary_only(
             account_id=None,
             limit=50000,
             strategy_opportunity_id=None,
-            strategy_instance_id=sid,
+            trade_id=sid,
             source_scope="performance_book",
         )
         total_rp = 0.0
@@ -1080,7 +1077,7 @@ def get_performance_instance_summary_only(
         wins_rp: List[float] = []
         losses_rp: List[float] = []
         for e in executions:
-            w = weight_realized_for_strategy_instance(e, sid)
+            w = weight_realized_for_trade(e, sid)
             if w <= 0:
                 continue
             rp = float(e.get("realized_pnl") or 0) * w
@@ -1140,7 +1137,7 @@ def get_performance_stats(
     account_id: Optional[str] = None,
     granularity: str = "day",
     strategy_opportunity_id: Optional[int] = None,
-    strategy_instance_id: Optional[int] = None,
+    trade_id: Optional[int] = None,
     source_scope: str = "performance_book",
 ) -> Dict[str, Any]:
     from bifrost_core.portfolio.reader.accounts import get_accounts_from_tables
@@ -1163,15 +1160,15 @@ def get_performance_stats(
         account_id=account_id,
         limit=5000,
         strategy_opportunity_id=strategy_opportunity_id,
-        strategy_instance_id=strategy_instance_id,
+        trade_id=trade_id,
         source_scope=scope_norm,
     )
     executions_sorted = sorted([e for e in executions if e.get("time") is not None], key=lambda e: float(e["time"]))
 
     def _perf_inst_weight(ex: Dict[str, Any]) -> float:
-        if strategy_instance_id is None:
+        if trade_id is None:
             return 1.0
-        return weight_realized_for_strategy_instance(ex, int(strategy_instance_id))
+        return weight_realized_for_trade(ex, int(trade_id))
 
     total_realized_pnl = 0.0
     total_commission = 0.0
@@ -1299,14 +1296,14 @@ def get_performance_stats(
             e,
             by_opp,
             by_inst,
-            only_strategy_instance_id=strategy_instance_id,
+            only_trade_id=trade_id,
         )
     realized_by_strategy_opportunity = [{"strategy_opportunity_id": k, "total_pnl": round(v["total_pnl"], 2), "commission": round(v["commission"], 2), "net_pnl": round(v["net_pnl"], 2), "fill_count": v["fill_count"]} for k, v in sorted(by_opp.items())]
-    realized_by_strategy_instance = [{"strategy_instance_id": k, "total_pnl": round(v["total_pnl"], 2), "commission": round(v["commission"], 2), "net_pnl": round(v["net_pnl"], 2), "fill_count": v["fill_count"]} for k, v in sorted(by_inst.items())]
+    realized_by_trade = [{"trade_id": k, "total_pnl": round(v["total_pnl"], 2), "commission": round(v["commission"], 2), "net_pnl": round(v["net_pnl"], 2), "fill_count": v["fill_count"]} for k, v in sorted(by_inst.items())]
     if capital_base and capital_base > 0:
         for row in realized_by_strategy_opportunity:
             row["return_pct"] = round(100.0 * row["net_pnl"] / capital_base, 4)
-        for row in realized_by_strategy_instance:
+        for row in realized_by_trade:
             row["return_pct"] = round(100.0 * row["net_pnl"] / capital_base, 4)
 
     def _period_key(ts: float, gran: str) -> Tuple[float, str]:
@@ -1471,9 +1468,8 @@ def get_performance_stats(
         "realized_by_sec_type": realized_by_sec_type,
         "realized_by_account_and_sec_type": realized_by_account_and_sec_type,
         "realized_by_strategy_opportunity": realized_by_strategy_opportunity,
-        "realized_by_strategy_instance": realized_by_strategy_instance,
-        # The same rows under the trade name, each with trade_id (naming R1).
-        "realized_by_trade": realized_by_trade(realized_by_strategy_instance),
+        # One row per trade (realized_by_strategy_instance beside it before core 0.47.0, naming R4).
+        "realized_by_trade": realized_by_trade,
         "calendar": calendar,
         "calendar_by_sec_type": calendar_by_sec_type,
         "cumulative_curve": cumulative_curve,
@@ -1623,11 +1619,11 @@ def get_position_instance_attribution(
             p.account_id, p.contract_key, p.symbol, p.sec_type,
             p.position AS position_qty, p.avg_cost, p.expiry, p.strike, p.option_right,
             p.price_mid, p.price_last,
-            eg.trade_id AS strategy_instance_id,
+            eg.trade_id,
             eg.strategy_opportunity_id,
-            si.label AS strategy_instance_label,
+            si.label AS trade_label,
             so.name AS strategy_opportunity_name,
-            EXTRACT(EPOCH FROM si.opened_at)::bigint AS strategy_instance_opened_at_epoch,
+            EXTRACT(EPOCH FROM si.opened_at)::bigint AS trade_opened_at_epoch,
             ss.name AS strategy_structure_name,
             t.template_code AS template_code,
             so.scope_type,
@@ -1702,7 +1698,7 @@ def _build_attribution_rows(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         instance_ids = set()
         has_unassigned_execs = False
         for r in contrib_rows:
-            sid = r.get("strategy_instance_id")
+            sid = r.get("trade_id")
             instance_ids.add(sid)
             if sid is None:
                 has_unassigned_execs = True
@@ -1713,11 +1709,11 @@ def _build_attribution_rows(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         if not has_any_exec:
             result.append(_make_attribution_row(
                 meta, pos_qty, total_unrealized,
-                strategy_instance_id=None,
-                strategy_instance_label=None,
+                trade_id=None,
+                trade_label=None,
                 strategy_opportunity_id=None,
                 strategy_opportunity_name=None,
-                strategy_instance_opened_at_epoch=None,
+                trade_opened_at_epoch=None,
                 strategy_structure_name=None,
                 template_code=None,
                 scope_type=None,
@@ -1750,11 +1746,11 @@ def _build_attribution_rows(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             pnl_est = _pnl_for_open_qty(open_qty)
             result.append(_make_attribution_row(
                 meta, pos_qty, total_unrealized,
-                strategy_instance_id=r.get("strategy_instance_id"),
-                strategy_instance_label=r.get("strategy_instance_label"),
+                trade_id=r.get("trade_id"),
+                trade_label=r.get("trade_label"),
                 strategy_opportunity_id=r.get("strategy_opportunity_id"),
                 strategy_opportunity_name=r.get("strategy_opportunity_name"),
-                strategy_instance_opened_at_epoch=r.get("strategy_instance_opened_at_epoch"),
+                trade_opened_at_epoch=r.get("trade_opened_at_epoch"),
                 strategy_structure_name=r.get("strategy_structure_name"),
                 template_code=r.get("template_code"),
                 scope_type=r.get("scope_type"),
@@ -1776,11 +1772,11 @@ def _make_attribution_row(
     position_qty: float,
     total_unrealized: Optional[float],
     *,
-    strategy_instance_id: Optional[int],
-    strategy_instance_label: Optional[str],
+    trade_id: Optional[int],
+    trade_label: Optional[str],
     strategy_opportunity_id: Optional[int],
     strategy_opportunity_name: Optional[str],
-    strategy_instance_opened_at_epoch: Optional[int],
+    trade_opened_at_epoch: Optional[int],
     strategy_structure_name: Optional[str],
     template_code: Optional[str],
     scope_type: Optional[str],
@@ -1805,15 +1801,11 @@ def _make_attribution_row(
         "avg_cost": meta.get("avg_cost"),
         "price_mid": meta.get("price_mid"),
         "price_last": meta.get("price_last"),
-        "strategy_instance_id": strategy_instance_id,
-        "strategy_instance_label": (strategy_instance_label or "").strip() if strategy_instance_label else None,
+        "trade_id": trade_id,
+        "trade_label": (trade_label or "").strip() if trade_label else None,
         "strategy_opportunity_id": strategy_opportunity_id,
         "strategy_opportunity_name": (strategy_opportunity_name or "").strip() if strategy_opportunity_name else None,
-        "strategy_instance_opened_at_epoch": strategy_instance_opened_at_epoch,
-        # The trade names beside them (naming R1): trade_id / trade_label / trade_opened_at_epoch.
-        "trade_id": strategy_instance_id,
-        "trade_label": (strategy_instance_label or "").strip() if strategy_instance_label else None,
-        "trade_opened_at_epoch": strategy_instance_opened_at_epoch,
+        "trade_opened_at_epoch": trade_opened_at_epoch,
         # 'structure' is the strategy_structure row (debt TD-41): its name, and the
         # template it is built from. structure_type used to be the name here and the
         # template code on /strategies/structures; it stays one version as the name.

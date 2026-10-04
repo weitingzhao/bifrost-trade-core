@@ -25,34 +25,34 @@ def _executions() -> List[Dict[str, Any]]:
         {
             "account_executions_id": 101, "account_id": ACCOUNT, "sec_type": "OPT",
             "contract_key": CALL, "strike": 50, "side": "SELL", "quantity": 2,
-            "price": 1.50, "commission": 1.30, "strategy_instance_id": 11,
+            "price": 1.50, "commission": 1.30, "trade_id": 11,
         },
         {
             # strike as text: must land in the same group as 50 (Decimal / str splits)
             "account_executions_id": 102, "account_id": ACCOUNT, "sec_type": "OPT",
             "contract_key": CALL, "strike": "50.0", "side": "BOT", "quantity": 2,
-            "price": 0.40, "commission": 1.30, "strategy_instance_id": 11,
+            "price": 0.40, "commission": 1.30, "trade_id": 11,
         },
         {
             "account_executions_id": 104, "account_id": ACCOUNT, "sec_type": "STK",
             "contract_key": "ZZZ|STK|||", "side": "SELL", "quantity": 100,
-            "price": 51.0, "realized_pnl": 25.0, "strategy_instance_id": 11,
+            "price": 51.0, "realized_pnl": 25.0, "trade_id": 11,
         },
         # split execution: a quarter of it belongs to instance 11
         {
             "account_executions_id": 103, "account_id": ACCOUNT, "sec_type": "OPT",
             "contract_key": PUT, "strike": 45, "side": "SLD", "quantity": 4,
             "price": 1.00, "commission": 2.0,
-            "instance_allocations": [
-                {"strategy_instance_id": 11, "allocated_quantity": 1},
-                {"strategy_instance_id": 12, "allocated_quantity": 3},
+            "fill_splits": [
+                {"trade_id": 11, "quantity": 1},
+                {"trade_id": 12, "quantity": 3},
             ],
         },
         # another instance's fill: ignored
         {
             "account_executions_id": 105, "account_id": ACCOUNT, "sec_type": "OPT",
             "contract_key": CALL, "strike": 50, "side": "BUY", "quantity": 9,
-            "price": 9.0, "commission": 9.0, "strategy_instance_id": 12,
+            "price": 9.0, "commission": 9.0, "trade_id": 12,
         },
     ]
 
@@ -91,7 +91,7 @@ def test_net_pnl_adds_opt_groups_book_pnl_and_prorated_slippage(reads: Dict[str,
     total = m.compute_instance_exec_derived_net_pnl(object(), 11, since_ts=1.0, until_ts=2.0)
     assert total == 336.90
     kw = reads["executions_kw"]
-    assert kw["strategy_instance_id"] == 11 and kw["source_scope"] == "performance_book"
+    assert kw["trade_id"] == 11 and kw["source_scope"] == "performance_book"
     assert (kw["since_ts"], kw["until_ts"], kw["limit"]) == (1.0, 2.0, 50000)
     assert reads["batches"] == [(ACCOUNT, [101, 102, 103])]
 
@@ -112,21 +112,21 @@ def test_slice_prorates_a_split_execution() -> None:
         "realized_pnl": 8.0, "taxes": 0.4, "net_cash": 396.0,
         "strategy_opportunity_id": 7, "strategy_opportunity_name": " Fade ",
     }
-    ex["instance_allocations"][0]["strategy_instance_label"] = " #11 "
+    ex["fill_splits"][0]["trade_label"] = " #11 "
     out = m.slice_execution_for_instance_opt_view(ex, 11)
     assert out is not None
     assert out["quantity"] == 1
     assert out["commission"] == 0.5 and out["realized_pnl"] == 2.0
     assert out["taxes"] == pytest.approx(0.1) and out["net_cash"] == 99.0
-    assert out["strategy_instance_id"] == 11 and out["strategy_instance_label"] == "#11"
+    assert out["trade_id"] == 11 and out["trade_label"] == "#11"
     assert out["strategy_opportunity_id"] == 7 and out["strategy_opportunity_name"] == "Fade"
-    assert out["instance_allocations"] is None
+    assert out["fill_splits"] is None
     assert ex["quantity"] == 4  # the input is not modified
 
 
 def test_slice_allocation_opportunity_overrides_parent_id() -> None:
     ex = _executions()[3] | {"strategy_opportunity_id": 7, "strategy_opportunity_name": "Fade"}
-    ex["instance_allocations"][0]["strategy_opportunity_id"] = 8
+    ex["fill_splits"][0]["strategy_opportunity_id"] = 8
     out = m.slice_execution_for_instance_opt_view(ex, 11)
     assert out["strategy_opportunity_id"] == 8
     # Pinned as it is today, and wrong: the parent's name ("Fade", opportunity 7) stays on
@@ -136,7 +136,7 @@ def test_slice_allocation_opportunity_overrides_parent_id() -> None:
     # batch; reported.
     assert out["strategy_opportunity_name"] == "Fade"
     no_parent = _executions()[3]
-    no_parent["instance_allocations"][0]["strategy_opportunity_id"] = 8
+    no_parent["fill_splits"][0]["strategy_opportunity_id"] = 8
     assert m.slice_execution_for_instance_opt_view(no_parent, 11)["strategy_opportunity_name"] is None
 
 
@@ -144,7 +144,7 @@ def test_slice_allocation_opportunity_overrides_parent_id() -> None:
     "ex,instance",
     [
         (_executions()[3], 13),  # not among the allocations
-        ({"instance_allocations": [{"strategy_instance_id": 11, "allocated_quantity": 0}]}, 11),
+        ({"fill_splits": [{"trade_id": 11, "quantity": 0}]}, 11),
         (_executions()[0], 12),  # whole execution, other instance
         (_executions()[0], "x"),
     ],

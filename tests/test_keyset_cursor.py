@@ -254,7 +254,7 @@ def _exec(i: int, d: Optional[date], t: Optional[datetime]) -> Dict[str, Any]:
 
 
 def test_executions_page_cuts_and_encodes_the_exact_time(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(ex, "attach_instance_allocations", lambda conn, rows: None)
+    monkeypatch.setattr(ex, "attach_fill_splits", lambda conn, rows: None)
     d = date(2026, 9, 18)
     conn = _Conn([_exec(5, d, TS), _exec(4, d, TS), _exec(-3, None, None)])
     page = ex.get_executions_page(conn, account_id="U0000001", limit=2)
@@ -266,7 +266,7 @@ def test_executions_page_cuts_and_encodes_the_exact_time(monkeypatch: pytest.Mon
 
 
 def test_executions_page_without_limit_has_no_next(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(ex, "attach_instance_allocations", lambda conn, rows: None)
+    monkeypatch.setattr(ex, "attach_fill_splits", lambda conn, rows: None)
     conn = _Conn([_exec(5, None, None)])
     page = ex.get_executions_page(conn, limit=0, cursor=keyset.encode_executions(None, None, 9))
     q, args = conn.sql[0]
@@ -276,7 +276,7 @@ def test_executions_page_without_limit_has_no_next(monkeypatch: pytest.MonkeyPat
 
 
 def test_get_executions_rows_carry_no_key_column(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(ex, "attach_instance_allocations", lambda conn, rows: None)
+    monkeypatch.setattr(ex, "attach_fill_splits", lambda conn, rows: None)
     rows = ex.get_executions(_Conn([_exec(5, None, TS)]), limit=1)
     assert ex._EXEC_KEY_COL not in rows[0]
 

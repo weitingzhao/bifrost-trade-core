@@ -391,23 +391,23 @@ class StatusReader:
         self._end_read_txn()
         return result
 
-    def list_strategy_instances(
+    def list_trades(
         self,
         account_id: Optional[str] = None,
         strategy_opportunity_id: Optional[int] = None,
-        strategy_instance_ids: Optional[List[int]] = None,
+        trade_ids: Optional[List[int]] = None,
         opened_at_from: Optional[float] = None,
         opened_at_until: Optional[float] = None,
     ) -> List[Dict[str, Any]]:
-        """Return strategy_instance rows, optionally filtered by account_id, strategy_opportunity_id, strategy_instance_ids, opened_at range (Unix seconds)."""
+        """Return trade rows, optionally filtered by account_id, strategy_opportunity_id, trade_ids, opened_at range (Unix seconds)."""
         if not self._connect():
-            raise ReadFailed("list_strategy_instances: database unavailable")
+            raise ReadFailed("list_trades: database unavailable")
         try:
             result = strategy_instance_module.list_instances(
                 self._conn,
                 account_id=account_id,
                 strategy_opportunity_id=strategy_opportunity_id,
-                strategy_instance_ids=strategy_instance_ids,
+                trade_ids=trade_ids,
                 opened_at_from=opened_at_from,
                 opened_at_until=opened_at_until,
             )
@@ -415,22 +415,22 @@ class StatusReader:
             self._end_read_txn()
         return result
 
-    def get_strategy_instance_by_id(self, strategy_instance_id: int) -> Optional[Dict[str, Any]]:
-        """Return one strategy_instance by id. None if not found."""
+    def get_trade_by_id(self, trade_id: int) -> Optional[Dict[str, Any]]:
+        """Return one trade by id. None if not found."""
         if not self._connect():
             return None
-        result = strategy_instance_module.get_instance_by_id(self._conn, strategy_instance_id)
+        result = strategy_instance_module.get_instance_by_id(self._conn, trade_id)
         self._end_read_txn()
         return result
 
-    def create_strategy_instance(
+    def create_trade(
         self,
         strategy_opportunity_id: int,
         account_id: str,
         opened_at: Any,
         label: Optional[str] = None,
     ) -> Optional[int]:
-        """Insert one strategy_instance. Returns strategy_instance_id or None (no notes since 0.43.0, TD-73)."""
+        """Insert one trade. Returns trade_id or None (no notes since 0.43.0, TD-73)."""
         if not self._connect():
             return None
         return strategy_instance_module.create_instance(
@@ -441,7 +441,7 @@ class StatusReader:
             label=label,
         )
 
-    def get_strategy_win_rate(
+    def get_trade_win_rate(
         self,
         since_ts: Optional[float] = None,
         until_ts: Optional[float] = None,
@@ -529,7 +529,7 @@ class StatusReader:
         account_id: Optional[str] = None,
         limit: Optional[int] = 200,
         strategy_opportunity_id: Optional[int] = None,
-        strategy_instance_id: Optional[int] = None,
+        trade_id: Optional[int] = None,
         source_scope: Optional[str] = None,
         cursor: Optional[str] = None,
     ) -> Dict[str, Any]:
@@ -546,7 +546,7 @@ class StatusReader:
             account_id=account_id,
             limit=limit,
             strategy_opportunity_id=strategy_opportunity_id,
-            strategy_instance_id=strategy_instance_id,
+            trade_id=trade_id,
             source_scope=source_scope,
             cursor=cursor,
         )
@@ -611,7 +611,7 @@ class StatusReader:
         account_id: Optional[str] = None,
         limit: int = 200,
         strategy_opportunity_id: Optional[int] = None,
-        strategy_instance_id: Optional[int] = None,
+        trade_id: Optional[int] = None,
         source_scope: Optional[str] = None,
     ) -> Dict[str, Any]:
         if not self._connect():
@@ -623,7 +623,7 @@ class StatusReader:
             account_id=account_id,
             limit=limit,
             strategy_opportunity_id=strategy_opportunity_id,
-            strategy_instance_id=strategy_instance_id,
+            trade_id=trade_id,
             source_scope=source_scope,
         )
         self._end_read_txn()
@@ -656,7 +656,7 @@ class StatusReader:
         account_id: Optional[str] = None,
         granularity: str = "day",
         strategy_opportunity_id: Optional[int] = None,
-        strategy_instance_id: Optional[int] = None,
+        trade_id: Optional[int] = None,
         source_scope: str = "performance_book",
     ) -> Dict[str, Any]:
         if not self._connect():
@@ -668,15 +668,15 @@ class StatusReader:
             account_id=account_id,
             granularity=granularity,
             strategy_opportunity_id=strategy_opportunity_id,
-            strategy_instance_id=strategy_instance_id,
+            trade_id=trade_id,
             source_scope=source_scope,
         )
         self._end_read_txn()
         return result
 
-    def get_performance_instance_summary(
+    def get_performance_trade_summary(
         self,
-        strategy_instance_id: int,
+        trade_id: int,
         since_ts: Optional[float] = None,
         until_ts: Optional[float] = None,
     ) -> Dict[str, Any]:
@@ -692,15 +692,15 @@ class StatusReader:
         try:
             return executions_module.get_performance_instance_summary_only(
                 self._conn,
-                strategy_instance_id=strategy_instance_id,
+                trade_id=trade_id,
                 since_ts=since_ts,
                 until_ts=until_ts,
             )
         finally:
             self._end_read_txn()
 
-    # --- Position×Instance attribution (delegate to executions module) ---
-    def get_position_instance_attribution(
+    # --- Position×Trade attribution (delegate to executions module) ---
+    def get_position_trade_attribution(
         self,
         account_id: Optional[str] = None,
         sec_type_filter: Optional[str] = None,
@@ -780,3 +780,13 @@ class StatusReader:
         if not self._connect():
             return False
         return position_categories_module.set_market_streams_symbol_order(self._conn, category_name=category_name, symbols=symbols)
+
+    # Naming R4 / TD-80 C3 (core 0.47.0): the facade speaks of trades. The instance-era names
+    # stay one version as aliases (their keyword arguments are the new ones: trade_id /
+    # trade_ids), then go.
+    list_strategy_instances = list_trades
+    get_strategy_instance_by_id = get_trade_by_id
+    create_strategy_instance = create_trade
+    get_strategy_win_rate = get_trade_win_rate
+    get_performance_instance_summary = get_performance_trade_summary
+    get_position_instance_attribution = get_position_trade_attribution

@@ -24,13 +24,13 @@ def test_row_out_decodes_json_and_says_whether_it_is_reviewed() -> None:
     row = _row_out(
         {
             "trade_review_id": 1,
-            "strategy_instance_id": 7,
-            "tags_added": '["late exit"]',
-            "tags_dropped": ["held_to_expiry"],
+            "trade_id": 7,
+            "tags_added_json": '["late exit"]',
+            "tags_dropped_json": ["held_to_expiry"],
             "reviewed_at": datetime(2026, 9, 1, tzinfo=timezone.utc),
         }
     )
-    assert row["tags_added"] == ["late exit"]
-    assert row["tags_dropped"] == ["held_to_expiry"]
+    assert row["tags_added_json"] == ["late exit"]
+    assert row["tags_dropped_json"] == ["held_to_expiry"]
     assert row["reviewed"] is True
-    assert _row_out({"tags_added": None, "tags_dropped": None, "reviewed_at": None})["reviewed"] is False
+    assert _row_out({"tags_added_json": None, "tags_dropped_json": None, "reviewed_at": None})["reviewed"] is False

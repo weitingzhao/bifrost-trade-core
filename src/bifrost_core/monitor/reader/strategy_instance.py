@@ -18,7 +18,6 @@ from bifrost_core.persistence.postgres.brokerage_tables import (
 )
 from bifrost_core.monitor.reader import write_support as ws
 from bifrost_core.monitor.reader.instance_state import instance_states
-from bifrost_core.monitor.reader.trade_names import add_trade_names
 from bifrost_core.monitor.reader.errors import (
     ReadFailed,
     WriteConflict,
@@ -37,11 +36,14 @@ def list_instances(
     conn: Any,
     account_id: Optional[str] = None,
     strategy_opportunity_id: Optional[int] = None,
-    strategy_instance_ids: Optional[List[int]] = None,
+    trade_ids: Optional[List[int]] = None,
     opened_at_from: Optional[float] = None,
     opened_at_until: Optional[float] = None,
 ) -> List[Dict[str, Any]]:
-    """List strategy instances, optionally filtered by account_id, strategy_opportunity_id, strategy_instance_ids, opened_at range (Unix seconds).
+    """List trades, optionally filtered by account_id, strategy_opportunity_id, trade_ids, opened_at range (Unix seconds).
+
+    Rows carry ``trade_id`` only (``strategy_instance_id`` beside it from core 0.42.0 until
+    0.47.0, naming R4).
 
     Each row carries ``state`` (no_fills / open / expired / closed) and ``closed_on`` (ISO date
     or None), derived from its option fills by ``instance_state`` (TD-43, core 0.41.0)."""
@@ -56,10 +58,10 @@ def list_instances(
         if strategy_opportunity_id is not None:
             conditions.append("si.strategy_opportunity_id = %s")
             values.append(strategy_opportunity_id)
-        if strategy_instance_ids:
-            placeholders = ", ".join(["%s"] * len(strategy_instance_ids))
+        if trade_ids:
+            placeholders = ", ".join(["%s"] * len(trade_ids))
             conditions.append(f"si.trade_id IN ({placeholders})")
-            values.extend(strategy_instance_ids)
+            values.extend(trade_ids)
         if opened_at_from is not None and opened_at_from > 0:
             conditions.append("si.opened_at >= to_timestamp(%s)")
             values.append(opened_at_from)
@@ -93,7 +95,7 @@ def list_instances(
                 counts AS (
                     SELECT sid, COUNT(DISTINCT account_executions_id) AS n FROM linked GROUP BY sid
                 )
-                SELECT si.trade_id AS strategy_instance_id, si.strategy_opportunity_id, si.account_id,
+                SELECT si.trade_id, si.strategy_opportunity_id, si.account_id,
                        si.opened_at, si.label, si.created_at, si.updated_at,
                        so.name AS strategy_opportunity_name,
                        ss.strategy_structure_id, ss.name AS strategy_structure_name,
@@ -108,7 +110,7 @@ def list_instances(
                 values,
             )
             rows = cur.fetchall()
-            states = instance_states(cur, [int(r["strategy_instance_id"]) for r in rows])
+            states = instance_states(cur, [int(r["trade_id"]) for r in rows])
         out: List[Dict[str, Any]] = []
         for r in rows:
             d = dict(r)
@@ -118,17 +120,17 @@ def list_instances(
                 d["created_at_epoch"] = d["created_at"].timestamp()
             if d.get("executions_count") is not None:
                 d["executions_count"] = int(d["executions_count"])
-            state, closed_on = states.get(int(d["strategy_instance_id"]), ("no_fills", None))
+            state, closed_on = states.get(int(d["trade_id"]), ("no_fills", None))
             d["state"] = state
             d["closed_on"] = closed_on.isoformat() if closed_on is not None else None
-            out.append(add_trade_names(d))  # trade_id beside strategy_instance_id (naming R1)
+            out.append(d)
         return out
     except Exception as e:
         # A failed read is not an empty one: raise, so the API answers 503 (TD-08).
         raise ReadFailed(f"list_instances: {e}") from e
 
 
-def get_instance_by_id(conn: Any, strategy_instance_id: int) -> Optional[Dict[str, Any]]:
+def get_instance_by_id(conn: Any, trade_id: int) -> Optional[Dict[str, Any]]:
     """Return one strategy instance by id, or None."""
     if conn is None:
         return None
@@ -136,7 +138,7 @@ def get_instance_by_id(conn: Any, strategy_instance_id: int) -> Optional[Dict[st
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(
                 """
-                SELECT si.trade_id AS strategy_instance_id, si.strategy_opportunity_id, si.account_id,
+                SELECT si.trade_id, si.strategy_opportunity_id, si.account_id,
                        si.opened_at, si.label, si.created_at, si.updated_at,
                        so.name AS strategy_opportunity_name,
                        ss.strategy_structure_id, ss.name AS strategy_structure_name
@@ -145,7 +147,7 @@ def get_instance_by_id(conn: Any, strategy_instance_id: int) -> Optional[Dict[st
                 LEFT JOIN strategy_structure ss ON so.strategy_structure_id = ss.strategy_structure_id
                 WHERE si.trade_id = %s
                 """,
-                (strategy_instance_id,),
+                (trade_id,),
             )
             row = cur.fetchone()
         if row is None:
@@ -155,7 +157,7 @@ def get_instance_by_id(conn: Any, strategy_instance_id: int) -> Optional[Dict[st
             d["opened_at_epoch"] = d["opened_at"].timestamp()
         if d.get("created_at") is not None and hasattr(d["created_at"], "timestamp"):
             d["created_at_epoch"] = d["created_at"].timestamp()
-        return add_trade_names(d)
+        return d
     except Exception as e:
         logger.debug("get_instance_by_id failed: %s", e)
         return None
@@ -168,7 +170,7 @@ def create_instance(
     opened_at: Any,
     label: Optional[str] = None,
 ) -> Optional[int]:
-    """Insert one trade (table trade, R3). opened_at: datetime or Unix timestamp. Returns strategy_instance_id or None.
+    """Insert one trade (table trade, R3). opened_at: datetime or Unix timestamp. Returns trade_id or None.
 
     No ``notes`` since core 0.43.0 (TD-73): a trade's notes live in the Research journal."""
     if conn is None:
@@ -217,18 +219,18 @@ INSTANCE_PATCHABLE = ("label", "opened_at", "created_at")
 
 NOTES_RETIRED = (
     "notes was removed in core 0.43.0 (TD-73): a trade's notes live in the Research journal "
-    "(POST /research/journal/notes with a ref of type 'inst')."
+    "(POST /research/journal/notes with a ref of type 'trade')."
 )
 
 
-def patch_instance(conn_or_config: Any, strategy_instance_id: int, fields: Dict[str, Any]) -> Dict[str, Any]:
+def patch_instance(conn_or_config: Any, trade_id: int, fields: Dict[str, Any]) -> Dict[str, Any]:
     """Change the fields the client sent; return the row as ``get_instance_by_id`` reads it.
 
     ``label``: nullable text -- null clears, blank is refused.
     ``opened_at`` / ``created_at``: NOT NULL timestamps (datetime, Unix seconds or ISO 8601).
     Raises WriteInvalid (empty, unknown key, bad value), WriteNotFound, WriteFailed.
     """
-    what = f"trade {strategy_instance_id}"
+    what = f"trade {trade_id}"
     if isinstance(fields, dict) and "notes" in fields:
         raise WriteInvalid(NOTES_RETIRED)
     fields = ws.check_fields(fields, INSTANCE_PATCHABLE, "trade")
@@ -243,61 +245,62 @@ def patch_instance(conn_or_config: Any, strategy_instance_id: int, fields: Dict[
         with conn.cursor() as cur:
             cur.execute(
                 f"UPDATE trade SET {assignments} WHERE trade_id = %s",
-                [*values, strategy_instance_id],
+                [*values, trade_id],
             )
             if cur.rowcount == 0:
-                raise WriteNotFound(f"No trade {strategy_instance_id}.")
-        row = get_instance_by_id(conn, strategy_instance_id)
+                raise WriteNotFound(f"No trade {trade_id}.")
+        row = get_instance_by_id(conn, trade_id)
         if row is None:
             raise WriteFailed(f"{what} was changed but could not be read back; nothing was saved.")
     return row
 
 
-def _attributed_counts(cur: Any, strategy_instance_id: int) -> Tuple[int, int]:
+def _attributed_counts(cur: Any, trade_id: int) -> Tuple[int, int]:
     """(whole fills, split fills) attributed to the trade in this env's trade_execution."""
     cur.execute(
         f"SELECT count(*) FILTER (WHERE split_quantity IS NULL), "
         f"count(*) FILTER (WHERE split_quantity IS NOT NULL) "
         f"FROM {TRADE_EXECUTION} WHERE trade_id = %s",
-        (strategy_instance_id,),
+        (trade_id,),
     )
     row = cur.fetchone() or (0, 0)
     return int(row[0] or 0), int(row[1] or 0)
 
 
-def _plan_and_review_counts(cur: Any, strategy_instance_id: int) -> Tuple[int, int]:
+def _plan_and_review_counts(cur: Any, trade_id: int) -> Tuple[int, int]:
     """(plans filled by the instance, reviews of it): the two ON DELETE RESTRICT references (TD-43)."""
     cur.execute(
         "SELECT (SELECT count(*) FROM strategy_plan WHERE trade_id = %s), "
         "(SELECT count(*) FROM trade_review WHERE trade_id = %s)",
-        (strategy_instance_id, strategy_instance_id),
+        (trade_id, trade_id),
     )
     row = cur.fetchone() or (0, 0)
     return int(row[0] or 0), int(row[1] or 0)
 
 
-def count_attributed_executions(status_config: Any, strategy_instance_id: int) -> int:
+def count_attributed_executions(status_config: Any, trade_id: int) -> int:
     """Fills attributed whole to this trade (this env's trade_execution, TD-09).
 
     A fill is (account_id, exec_id), so one recorded by both TWS and Flex counts once.
     Before core 0.37.0 this read Golden Source's raw columns, shared by all three envs.
     Raises WriteFailed when the env database cannot be read.
     """
-    what = f"the fills attributed to trade {strategy_instance_id}"
+    what = f"the fills attributed to trade {trade_id}"
     with ws.write_connection(status_config, what) as conn:
         try:
             with conn.cursor() as cur:
-                whole, _ = _attributed_counts(cur, strategy_instance_id)
+                whole, _ = _attributed_counts(cur, trade_id)
             ws.rollback_quietly(conn)
         except Exception as e:
             ws.rollback_quietly(conn)
-            logger.warning("count_attributed_executions(%s) failed: %s", strategy_instance_id, e)
+            logger.warning("count_attributed_executions(%s) failed: %s", trade_id, e)
             raise WriteFailed(f"Could not read {what}; nothing was deleted.") from e
     return whole
 
 
-def delete_instance_strict(status_config: Any, strategy_instance_id: int) -> Dict[str, Any]:
-    """Delete an instance nothing is attributed to. Returns ``{"deleted": "hard", "strategy_instance_id", "trade_id"}``.
+def delete_instance_strict(status_config: Any, trade_id: int) -> Dict[str, Any]:
+    """Delete a trade nothing is attributed to. Returns ``{"deleted": "hard", "trade_id"}``
+    (``strategy_instance_id`` beside it before core 0.47.0, naming R4).
 
     Refused (WriteConflict, nothing deleted) when fills are split-allocated to it or
     attributed to it whole in this env's ``trade_execution`` (TD-09; its
@@ -305,7 +308,7 @@ def delete_instance_strict(status_config: Any, strategy_instance_id: int) -> Dic
     review: both FKs are ON DELETE RESTRICT since core 0.41.0 (TD-43), so a filled plan never
     loses its instance and a review is never deleted with one.
     """
-    what = f"trade {strategy_instance_id}"
+    what = f"trade {trade_id}"
     if not isinstance(status_config, dict):
         raise WriteFailed(
             f"Cannot delete {what}: the status config is needed to open its database."
@@ -314,11 +317,11 @@ def delete_instance_strict(status_config: Any, strategy_instance_id: int) -> Dic
         with conn.cursor() as cur:
             cur.execute(
                 "SELECT 1 FROM trade WHERE trade_id = %s FOR UPDATE",
-                (strategy_instance_id,),
+                (trade_id,),
             )
             if cur.fetchone() is None:
-                raise WriteNotFound(f"No trade {strategy_instance_id}.")
-            n_direct, n_split = _attributed_counts(cur, strategy_instance_id)
+                raise WriteNotFound(f"No trade {trade_id}.")
+            n_direct, n_split = _attributed_counts(cur, trade_id)
             if n_split:
                 raise WriteConflict(
                     f"{ws.plural(n_split, 'fill is', 'fills are')} split to this trade; "
@@ -328,15 +331,15 @@ def delete_instance_strict(status_config: Any, strategy_instance_id: int) -> Dic
                 raise WriteConflict(
                     f"{ws.plural(n_direct, 'fill is', 'fills are')} attributed to this trade."
                 )
-            n_plans, n_reviews = _plan_and_review_counts(cur, strategy_instance_id)
+            n_plans, n_reviews = _plan_and_review_counts(cur, trade_id)
             if n_plans or n_reviews:
                 held = [ws.plural(n_plans, "plan was", "plans were") + " filled by it"] if n_plans else []
                 held += ["it has a review"] if n_reviews else []
-                raise WriteConflict(f"Cannot delete instance {strategy_instance_id}: {' and '.join(held)}.")
+                raise WriteConflict(f"Cannot delete instance {trade_id}: {' and '.join(held)}.")
             cur.execute(
                 "DELETE FROM trade WHERE trade_id = %s",
-                (strategy_instance_id,),
+                (trade_id,),
             )
             if cur.rowcount == 0:
-                raise WriteNotFound(f"No trade {strategy_instance_id}.")
-    return {"deleted": "hard", "strategy_instance_id": strategy_instance_id, "trade_id": strategy_instance_id}
+                raise WriteNotFound(f"No trade {trade_id}.")
+    return {"deleted": "hard", "trade_id": trade_id}

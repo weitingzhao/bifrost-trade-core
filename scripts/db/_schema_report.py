@@ -19,7 +19,6 @@ EXPECTED_TABLES_BY_CATEGORY: Dict[str, List[str]] = {
         # IPC tables retired → Redis (redis_daemon_state)
     ],
     "execution": [
-        "account_execution_instance_allocation",
         "trade_execution",
         "account_execution_option_stock_link",
     ],

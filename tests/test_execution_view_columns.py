@@ -5,7 +5,8 @@ The Rev .111 rename plan once mapped the strategy attribution to ``trade_id`` as
 the first DDL would have failed on a duplicate column, and a hand fix would have left
 one name for two ids. Naming R3 (core 0.45.0) renamed the env views' attribution to
 ``trade_id`` and aliased the IB columns (``ib_trade_id`` / ``ib_related_trade_id``) in the
-same change, keeping ``strategy_instance_id`` (= ``trade_id``) one version.
+same change, keeping ``strategy_instance_id`` (= ``trade_id``) one version; naming R4
+(core 0.47.0) dropped it and the ``instance_allocations`` view.
 """
 
 from __future__ import annotations
@@ -46,7 +47,7 @@ def _views(env: bool) -> dict:
     out = {}
     for sql in rec.sql:
         m = re.match(r"\s*CREATE OR REPLACE VIEW brokerage\.(\w+) AS", sql)
-        if m and m.group(1) not in ("instance_allocations", "trade_fill_splits"):
+        if m and m.group(1) != "trade_fill_splits":
             out[m.group(1)] = _output_columns(sql)
     return out
 
@@ -66,10 +67,10 @@ def test_each_execution_view_names_every_column_once(env: bool) -> None:
         assert cols.count("trade_id") == 1, name
         assert cols[0] == "account_executions_id", name
         if env:
-            assert {"ib_trade_id", "ib_related_trade_id", "strategy_instance_id"} <= set(cols), name
+            assert {"ib_trade_id", "ib_related_trade_id"} <= set(cols), name
             assert "related_trade_id" not in cols, name
-            # the one-version alias sits right after the attribution it copies
-            assert cols.index("strategy_instance_id") == cols.index("trade_id") + 1, name
+            # naming R4: the one-version alias of the attribution is gone
+            assert "strategy_instance_id" not in cols, name
         else:
             assert "ib_trade_id" not in cols and "related_trade_id" in cols, name
 
@@ -85,8 +86,6 @@ def test_split_views_name_their_columns() -> None:
     assert _output_columns(sql["trade_fill_splits"]) == [
         "account_id", "account_executions_id", "trade_id", "quantity", "exec_id",
     ]
-    # the one-version compatibility view keeps core 0.44.0's columns, over the new one
-    assert _output_columns(sql["instance_allocations"]) == [
-        "account_id", "account_executions_id", "strategy_instance_id", "allocated_quantity", "exec_id",
-    ]
-    assert "FROM brokerage.trade_fill_splits" in sql["instance_allocations"]
+    # naming R4: R3's compatibility view is not made any more, and is dropped by name first
+    assert "instance_allocations" not in sql
+    assert rec.sql[0] == "DROP VIEW IF EXISTS brokerage.instance_allocations"

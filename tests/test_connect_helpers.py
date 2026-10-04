@@ -104,7 +104,7 @@ def test_conn_from_config_returns_the_connection(
 
 _ACCOUNTS_CASES = [
     # (callable, expected result, expected connects as golden flags in order)
-    (lambda: accounts.replace_execution_instance_allocations(CFG, 5, []), False, [False]),
+    (lambda: accounts.replace_execution_fill_splits(CFG, 5, []), False, [False]),
     (lambda: accounts.sync_accounts_snapshot_to_db(CFG, [{"account_id": "U0000001"}]), False, [True]),
     (lambda: accounts.write_account_executions_to_db(CFG, [{"exec_id": "x1"}]), False, [True]),
     (lambda: accounts.update_execution_commission(CFG, "x1", 1.0, None, "USD"), False, [True]),

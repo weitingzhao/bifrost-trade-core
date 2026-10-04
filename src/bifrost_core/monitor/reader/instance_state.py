@@ -125,9 +125,9 @@ _LEGS_SQL = f"""
 """
 
 
-def read_instance_legs(cur: Any, strategy_instance_ids: Optional[List[int]] = None) -> Dict[int, List[InstanceLeg]]:
-    """Every attributed instance's option legs, or only those of ``strategy_instance_ids``."""
-    cur.execute(_LEGS_SQL, {"ids": list(strategy_instance_ids) if strategy_instance_ids else None})
+def read_instance_legs(cur: Any, trade_ids: Optional[List[int]] = None) -> Dict[int, List[InstanceLeg]]:
+    """Every attributed instance's option legs, or only those of ``trade_ids``."""
+    cur.execute(_LEGS_SQL, {"ids": list(trade_ids) if trade_ids else None})
     out: Dict[int, List[InstanceLeg]] = {}
     for row in cur.fetchall():
         if isinstance(row, dict):
@@ -148,10 +148,10 @@ def read_instance_legs(cur: Any, strategy_instance_ids: Optional[List[int]] = No
 
 
 def instance_states(
-    cur: Any, strategy_instance_ids: Iterable[int], today: Optional[date] = None
+    cur: Any, trade_ids: Iterable[int], today: Optional[date] = None
 ) -> Dict[int, Tuple[str, Optional[date]]]:
-    """``{strategy_instance_id: (state, closed_on)}`` for the given instances."""
-    ids = [int(i) for i in strategy_instance_ids]
+    """``{trade_id: (state, closed_on)}`` for the given instances."""
+    ids = [int(i) for i in trade_ids]
     if not ids:
         return {}
     legs = read_instance_legs(cur, ids)

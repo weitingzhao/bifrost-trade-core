@@ -16,12 +16,12 @@ Trade answers the questions the platform asks, by role rather than by table:
   across envs for the market-data plugin (``GET /api/v1/watchlist/union``) instead of
   selecting from ``public.watchlist`` itself (core 0.44.0).
 
-The seeds below are Trade's own names. Naming R3 (core 0.45.0) renamed ``strategy_instance``
-to ``trade``; each role names its table as a list of candidates, newest first, and the
-first one that is a *table* (``relkind`` r / p) answers. So the probe is right on a renamed
-database (``trade``; the compatibility view ``strategy_instance`` is skipped -- a view has
-no rows of its own to clone and ``TRUNCATE`` refuses it) and still right on one that is not
-renamed yet or was rolled back (``strategy_instance``). A role with no table at all is
+The seeds below are Trade's own names. Each role names its table as a list of candidates,
+newest first, and the first one that is a *table* (``relkind`` r / p) answers (a view has no
+rows of its own to clone and ``TRUNCATE`` refuses it). Naming R3 (core 0.45.0) renamed
+``strategy_instance`` to ``trade``; from 0.45.0 to 0.46.x the old name was the trade role's
+second candidate, and naming R4 (core 0.47.0) dropped it -- db-init refuses a database that
+is not renamed (``trade_ddl.refuse_unmigrated_trade_entity``). A role with no table at all is
 reported with ``last_ts: null`` / a ``detail``, never dropped. Read-only: every statement
 is a SELECT.
 """
@@ -34,8 +34,8 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 logger = logging.getLogger(__name__)
 
-# The trade table under its R3 name first, then its name before R3 (a database not renamed yet).
-TRADE_TABLES: Tuple[str, ...] = ("trade", "strategy_instance")
+# The trade table (named so since naming R3, core 0.45.0).
+TRADE_TABLES: Tuple[str, ...] = ("trade",)
 
 # (source label, candidate tables, timestamp column)
 ACTIVITY_SOURCES: Tuple[Tuple[str, Tuple[str, ...], str], ...] = (

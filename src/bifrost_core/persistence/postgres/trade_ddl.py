@@ -7,12 +7,16 @@ FK columns of ``strategy_plan`` / ``trade_review`` -> ``trade_id``, and ``trade_
 -> ``tags_*_json`` (REQUEST-naming-program-decision-pack-2026-10-03, D1-A / D2-A).
 
 A new database gets the new names here. An existing one is renamed by the Owner's one-off
-step (``scripts/db/rename_trade_entity.py``, one transaction per env), never by db-init:
+step (core 0.45.0's ``scripts/db/rename_trade_entity.py``, one transaction per env, retired in
+0.47.0 after it ran on all three envs; the SQL is kept in the infra db-steps), never by db-init:
 ``refuse_unmigrated_trade_entity`` stops ``_ensure_tables`` before it changes anything while
 ``public.strategy_instance`` is still a table, because creating ``trade`` beside it would
-split the book in two. After the rename ``strategy_instance`` and
-``strategy_instance_execution`` are compatibility views (one version, dropped in R4) and
-every statement here is a no-op.
+split the book in two. After the rename every statement here is a no-op.
+
+Naming R4 (core 0.47.0): R3's compatibility views ``public.strategy_instance`` /
+``public.strategy_instance_execution`` and the frozen pre-TD-09 split table
+``account_execution_instance_allocation`` are no longer created or named here; the Owner's R4
+db-step drops them (the table after a CSV export, D7-A).
 """
 
 from __future__ import annotations
@@ -24,8 +28,9 @@ TRADE = "trade"
 # The un-migrated shape: the old entity table is still a base table.
 UNMIGRATED_MESSAGE = (
     "public.strategy_instance is still a table: this database is not on the naming R3 rename "
-    "(core 0.45.0 names it public.trade). Run the Owner's step first -- "
-    "python scripts/db/rename_trade_entity.py --env <env> | psql ... (dry run), then with --commit -- "
+    "(core 0.45.0 names it public.trade). Run the Owner's R3 step first -- core 0.45.0's "
+    "scripts/db/rename_trade_entity.py, committed per env in bifrost-trade-infra "
+    "scripts/release/db-steps.d/sql/2026-10-04-r3-rename-trade-entity-<env>.sql -- "
     "and run db-init again. Nothing was changed."
 )
 
@@ -33,8 +38,8 @@ UNMIGRATED_MESSAGE = (
 def refuse_unmigrated_trade_entity(cur: Any) -> None:
     """Raise RuntimeError when ``public.strategy_instance`` is a base table (not yet renamed).
 
-    A view of that name is the R3 compatibility view and is fine; no object at all is a new
-    database. Mirrors the TD-09 precheck in ``setup_fdw_foreign_tables``: stop before the
+    A view of that name is R3's compatibility view (until the R4 db-step drops it) and is
+    fine; no object at all is a renamed or a new database. Mirrors the TD-09 precheck in ``setup_fdw_foreign_tables``: stop before the
     first change, with the command that fixes it."""
     cur.execute(
         "SELECT c.relkind FROM pg_class c WHERE c.oid = to_regclass('public.strategy_instance')"
@@ -84,9 +89,6 @@ TRADE_EXECUTION_DDL: tuple[str, ...] = (
     "CREATE INDEX IF NOT EXISTS trade_execution_trade_ix "
     "ON trade_execution (trade_id)",
 )
-
-# Old name, one version (R4 removes it).
-STRATEGY_INSTANCE_EXECUTION_DDL = TRADE_EXECUTION_DDL
 
 _TRADE_SQL = """
 CREATE TABLE IF NOT EXISTS trade (
@@ -151,21 +153,6 @@ CREATE TABLE IF NOT EXISTS trade_review (
 )
 """
 
-# Frozen since TD-09 (no reader, no writer; its rows are in trade_execution). Dropped in R4
-# (D7-A). Its column keeps the old name: the table goes as it is.
-_LEGACY_SPLIT_SQL = """
-CREATE TABLE IF NOT EXISTS account_execution_instance_allocation (
-    account_execution_instance_allocation_id bigserial PRIMARY KEY,
-    account_id text NOT NULL,
-    account_executions_id bigint NOT NULL,
-    strategy_instance_id bigint NOT NULL REFERENCES trade(trade_id) ON DELETE RESTRICT,
-    allocated_quantity double precision NOT NULL,
-    created_at timestamptz NOT NULL DEFAULT now(),
-    updated_at timestamptz NOT NULL DEFAULT now(),
-    UNIQUE (account_executions_id, strategy_instance_id)
-)
-"""
-
 
 def ensure_trade_tables(cur: Any, log_table: Optional[Callable[[str, str], None]] = None) -> None:
     """Create the Trade entity's tables and indexes if missing. Run after ``strategy_opportunity``
@@ -196,20 +183,6 @@ def ensure_trade_tables(cur: Any, log_table: Optional[Callable[[str, str], None]
     cur.execute(_TRADE_REVIEW_SQL)
 
     _log_table(
-        "account_execution_instance_allocation",
-        "Frozen pre-TD-09 fill splits (no reader or writer; dropped in naming R4)",
-    )
-    cur.execute(_LEGACY_SPLIT_SQL)
-    cur.execute(
-        "CREATE INDEX IF NOT EXISTS account_exec_inst_alloc_account_exec_id "
-        "ON account_execution_instance_allocation (account_id, account_executions_id)"
-    )
-    cur.execute(
-        "CREATE INDEX IF NOT EXISTS account_exec_inst_alloc_strategy_instance_id "
-        "ON account_execution_instance_allocation (strategy_instance_id)"
-    )
-
-    _log_table(
         "trade_execution",
         "A fill (account_id, exec_id) attributed to this env's trade; splits carry split_quantity (TD-09, R3)",
     )
@@ -218,7 +191,6 @@ def ensure_trade_tables(cur: Any, log_table: Optional[Callable[[str, str], None]
 
 
 __all__ = [
-    "STRATEGY_INSTANCE_EXECUTION_DDL",
     "TRADE",
     "TRADE_EXECUTION_DDL",
     "UNMIGRATED_MESSAGE",

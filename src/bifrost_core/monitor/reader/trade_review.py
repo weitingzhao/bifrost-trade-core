@@ -1,4 +1,4 @@
-"""Trade reviews: one record per strategy instance.
+"""Trade reviews: one record per trade.
 
 Review › Queue and Review › Single trade read the same rows (design Rev .110):
 an instance is *awaiting* until its review is stamped `reviewed_at`, and the
@@ -26,18 +26,16 @@ from psycopg2.extras import RealDictCursor
 
 from bifrost_core.monitor.reader import write_support as ws
 from bifrost_core.monitor.reader.errors import WriteFailed, WriteInvalid, WriteNotFound
-from bifrost_core.monitor.reader.trade_names import add_review_tag_names, review_fields_as_columns
 
 logger = logging.getLogger(__name__)
 
 TAG_MAX = 40
 TAG_LEN_MAX = 60
 
-# Read back under the names the rows have carried since core 0.42.0 (``_row_out`` adds the
-# new ones beside them); the columns are trade_id / tags_*_json since naming R3 (core 0.45.0).
+# The rows carry the column names (trade_id, tags_*_json; naming R3, core 0.45.0). From core
+# 0.42.0 to 0.46.x they carried strategy_instance_id / tags_added / tags_dropped beside them.
 _COLUMNS = """
-    trade_review_id, trade_id AS strategy_instance_id,
-    tags_added_json AS tags_added, tags_dropped_json AS tags_dropped,
+    trade_review_id, trade_id, tags_added_json, tags_dropped_json,
     reviewed_at, created_at, updated_at
 """
 
@@ -70,7 +68,7 @@ def _close(conn: Any) -> None:
 
 def _row_out(row: Dict[str, Any]) -> Dict[str, Any]:
     out = dict(row)
-    for key in ("tags_added", "tags_dropped"):
+    for key in ("tags_added_json", "tags_dropped_json"):
         raw = out.get(key)
         if isinstance(raw, str):
             try:
@@ -79,8 +77,7 @@ def _row_out(row: Dict[str, Any]) -> Dict[str, Any]:
                 raw = []
         out[key] = [str(t) for t in raw] if isinstance(raw, list) else []
     out["reviewed"] = out.get("reviewed_at") is not None
-    # trade_id and tags_added_json / tags_dropped_json beside the column names (naming R1).
-    return add_review_tag_names(out)
+    return out
 
 
 def list_reviews(status_config: Optional[dict]) -> List[Dict[str, Any]]:
@@ -102,7 +99,7 @@ def list_reviews(status_config: Optional[dict]) -> List[Dict[str, Any]]:
 
 def save_review(
     status_config: Optional[dict],
-    strategy_instance_id: int,
+    trade_id: int,
     payload: Dict[str, Any],
 ) -> Optional[Dict[str, Any]]:
     """Upsert one instance's review and return it.
@@ -117,8 +114,8 @@ def save_review(
     conn = _conn_from_config(status_config)
     if conn is None:
         return None
-    added = clean_tags(payload.get("tags_added"))
-    dropped = clean_tags(payload.get("tags_dropped"))
+    added = clean_tags(payload.get("tags_added_json"))
+    dropped = clean_tags(payload.get("tags_dropped_json"))
     reviewed = payload.get("reviewed")
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
@@ -143,7 +140,7 @@ def save_review(
                 RETURNING {_COLUMNS}
                 """,
                 {
-                    "id": int(strategy_instance_id),
+                    "id": int(trade_id),
                     "added": None if added is None else json.dumps(added),
                     "dropped": None if dropped is None else json.dumps(dropped),
                     "reviewed": reviewed,
@@ -164,11 +161,11 @@ def save_review(
 
 # --- TD-15 writer (core 0.33.0): return the row / raise Write* ----------------------
 
-REVIEW_PATCHABLE = ("tags_added", "tags_dropped", "reviewed")
+REVIEW_PATCHABLE = ("tags_added_json", "tags_dropped_json", "reviewed")
 
 NOTE_RETIRED = (
     "note was removed in core 0.43.0 (TD-73): a trade's notes live in the Research journal "
-    "(POST /research/journal/notes with a ref of type 'inst')."
+    "(POST /research/journal/notes with a ref of type 'trade')."
 )
 
 
@@ -184,30 +181,30 @@ def _patch_tags(value: Any, name: str) -> List[str]:
     return out
 
 
-def patch_review(conn_or_config: Any, strategy_instance_id: int, fields: Dict[str, Any]) -> Dict[str, Any]:
+def patch_review(conn_or_config: Any, trade_id: int, fields: Dict[str, Any]) -> Dict[str, Any]:
     """Change one instance's review; return it in ``save_review``'s shape (with ``reviewed``).
 
     The review is keyed by the instance and has no state of its own before the first
     write, so a missing review row is created; a missing *instance* is WriteNotFound.
-    ``tags_added`` / ``tags_dropped``: lists of text (trimmed, at most 60 characters each
+    ``tags_added_json`` / ``tags_dropped_json``: lists of text (trimmed, at most 60 characters each
     and 40 tags; a repeat is kept once), replaced whole, ``[]`` empties, null refused.
     ``reviewed``: true stamps ``reviewed_at`` (a
     second true keeps the first stamp), false clears it. Raises WriteInvalid,
     WriteNotFound, WriteFailed.
     """
-    what = f"the review of trade {strategy_instance_id}"
-    # tags_added_json / tags_dropped_json are taken too; the new name wins (naming R1).
+    what = f"the review of trade {trade_id}"
+    # tags_added / tags_dropped are unknown keys since core 0.47.0 (naming R4).
     if isinstance(fields, dict) and "note" in fields:
         raise WriteInvalid(NOTE_RETIRED)
-    fields = ws.check_fields(review_fields_as_columns(fields), REVIEW_PATCHABLE, "review")
+    fields = ws.check_fields(fields, REVIEW_PATCHABLE, "review")
     insert_cols: Dict[str, Any] = {}
     updates: List[str] = []
-    values: Dict[str, Any] = {"id": int(strategy_instance_id)}
-    for name in ("tags_added", "tags_dropped"):
+    values: Dict[str, Any] = {"id": int(trade_id)}
+    for name in ("tags_added_json", "tags_dropped_json"):
         if name in fields:
             values[name] = json.dumps(_patch_tags(fields[name], name))
-            insert_cols[f"{name}_json"] = f"%({name})s::jsonb"
-            updates.append(f"{name}_json = EXCLUDED.{name}_json")
+            insert_cols[name] = f"%({name})s::jsonb"
+            updates.append(f"{name} = EXCLUDED.{name}")
     if "reviewed" in fields:
         values["reviewed"] = ws.boolean(fields["reviewed"], "reviewed")
         insert_cols["reviewed_at"] = "CASE WHEN %(reviewed)s THEN now() ELSE NULL END"
@@ -229,7 +226,7 @@ def patch_review(conn_or_config: Any, strategy_instance_id: int, fields: Dict[st
                 values,
             )
             if cur.fetchone() is None:
-                raise WriteNotFound(f"No trade {strategy_instance_id}.")
+                raise WriteNotFound(f"No trade {trade_id}.")
             cur.execute(sql, values)
             row = cur.fetchone()
         if row is None:

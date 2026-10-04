@@ -38,7 +38,6 @@ from typing import Any, Dict, List, Optional
 from psycopg2.extras import RealDictCursor
 
 from bifrost_core.monitor.reader import write_support as ws
-from bifrost_core.monitor.reader.trade_names import add_trade_names
 from bifrost_core.monitor.reader.errors import WriteConflict, WriteFailed, WriteInvalid, WriteNotFound
 
 logger = logging.getLogger(__name__)
@@ -62,7 +61,7 @@ _PLAN_COLUMNS = """
     p.target_kind, p.target_value, p.stop_kind, p.stop_value, p.exit_by,
     p.rationale, p.source_kind, p.source_ref, p.source_json,
     p.status, p.expires_at, p.intended_at, i.opened_at AS filled_at, p.cancelled_at,
-    p.trade_id AS strategy_instance_id, p.parent_strategy_plan_id, p.created_at, p.updated_at
+    p.trade_id, p.parent_strategy_plan_id, p.created_at, p.updated_at
 """
 _PLAN_FROM = "strategy_plan p LEFT JOIN trade i ON i.trade_id = p.trade_id"
 
@@ -207,7 +206,7 @@ def _row_out(row: Dict[str, Any]) -> Dict[str, Any]:
         elif raw is None:
             out[key] = []
     out["effective_status"] = plan_effective_status(out.get("status"), out.get("expires_at"))
-    return add_trade_names(out)  # trade_id beside strategy_instance_id (naming R1)
+    return out
 
 
 def list_plans(
@@ -403,7 +402,7 @@ def intend_plan(status_config: Optional[dict], strategy_plan_id: int) -> bool:
 
 
 def link_fill(
-    status_config: Optional[dict], strategy_plan_id: int, strategy_instance_id: int
+    status_config: Optional[dict], strategy_plan_id: int, trade_id: int
 ) -> bool:
     """Say which instance an intent turned into. `filled_at` reads as the instance's own open
     (not stored since core 0.41.0); the table's CHECK holds `filled` and the instance together."""
@@ -428,11 +427,11 @@ def link_fill(
             cur.execute(
                 "SELECT account_id FROM trade "
                 "WHERE trade_id = %s",
-                (strategy_instance_id,),
+                (trade_id,),
             )
             instance = cur.fetchone()
             if instance is None:
-                raise PlanRuleError(f"No trade {strategy_instance_id}.")
+                raise PlanRuleError(f"No trade {trade_id}.")
             if str(instance["account_id"]) != str(row["account_id"]):
                 raise PlanRuleError(
                     f"That instance belongs to account {instance['account_id']}, "
@@ -441,7 +440,7 @@ def link_fill(
             cur.execute(
                 "UPDATE strategy_plan SET status = 'filled', trade_id = %s, "
                 "updated_at = now() WHERE strategy_plan_id = %s",
-                (strategy_instance_id, strategy_plan_id),
+                (trade_id, strategy_plan_id),
             )
         conn.commit()
         return True

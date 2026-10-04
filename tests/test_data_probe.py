@@ -2,7 +2,7 @@
 
 The unit tests script the database; the ``db`` tests run the FK closure on the real
 schema, where ``trades`` must hold every table ``TRUNCATE trade CASCADE`` would empty
-(``strategy_instance`` before naming R3; a compatibility view of that name is never a seed).
+(``trade``; core 0.45.0 to 0.46.x also tried ``strategy_instance``, naming R4 dropped it).
 """
 
 from __future__ import annotations
@@ -69,24 +69,24 @@ def test_a_missing_watchlist_is_null_not_an_empty_list() -> None:
 
 
 def test_a_missing_source_is_reported_not_dropped() -> None:
-    # neither trade nor strategy_instance is a table
-    out = data_probe.read_data_probe(_scripted(missing=2))
+    # trade is no table
+    out = data_probe.read_data_probe(_scripted(missing=1))
     assert out["activity"][0] == {"source": "trades", "last_ts": None, "detail": "missing"}
     assert len(out["activity"]) == 3
 
 
-def test_a_database_before_r3_answers_with_strategy_instance() -> None:
-    """Not renamed yet (or rolled back): ``trade`` is no table, ``strategy_instance`` is."""
+def test_the_old_trade_table_name_is_not_tried() -> None:
+    """Naming R4: ``strategy_instance`` is not a candidate any more (db-init refuses such a database)."""
     conn = _scripted(missing=1)
     out = data_probe.read_data_probe(conn)
-    assert out["activity"][0] == {"source": "trades", "last_ts": "2031-03-04T14:30:00Z"}
+    assert out["activity"][0] == {"source": "trades", "last_ts": None, "detail": "missing"}
     looked_up = [params[0] for text, params in conn.executed if text.startswith(IS_TABLE)]
-    assert looked_up[:2] == ["trade", "strategy_instance"]
-    assert any("FROM strategy_instance" in text for text, _ in conn.executed)
+    assert "strategy_instance" not in looked_up
+    assert not any("FROM strategy_instance" in text for text, _ in conn.executed)
 
 
-def test_the_trade_table_is_named_trade_first() -> None:
-    assert data_probe.TRADE_TABLES == ("trade", "strategy_instance")
+def test_the_trade_table_is_named_trade() -> None:
+    assert data_probe.TRADE_TABLES == ("trade",)
     assert data_probe.CLONE_GROUPS[0][1] == (data_probe.TRADE_TABLES,)
     assert data_probe.SAMPLE == ("trades", data_probe.TRADE_TABLES)
 
@@ -107,9 +107,11 @@ def test_the_trades_group_is_what_truncate_cascade_would_empty(pg_conn) -> None:
     groups = {g["name"]: g for g in out["clone_groups"]}
     trades = groups["trades"]["tables"]
     assert trades[0] == "trade"
-    for child in ("trade_execution", "strategy_plan", "trade_review", "account_execution_instance_allocation"):
+    for child in ("trade_execution", "strategy_plan", "trade_review"):
         assert child in trades
-    assert "strategy_instance" not in trades  # a compatibility view is never cloned
+    # naming R4: db-init no longer creates the frozen split table, and no view is ever cloned
+    assert "account_execution_instance_allocation" not in trades
+    assert "strategy_instance" not in trades
     # The opportunity group holds the trades group: a trade references its opportunity.
     assert set(trades) <= set(groups["rules"]["tables"])
     assert groups["watchlist"]["tables"][0] == "watchlist"

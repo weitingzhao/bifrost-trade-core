@@ -423,9 +423,9 @@ def test_delete_plan_strict() -> None:
 
 _REVIEW_ROW = {
     "trade_review_id": 1,
-    "strategy_instance_id": 41,
-    "tags_added": '["early exit"]',
-    "tags_dropped": "[]",
+    "trade_id": 41,
+    "tags_added_json": '["early exit"]',
+    "tags_dropped_json": "[]",
     "reviewed_at": None,
     "created_at": None,
     "updated_at": None,
@@ -435,7 +435,7 @@ _REVIEW_ROW = {
 def test_review_patch_upserts_only_the_sent_fields_and_returns_the_row() -> None:
     conn = FakeConn([("FROM trade WHERE trade_id", Reply(one=(1,))), ("INSERT INTO trade_review", Reply(one=_REVIEW_ROW))])
     row = trade_review.patch_review(conn, 41, {"reviewed": True})
-    assert row["tags_added"] == ["early exit"] and row["reviewed"] is False
+    assert row["tags_added_json"] == ["early exit"] and row["reviewed"] is False
     sql, params = conn.statement("INSERT INTO trade_review")
     assert "reviewed_at = CASE" in sql
     assert "tags_added" not in sql.split("DO UPDATE SET")[1].split("RETURNING")[0]
@@ -447,7 +447,7 @@ def test_review_patch_rules() -> None:
     with pytest.raises(WriteInvalid, match="Nothing to change"):
         trade_review.patch_review(FakeConn(), 41, {})
     with pytest.raises(WriteInvalid, match=r"send \[\]"):
-        trade_review.patch_review(FakeConn(), 41, {"tags_added": None})
+        trade_review.patch_review(FakeConn(), 41, {"tags_added_json": None})
     with pytest.raises(WriteInvalid, match="true or false"):
         trade_review.patch_review(FakeConn(), 41, {"reviewed": None})
     with pytest.raises(WriteInvalid, match="Unknown review field"):
@@ -598,7 +598,7 @@ def test_count_attributed_executions_reads_this_env(two_dbs) -> None:
 def test_instance_delete_succeeds_when_nothing_is_attributed(two_dbs) -> None:
     env = _env((_COUNTS, Reply(one=(0, 0))))
     two_dbs(env, FakeConn())
-    assert strategy_instance.delete_instance_strict(CFG, 41) == {"deleted": "hard", "strategy_instance_id": 41, "trade_id": 41}
+    assert strategy_instance.delete_instance_strict(CFG, 41) == {"deleted": "hard", "trade_id": 41}
     assert env.ran("DELETE FROM trade WHERE") and env.commits == 1
 
 

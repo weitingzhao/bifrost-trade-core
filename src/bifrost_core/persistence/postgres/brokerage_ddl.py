@@ -513,7 +513,8 @@ def setup_fdw_foreign_tables(
         if (cur.fetchone() or [None])[0] is None:
             raise RuntimeError(
                 f"public.{TRADE_EXECUTION} is missing: run _ensure_tables (db_refresh_schema) first "
-                "(a database still on strategy_instance_execution needs scripts/db/rename_trade_entity.py)."
+                "(a database still on strategy_instance_execution needs the R3 rename, infra db-step "
+                "2026-10-04-r3-rename-trade-entity)."
             )
         if not skip_server_admin:
             cur.execute("CREATE EXTENSION IF NOT EXISTS postgres_fdw")
