@@ -52,38 +52,6 @@ def get_bars_via_plugin(
     return resp.get("rows", [])
 
 
-def get_bars_latest_via_plugin(
-    symbol: str,
-    period: str = "1 D",
-) -> Optional[float]:
-    """GET /stocks/db/bars/latest → {ok, latest_ts}. Returns Unix timestamp or None."""
-    resp = _get_json(
-        "/stocks/db/bars/latest",
-        {"symbol": symbol, "period": period},
-    )
-    ts = resp.get("latest_ts")
-    return float(ts) if ts is not None else None
-
-
-def get_bar_times_in_range_via_plugin(
-    symbol: str,
-    period: str = "1 D",
-    start_ts: float = 0,
-    end_ts: float = 0,
-) -> List[float]:
-    """GET /stocks/db/bars/range → {ok, times}. Returns list of Unix timestamps."""
-    resp = _get_json(
-        "/stocks/db/bars/range",
-        {
-            "symbol": symbol,
-            "period": period,
-            "start_ts": str(start_ts),
-            "end_ts": str(end_ts),
-        },
-    )
-    return [float(t) for t in (resp.get("times") or []) if t is not None]
-
-
 def get_bars_benchmark_via_plugin(
     symbols: List[str],
     on_or_before: Optional[str] = None,
@@ -108,14 +76,6 @@ def get_bars_stats_via_plugin(
 ) -> Dict[str, Any]:
     """GET /stocks/db/bars/stats → {ok, symbol, stock_day, stock_min}."""
     return _get_json("/stocks/db/bars/stats", {"symbol": symbol})
-
-
-def get_bars_coverage_via_plugin(
-    symbols: List[str],
-) -> List[Dict[str, Any]]:
-    """GET /stocks/db/bars/coverage → {ok, symbols, count}. Returns list of coverage dicts."""
-    resp = _get_json("/stocks/db/bars/coverage", {"symbols": ",".join(symbols)})
-    return resp.get("symbols", [])
 
 
 def get_caret_symbols_via_plugin() -> List[str]:
@@ -176,4 +136,3 @@ def get_option_bars_minute_via_plugin(
 
 
 # ─── Readiness data endpoints (W2 cleanup) ────────────────────────────────────
-

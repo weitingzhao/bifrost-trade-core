@@ -118,8 +118,10 @@ def test_every_core_module_imports_first() -> None:
 # --- the lazy facade still exports exactly what the eager one did ---------------------
 
 # 0.34.0 dropped write_ohlc_bars_to_db, write_stock_bars and delete_stock_bars_for_symbol
-# (TD-78: no caller in api, worker or Flex).
-_EXPORTED_0_34_0 = {
+# (TD-78: no caller in api, worker or Flex). 0.46.0 (TD-80 C1-b) dropped the package-level
+# re-exports of the 12 accounts / status / settings write functions: every downstream imports
+# them from the defining module.
+_EXPORTED_0_46_0 = {
     "ReadFailed",
     "StatusReader",
     "WriteConflict",
@@ -127,27 +129,15 @@ _EXPORTED_0_34_0 = {
     "WriteFailed",
     "WriteInvalid",
     "WriteNotFound",
-    "batch_update_execution_strategy",
-    "delete_one_execution",
-    "insert_one_execution",
-    "sync_accounts_snapshot_to_db",
-    "update_execution_commission",
-    "update_one_execution",
-    "upsert_account_transactions",
-    "write_account_executions_to_db",
-    "write_control_command",
-    "write_heartbeat_interval",
-    "write_ib_config",
-    "write_run_status",
 }
 
 
 def test_reader_exports_unchanged() -> None:
-    assert set(reader.__all__) == _EXPORTED_0_34_0
-    assert set(reader._LAZY) == _EXPORTED_0_34_0
+    assert set(reader.__all__) == _EXPORTED_0_46_0
+    assert set(reader._LAZY) == _EXPORTED_0_46_0
 
 
-@pytest.mark.parametrize("name", sorted(_EXPORTED_0_34_0))
+@pytest.mark.parametrize("name", sorted(_EXPORTED_0_46_0))
 def test_reader_export_is_the_defining_object(name: str) -> None:
     defining = importlib.import_module(reader._LAZY[name])
     assert getattr(reader, name) is getattr(defining, name)
@@ -156,15 +146,19 @@ def test_reader_export_is_the_defining_object(name: str) -> None:
 def test_reader_star_import_and_dir() -> None:
     ns: dict[str, object] = {}
     exec("from bifrost_core.monitor.reader import *", ns)
-    assert _EXPORTED_0_34_0 <= set(ns)
-    assert _EXPORTED_0_34_0 <= set(dir(reader))
+    assert _EXPORTED_0_46_0 <= set(ns)
+    assert _EXPORTED_0_46_0 <= set(dir(reader))
 
 
-def test_reader_submodule_attribute_still_resolves_without_explicit_import() -> None:
+def test_reader_submodule_is_reached_by_importing_it() -> None:
+    """0.46.0 dropped the fallback that imported a submodule on attribute access."""
     proc = _run(
+        "import importlib\n"
         "import bifrost_core.monitor.reader as r\n"
-        "assert r.common.StatusReader is r.StatusReader\n"
-        "assert callable(r.market.get_is_us_trading_day)\n"
+        "assert not hasattr(r, 'market')\n"
+        "assert r.StatusReader is importlib.import_module('bifrost_core.monitor.reader.common').StatusReader\n"
+        "from bifrost_core.monitor.reader import market\n"
+        "assert callable(market.get_market_holidays)\n"
     )
     assert proc.returncode == 0, proc.stderr
 

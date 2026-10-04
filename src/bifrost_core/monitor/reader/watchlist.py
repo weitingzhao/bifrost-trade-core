@@ -2,11 +2,11 @@
 
 ``upsert_watchlist``, ``patch_watchlist_item`` and ``delete_watchlist_strict`` (core
 0.33.0, TD-15) take exactly the fields the client sent, return the row and raise
-``Write*``; ``add_watchlist`` / ``delete_watchlist`` answer a bool for one release.
+``Write*``. The bool writers ``add_watchlist`` / ``delete_watchlist`` left in core 0.46.0 (TD-80).
 """
 
 import logging
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from psycopg2.extras import RealDictCursor
 
@@ -47,100 +47,6 @@ _WATCHLIST_VALUE_COLUMNS = (
     "source",
     "category_id",
 )
-
-
-def add_watchlist(
-    conn: Any,
-    contract_key: str,
-    symbol: Optional[str] = None,
-    sec_type: Optional[str] = None,
-    expiry: Optional[str] = None,
-    strike: Optional[float] = None,
-    option_right: Optional[str] = None,
-    display_label: Optional[str] = None,
-    source: Optional[str] = None,
-    category_id: Optional[int] = None,
-    optionable: Optional[bool] = None,
-    *,
-    clear: Iterable[str] = (),
-) -> bool:
-    """Insert a watchlist row, or update the one with this contract_key. Returns True on success.
-
-    If contract_key contains no '|', treat as stock symbol and normalize to SYMBOL|STK|||.
-
-    On UPDATE a None keeps what is stored, for every column (core 0.33.0). Until then
-    only ``optionable`` was kept: re-adding a watched symbol from the Omnibar, the
-    Symbol Dock or a drop -- which send no ``category_id`` and no ``display_label`` --
-    moved it out of its list and dropped its label (TD-15). To set a column to NULL,
-    name it in ``clear`` (``clear=("category_id",)`` moves the row out of its list);
-    ``clear`` applies only where the value passed is None. A new row gets source
-    'manual' when none is given.
-    """
-    raw = (contract_key or "").strip()
-    if not raw:
-        return False
-    if "|" not in raw:
-        contract_key = f"{raw}|STK|||"
-        if symbol is None:
-            symbol = raw
-        if sec_type is None or sec_type == "":
-            sec_type = "STK"
-    else:
-        contract_key = raw
-    to_clear = {c for c in clear if c in _WATCHLIST_VALUE_COLUMNS}
-    params: Dict[str, Any] = {
-        "contract_key": contract_key,
-        "symbol": symbol,
-        "sec_type": sec_type,
-        "expiry": expiry,
-        "strike": strike,
-        "option_right": option_right,
-        "display_label": display_label,
-        "source": source,
-        "category_id": category_id,
-        "optionable": optionable,
-    }
-    updates = []
-    for col in _WATCHLIST_VALUE_COLUMNS:
-        if col in to_clear and params[col] is None:
-            updates.append(f"{col} = NULL")
-        else:
-            updates.append(f"{col} = COALESCE(%({col})s, watchlist.{col})")
-    updates.append("optionable = COALESCE(%(optionable)s, watchlist.optionable)")
-    try:
-        with conn.cursor() as cur:
-            cur.execute(
-                f"""
-                INSERT INTO watchlist (contract_key, symbol, sec_type, expiry, strike, option_right, display_label, source, category_id, optionable)
-                VALUES (%(contract_key)s, %(symbol)s, %(sec_type)s, %(expiry)s, %(strike)s, %(option_right)s,
-                        %(display_label)s, COALESCE(%(source)s, 'manual'), %(category_id)s, %(optionable)s)
-                ON CONFLICT (contract_key) DO UPDATE SET {", ".join(updates)}
-                """,
-                params,
-            )
-        conn.commit()
-        return True
-    except Exception as e:
-        logger.warning("add_watchlist failed: %s", e)
-        try:
-            conn.rollback()
-        except Exception:
-            pass
-        return False
-
-
-def delete_watchlist(conn: Any, contract_key: Optional[str] = None) -> bool:
-    """Delete one watchlist entry by contract_key. Returns True on success."""
-    if not contract_key or not contract_key.strip():
-        return False
-    try:
-        with conn.cursor() as cur:
-            cur.execute("DELETE FROM watchlist WHERE contract_key = %s", (contract_key.strip(),))
-        conn.commit()
-        return True
-    except Exception as e:
-        logger.debug("delete_watchlist failed: %s", e)
-        return False
 
 
 # --- TD-15 writers (core 0.33.0): return the row / raise Write* ---------------------
@@ -250,7 +156,7 @@ def patch_watchlist_item(conn_or_config: Any, contract_key: str, fields: Dict[st
 
 def delete_watchlist_strict(conn_or_config: Any, contract_key: str) -> Dict[str, Any]:
     """Take a contract off the watchlist. Returns ``{"deleted": "hard", "contract_key"}``;
-    WriteNotFound when it was not on the list (``delete_watchlist`` answered True), WriteFailed."""
+    WriteNotFound when it was not on the list, WriteFailed."""
     key, _ = _watchlist_key(contract_key)
     what = f"watchlist item {key}"
     with ws.write_connection(conn_or_config, what) as conn, ws.write_transaction(conn, what):

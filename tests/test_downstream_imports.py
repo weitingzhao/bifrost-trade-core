@@ -5,6 +5,12 @@ bifrost-trade-worker 7b4c943, bifrost-platform-plugin-flex-query 059d1ea; src/ a
 including imports inside functions. bifrost-research, bifrost-platform-plugin and
 bifrost-platform-plugin-market-data import nothing from bifrost_core.
 
+Re-scanned 2026-10-04 for core 0.46.0 (TD-80 C1-b, TD-75): api cc9c72b (0.8.1), worker d1124ac
+(0.2.5) and flex-query f701de0 (0.8.1) import core's canonical paths, so the alias rows
+(``config.startup``, ``monitor.redis_url``, ``monitor.integrations.daemon_ib_edge``, the
+``monitor.reader`` package-level write functions, ``market_jobs``) and the one-version TD-75
+aliases left the table, and the canonical names those repos now import joined it.
+
 Core cannot import those repos, so the names are copied here. A failure means a change
 in core broke a downstream import: restore the name (or keep an alias) instead of editing
 this table -- unless the downstream repo has already stopped importing it.
@@ -35,17 +41,13 @@ _NAMES: dict[str, tuple[str, ...]] = {
         "get_state_space_config",
         "get_structure_config",
     ),
-    # trade-api, trade-worker
-    "bifrost_core.config.startup": (
-        "config_profile_from_resolved_path",
-        "get_effective_ib_config",
-        "normalize_server_config",
-        "read_config",
-        "resolve_startup_config_path",
-    ),
     # trade-worker
     "bifrost_core.config.yaml_config": (
+        "config_profile_from_resolved_path",  # api (TD-80 C1-a)
         "get_effective_ib_config",
+        "normalize_server_config",  # api (TD-80 C1-a)
+        "read_config",  # api, worker (TD-80 C1-a)
+        "resolve_startup_config_path",  # api (TD-80 C1-a)
     ),
     # plugin-flex-query, trade-api
     "bifrost_core.core.message_center": (
@@ -92,7 +94,6 @@ _NAMES: dict[str, tuple[str, ...]] = {
     # trade-api, trade-worker
     "bifrost_core.core.redis_health_keys": (
         "BIFROST_HEALTH_DAEMON_STRATEGY_TRADING",  # 0.39.0 (TD-75)
-        "BIFROST_HEALTH_DAEMON_TRADING_ENGINE",  # deprecated alias of the above, one version
         "BIFROST_HEALTH_IB_ACCOUNT_AGENT",
         "BIFROST_HEALTH_IB_INGESTOR",
         "BIFROST_HEALTH_IB_OPERATOR",
@@ -133,10 +134,6 @@ _NAMES: dict[str, tuple[str, ...]] = {
         "PROTOCOL_VERSION",
         "result_key",
     ),
-    # trade-worker
-    "bifrost_core.monitor.integrations.daemon_ib_edge": (
-        "derive_daemon_ib_heartbeat_from_redis",
-    ),
     # trade-api
     "bifrost_core.monitor.integrations.ib_socket_status": (
         "build_ib_socket_status",
@@ -151,9 +148,8 @@ _NAMES: dict[str, tuple[str, ...]] = {
     ),
     # plugin-flex-query, trade-api
     "bifrost_core.monitor.reader": (
-        "StatusReader",
+        "StatusReader",  # kept at package level (Owner, TD-80); api imports it from .common
         "gate_safety_write",
-        "insert_one_execution",
         "saved_search",
         "strategy_allocation_write",
         "strategy_instance",
@@ -161,17 +157,13 @@ _NAMES: dict[str, tuple[str, ...]] = {
         "strategy_plan",
         "strategy_rules_delete",
         "strategy_structure_write",
-        "sync_accounts_snapshot_to_db",
         "template_config_write",
         "trade_review",
-        "update_one_execution",
-        "upsert_account_transactions",
         "watchlist",
-        "write_account_executions_to_db",
-        "write_control_command",
-        "write_heartbeat_interval",
-        "write_ib_config",
-        "write_run_status",
+    ),
+    # trade-api
+    "bifrost_core.monitor.reader.common": (
+        "StatusReader",  # TD-80 C1-a
     ),
     # trade-api
     "bifrost_core.monitor.reader.errors": (
@@ -205,6 +197,12 @@ _NAMES: dict[str, tuple[str, ...]] = {
     # trade-api
     "bifrost_core.monitor.reader.settings": (
         "write_active_strategy_and_gates",
+        "write_ib_config",  # TD-80 C1-a
+    ),
+    # trade-api (TD-80 C1-a)
+    "bifrost_core.monitor.reader.status": (
+        "write_control_command",
+        "write_run_status",
     ),
     # trade-worker
     "bifrost_core.monitor.reader.strategy": (
@@ -217,11 +215,6 @@ _NAMES: dict[str, tuple[str, ...]] = {
     # trade-api
     "bifrost_core.monitor.reader.symbol_normalize": (
         "norm_bars_symbol",
-    ),
-    # trade-api
-    "bifrost_core.monitor.redis_url": (
-        "ib_redis_url_from_config",
-        "redis_url_from_config",
     ),
     # trade-api
     "bifrost_core.monitor.schemas.gate_params": (
@@ -254,13 +247,6 @@ _NAMES: dict[str, tuple[str, ...]] = {
     # trade-api
     "bifrost_core.monitor.services": (
         "option_strategy_templates",
-    ),
-    # trade-api
-    "bifrost_core.monitor.services.market_jobs": (
-        "TOLERANCE_END_SEC_NON_TRADING",
-        "TOLERANCE_END_SEC_TRADING_DAY",
-        "coverage_status",
-        "get_watchlist_stock_symbols",
     ),
     # trade-api
     "bifrost_core.monitor.services.strategy_parsing": (
@@ -302,7 +288,6 @@ _NAMES: dict[str, tuple[str, ...]] = {
     ),
     # trade-worker
     "bifrost_core.persistence.postgres.postgres_sink": (
-        "PostgreSQLSink",  # deprecated alias of TradingDaemonSink, one version
         "TradingDaemonSink",  # 0.39.0 (TD-75)
     ),
     # trade-worker
@@ -334,6 +319,14 @@ _NAMES: dict[str, tuple[str, ...]] = {
         "accounts",
         "instrument_class",
         "position_categories",
+    ),
+    # trade-api, plugin-flex-query (TD-80 C1-a, C1-a')
+    "bifrost_core.portfolio.reader.accounts": (
+        "insert_one_execution",
+        "sync_accounts_snapshot_to_db",
+        "update_one_execution",
+        "upsert_account_transactions",
+        "write_account_executions_to_db",
     ),
     # trade-api
     "bifrost_core.portfolio.reader.instrument_class": (

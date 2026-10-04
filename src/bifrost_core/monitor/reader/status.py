@@ -57,17 +57,6 @@ def get_daemon_heartbeat(
     return rds.trading_heartbeat_from_state(rds.read_trading_daemon_state(r))
 
 
-def get_operations(
-    conn: Any,
-    since_ts: Optional[float] = None,
-    until_ts: Optional[float] = None,
-    type_filter: Optional[str] = None,
-    limit: int = 100,
-) -> List[Dict[str, Any]]:
-    """daemon_auto_operations retired (Wave 1). Always returns empty list."""
-    return []
-
-
 def get_open_orders(conn: Any) -> List[Dict[str, Any]]:
     """R-A5: Return current open orders from brokerage.open_orders."""
     try:
@@ -102,14 +91,6 @@ def write_run_status(status_config: dict, suspended: bool) -> bool:
     if r is None:
         return False
     return rds.set_trading_run_status(r, suspended=suspended)
-
-
-def write_heartbeat_interval(status_config: dict, heartbeat_interval_sec: int) -> bool:
-    """Set trading daemon heartbeat_interval_sec on Redis state HASH (clamped 5-120)."""
-    r = _redis_from_config(status_config)
-    if r is None:
-        return False
-    return rds.set_trading_run_status(r, heartbeat_interval_sec=float(heartbeat_interval_sec))
 
 
 def get_risk_summary(conn: Any = None, *, status_config: Optional[dict] = None) -> Dict[str, Any]:

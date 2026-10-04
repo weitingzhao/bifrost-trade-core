@@ -37,7 +37,7 @@ def test_register_change_and_drop(pg_conn):
     # A change keeps the note it was not given.
     assert rows["ZZFI"]["instrument_class"] == "cash_like"
     assert rows["ZZFI"]["note"] == "bond fund"
-    assert ic.delete_instrument_class(conn, "ZZFI") is True
+    assert ic.delete_instrument_class_strict(conn, "ZZFI") == {"deleted": "hard", "contract_key": "ZZFI"}
     assert "ZZFI" not in {r["contract_key"] for r in ic.list_instrument_classes(conn)}
     pg_conn.rollback()
 

@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from bifrost_core.config.startup import (
+from bifrost_core.config.yaml_config import (
     config_profile_from_resolved_path,
     monitor_api_console_stream_key,
     ops_api_console_stream_key,

@@ -44,7 +44,7 @@ def _sell(side: Any) -> bool:
 
 
 def legacy_a(source: Any, side: Any, q: Optional[float]) -> Optional[float]:
-    """executions._QTY_NORM(_E), option_stock_link._QTY_NORM_E (SQL)."""
+    """executions._QTY_NORM_E, option_stock_link._QTY_NORM_E (SQL)."""
     if q is None:
         return None
     if str(source or "").strip().lower() == "tws_client":
@@ -130,7 +130,6 @@ def test_sql_expression_reads_side_and_quantity_only() -> None:
 def test_every_reader_site_uses_the_one_expression() -> None:
     one = signed_qty_sql("e")
     assert executions_reader._QTY_NORM_E == f"{one} AS quantity"
-    assert executions_reader._QTY_NORM == f"{signed_qty_sql(None)} AS quantity"
     assert executions_reader._SIGNED_QTY_ROW_E == one
     assert link_reader._QTY_NORM_E == one
     # tws_raw keeps the stored value (shows what TWS sent); every other scope is signed

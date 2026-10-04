@@ -155,10 +155,3 @@ def test_each_thread_has_its_own_connection(opened: List[_Conn]) -> None:
     t.join()
     assert seen[0] is None and seen[1] is opened[1]
     assert r._conn is opened[0]
-
-
-def test_close_closes_this_threads_connection(opened: List[_Conn]) -> None:
-    r = _reader()
-    r._connect()
-    r.close()
-    assert opened[0].close_calls == 1

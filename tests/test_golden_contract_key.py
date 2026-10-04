@@ -191,15 +191,13 @@ def test_oracles_reproduce_the_fixture(golden: Dict[str, Any]) -> None:
 # --- core, called directly --------------------------------------------------------------
 
 
-def test_occ_local_symbol_and_variants_match_the_oracle() -> None:
+def test_occ_local_symbol_matches_the_oracle() -> None:
+    # core 0.46.0 (TD-80) deleted executions' position-vs-execution key variants with their only
+    # reader (get_executions_by_contract_keys); the oracle keeps them so the fixture is unchanged.
     for sym, exp, k, rt in matrix():
         assert _safe(executions._occ_local_symbol, sym, str(exp), k, rt) == _safe(
             legacy.occ_local_symbol, sym, str(exp), k, rt
         )
-        pos = legacy.positions_key(_position(sym, exp, k, rt))
-        assert executions._contract_key_variants_position_vs_executions(pos) == legacy.contract_key_variants(pos)
-    for ck in VARIANT_EXTRA:
-        assert executions._contract_key_variants_position_vs_executions(ck) == legacy.contract_key_variants(ck)
 
 
 def _fallback_expected(row: Dict[str, Any]) -> Optional[str]:

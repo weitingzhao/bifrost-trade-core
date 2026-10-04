@@ -2,7 +2,6 @@
 
 import logging
 import math
-import re
 from datetime import date, datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 from zoneinfo import ZoneInfo
@@ -10,7 +9,7 @@ from zoneinfo import ZoneInfo
 from psycopg2.extras import RealDictCursor
 
 from bifrost_core.monitor.reader.trade_names import fill_split, realized_by_trade
-from bifrost_core.portfolio.contract_key import opt_key, osi_local_symbol
+from bifrost_core.portfolio.contract_key import osi_local_symbol
 from bifrost_core.portfolio.reader import keyset
 from bifrost_core.portfolio.quote_freshness import fresh_quote_sql
 from bifrost_core.portfolio.signed_qty import signed_qty_sql
@@ -94,15 +93,12 @@ def _source_scope_sql_fragment(source_scope: Optional[str]) -> str:
 
 # Exec_time as UTC epoch (Unix seconds) for API and frontend display; timestamptz stores UTC.
 _EXEC_EPOCH_E = "extract(epoch from e.exec_time)"
-_EXEC_EPOCH = "extract(epoch from exec_time)"
 _CREATED_AT_E = "extract(epoch from e.created_at) AS created_at"
-_CREATED_AT = "extract(epoch from created_at) AS created_at"
 
 # Signed quantity (TD-30, core 0.35.0): SELL / SLD / S -> -|q|, anything else -> +|q|, whatever the
 # source or the stored sign (portfolio.signed_qty). Before 0.35.0 this negated the stored value for
 # non-tws_client rows, and Flex / journal store a sell negative, so their sells read back positive.
 _QTY_NORM_E = f"{signed_qty_sql('e')} AS quantity"
-_QTY_NORM = f"{signed_qty_sql(None)} AS quantity"
 
 # Normalize commission so "cost" convention is consistent. tws_client stores commission as cost (positive);
 # other sources (e.g. flex) may use opposite sign → negate in query when not tws_client.
@@ -582,284 +578,8 @@ def get_executions_freshness(conn: Any) -> List[Dict[str, Any]]:
         return []
 
 
-def get_executions_by_contract_keys(
-    conn: Any,
-    contract_keys: List[Tuple[str, str, str, str]],
-    account_id: Optional[str] = None,
-    limit: int = 5000,
-) -> List[Dict[str, Any]]:
-    if not contract_keys or conn is None:
-        return []
-    keys_dedup = list(dict.fromkeys(contract_keys))
-    placeholders = ",".join(["(%s,%s,%s,%s)"] * len(keys_dedup))
-    values: List[Any] = []
-    for (sym, exp, strike_s, acc) in keys_dedup:
-        values.extend([sym, exp, strike_s, acc])
-    conditions = [
-        f"(e.symbol, e.expiry, COALESCE(e.strike::text,''), e.account_id) IN ({placeholders})",
-        "upper(trim(COALESCE(e.sec_type,''))) = 'OPT'",
-    ]
-    if account_id is not None and account_id.strip():
-        conditions.append("e.account_id = %s")
-        values.append(account_id.strip())
-    where = " AND ".join(conditions)
-    values.append(limit)
-    sql = f"""
-                    SELECT e.account_executions_id, e.account_id, e.exec_id, {_EXEC_EPOCH_E} AS time,
-                           e.symbol, e.sec_type, e.side, {_QTY_NORM_E}, e.price,
-                           {_COMM_NORM_E}, e.source,
-                           e.expiry, e.strike, e.option_right, e.exchange, e.order_id, e.cum_qty,
-                           {_REALIZED_PNL_COALESCE_E}, e.contract_key, c.currency, c.yield_, c.yield_redemption_date,
-                           e.trade_date, e.report_date, e.settle_date_target, e.transaction_type, e.taxes, e.net_cash,
-                           e.raw_extra, {_CREATED_AT_E}
-                    FROM {_EXEC_READ_TABLE} e
-                    LEFT JOIN {COMMISSIONS} c ON e.exec_id = c.exec_id AND e.exec_id IS NOT NULL
-                    WHERE {where}
-                    ORDER BY e.trade_date ASC NULLS LAST, e.exec_time ASC NULLS LAST, e.account_executions_id ASC
-                    LIMIT %s
-                    """
-    try:
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            try:
-                cur.execute(sql, values)
-            except Exception as col_err:
-                if "does not exist" in str(col_err).lower() or "42703" in str(getattr(col_err, "pgcode", "")):
-                    try:
-                        cur.execute(
-                            f"""
-                            SELECT e.account_executions_id, e.account_id, e.exec_id, {_EXEC_EPOCH_E} AS time,
-                                   e.symbol, e.sec_type, e.side, {_QTY_NORM_E}, e.price,
-                                   {_COMM_NORM_E}, e.source,
-                                   e.expiry, e.strike, e.option_right, e.exchange, e.order_id, e.cum_qty,
-                                   {_REALIZED_PNL_COALESCE_E}, e.contract_key, c.currency, c.yield_, c.yield_redemption_date,
-                                   e.trade_date, e.raw_extra, {_CREATED_AT_E}
-                            FROM {_EXEC_READ_TABLE} e
-                            LEFT JOIN {COMMISSIONS} c ON e.exec_id = c.exec_id
-                            WHERE {where}
-                            ORDER BY e.trade_date ASC NULLS LAST, e.exec_time ASC NULLS LAST, e.account_executions_id ASC
-                            LIMIT %s
-                            """,
-                            values,
-                        )
-                    except Exception:
-                        vals_no_acc = list(values)
-                        cur.execute(
-                            f"""
-                            SELECT account_executions_id, account_id, exec_id, {_EXEC_EPOCH} AS time,
-                                   symbol, sec_type, side, {_QTY_NORM}, price,
-                                   NULL::double precision AS commission, source,
-                                   expiry, strike, option_right, exchange, order_id, cum_qty,
-                                   fifo_pnl_realized AS realized_pnl, contract_key,
-                                   NULL::text AS currency, NULL::double precision AS yield_, NULL::integer AS yield_redemption_date,
-                                   trade_date, raw_extra, {_CREATED_AT}
-                            FROM {_EXEC_READ_TABLE}
-                            WHERE (symbol, expiry, COALESCE(strike::text,''), account_id) IN ({placeholders})
-                              AND upper(trim(COALESCE(sec_type,''))) = 'OPT'
-                            ORDER BY trade_date ASC NULLS LAST, exec_time ASC NULLS LAST, account_executions_id ASC
-                            LIMIT %s
-                            """,
-                            vals_no_acc,
-                        )
-                else:
-                    raise
-            rows = cur.fetchall()
-        return _rows_to_executions(rows, None)
-    except Exception as e:
-        logger.debug("get_executions_by_contract_keys failed: %s", e)
-        return []
-
-
 # Moved to portfolio.contract_key (TD-25); the private name stays for importers.
 _occ_local_symbol = osi_local_symbol
-
-
-def _contract_key_variants_position_vs_executions(contract_key: str) -> List[str]:
-    """
-    account_positions uses SYMBOL|OPT|YYYYMMDD|strike|C/P (e.g. RKLB|OPT|20260320|80.0|C).
-    account_executions often uses OCC local|OPT|YYYYMMDD|strike|C/P
-    (e.g. RKLB  260320C00080000|OPT|20260320|80.0|C).
-    """
-    ck = (contract_key or "").strip()
-    parts = ck.split("|")
-    if len(parts) < 5 or parts[1].strip().upper() != "OPT":
-        return [ck]
-    sym_seg, exp_raw, strike_raw, right_raw = parts[0], parts[2], parts[3], parts[4]
-    # Execution-style OCC local (positions use short symbol, e.g. RKLB vs RKLB  260320C00080000)
-    if len(sym_seg) > 6:
-        return [ck]
-    try:
-        strike_f = float(strike_raw)
-    except (TypeError, ValueError):
-        return [ck]
-    r = right_raw.strip().upper()[:1]
-    if r not in ("C", "P"):
-        r = "C"
-    exp_digits = re.sub(r"\D", "", exp_raw)
-    exp8 = exp_digits[:8] if len(exp_digits) >= 8 else exp_digits.ljust(8, "0")[:8]
-    sym = re.split(r"\s+", sym_seg.strip())[0].upper()[:6]
-    occ = osi_local_symbol(sym, exp8, strike_f, r)
-    tails = list(
-        dict.fromkeys(
-            [
-                strike_raw.strip(),
-                str(int(strike_f)) if strike_f == int(strike_f) else strike_raw,
-                f"{strike_f:.1f}",
-                f"{strike_f:g}",
-            ]
-        )
-    )
-    keys: List[str] = [ck, opt_key(occ, exp8, strike_raw.strip(), r)]
-    for t in tails:
-        keys.append(opt_key(occ, exp8, t, r))
-    return list(dict.fromkeys(keys))
-
-
-def _leg_match_tuples(account_id: str, symbol: str, expiry_raw: str, strike_val: Any) -> List[Tuple[str, str, str, str]]:
-    sym = (symbol or "").strip()
-    acc = (account_id or "").strip()
-    if not sym or not acc:
-        return []
-    exp_digits = re.sub(r"\D", "", str(expiry_raw or ""))
-    exps: set[str] = set()
-    if len(exp_digits) >= 8:
-        exps.add(exp_digits[:8])
-        exps.add(exp_digits[:6])
-    elif len(exp_digits) == 6:
-        exps.add(exp_digits)
-    elif exp_digits:
-        exps.add(exp_digits)
-    else:
-        return []
-    try:
-        strike_f = float(strike_val)
-    except (TypeError, ValueError):
-        return []
-    strikes: set[str] = set()
-    strikes.add(str(int(strike_f)) if strike_f == int(strike_f) else str(strike_f))
-    strikes.add(f"{strike_f:.1f}")
-    if strike_f == int(strike_f):
-        strikes.add(f"{int(strike_f)}.0")
-        strikes.add(str(float(int(strike_f))))
-    keys = [(sym, e, s, acc) for e in exps for s in strikes]
-    return list(dict.fromkeys(keys))
-
-
-def get_executions_for_strategy_link(
-    conn: Any,
-    account_id: str,
-    contract_key: Optional[str] = None,
-    symbol: Optional[str] = None,
-    expiry: Optional[str] = None,
-    strike: Optional[Any] = None,
-    option_right: Optional[str] = None,
-    limit: int = 200,
-) -> List[Dict[str, Any]]:
-    """Candidates to attach strategy_opportunity_id / strategy_instance_id (no insert). By contract_key first, else symbol+expiry+strike."""
-    if conn is None:
-        return []
-    acc = (account_id or "").strip()
-    if not acc:
-        return []
-    lim = max(1, min(int(limit or 200), 500))
-
-    def _run_sql(where_sql: str, params: List[Any]) -> List[Dict[str, Any]]:
-        vals = list(params) + [lim]
-        sql = f"""
-                    SELECT e.account_executions_id, e.account_id, e.exec_id, {_EXEC_EPOCH_E} AS time,
-                           e.symbol, e.sec_type, e.side, {_QTY_NORM_E}, e.price,
-                           {_COMM_NORM_E}, e.source,
-                           e.expiry, e.strike, e.option_right, e.exchange, e.order_id, e.cum_qty,
-                           {_REALIZED_PNL_COALESCE_E}, e.contract_key, c.currency, c.yield_, c.yield_redemption_date,
-                           e.trade_date, e.report_date, e.settle_date_target, e.transaction_type, e.taxes, e.net_cash,
-                           e.raw_extra, {_CREATED_AT_E},
-                           e.strategy_opportunity_id, e.trade_id AS strategy_instance_id,
-                           so.name AS strategy_opportunity_name, si.label AS strategy_instance_label,
-                           EXTRACT(EPOCH FROM si.opened_at)::bigint AS strategy_instance_opened_at_epoch
-                    FROM {_EXEC_READ_TABLE} e
-                    LEFT JOIN {COMMISSIONS} c ON e.exec_id = c.exec_id AND e.exec_id IS NOT NULL
-                    LEFT JOIN strategy_opportunity so ON e.strategy_opportunity_id = so.strategy_opportunity_id
-                    LEFT JOIN trade si ON e.trade_id = si.trade_id
-                    WHERE {where_sql}
-                    ORDER BY e.exec_time DESC NULLS LAST
-                    LIMIT %s
-                    """
-        try:
-            with conn.cursor(cursor_factory=RealDictCursor) as cur:
-                cur.execute(sql, vals)
-                rows = cur.fetchall()
-            return _rows_to_executions(rows, None)
-        except Exception as ex:
-            if "does not exist" in str(ex).lower() or "42703" in str(getattr(ex, "pgcode", "")):
-                try:
-                    sql2 = f"""
-                            SELECT e.account_executions_id, e.account_id, e.exec_id, {_EXEC_EPOCH_E} AS time,
-                                   e.symbol, e.sec_type, e.side, {_QTY_NORM_E}, e.price,
-                                   {_COMM_NORM_E}, e.source,
-                                   e.expiry, e.strike, e.option_right, e.exchange, e.order_id, e.cum_qty,
-                                   {_REALIZED_PNL_COALESCE_E}, e.contract_key, c.currency, c.yield_, c.yield_redemption_date,
-                                   e.trade_date, e.raw_extra, {_CREATED_AT_E},
-                                   e.strategy_opportunity_id, e.trade_id AS strategy_instance_id,
-                                   so.name AS strategy_opportunity_name, si.label AS strategy_instance_label,
-                                   EXTRACT(EPOCH FROM si.opened_at)::bigint AS strategy_instance_opened_at_epoch
-                            FROM {_EXEC_READ_TABLE} e
-                            LEFT JOIN {COMMISSIONS} c ON e.exec_id = c.exec_id
-                            LEFT JOIN strategy_opportunity so ON e.strategy_opportunity_id = so.strategy_opportunity_id
-                            LEFT JOIN trade si ON e.trade_id = si.trade_id
-                            WHERE {where_sql}
-                            ORDER BY e.exec_time DESC NULLS LAST
-                            LIMIT %s
-                            """
-                    with conn.cursor(cursor_factory=RealDictCursor) as cur:
-                        cur.execute(sql2, vals)
-                        rows = cur.fetchall()
-                    return _rows_to_executions(rows, None)
-                except Exception:
-                    logger.debug("get_executions_for_strategy_link fallback: %s", ex)
-                    return []
-            logger.debug("get_executions_for_strategy_link: %s", ex)
-            return []
-
-    rows: List[Dict[str, Any]] = []
-    ck = (contract_key or "").strip()
-    if ck:
-        key_variants = _contract_key_variants_position_vs_executions(ck)
-        if len(key_variants) == 1:
-            rows = _run_sql("e.account_id = %s AND e.contract_key = %s", [acc, key_variants[0]])
-        else:
-            ph = ",".join(["%s"] * len(key_variants))
-            rows = _run_sql(
-                f"e.account_id = %s AND e.contract_key IN ({ph})",
-                [acc] + key_variants,
-            )
-    if not rows and symbol and expiry is not None and strike is not None:
-        tuples = _leg_match_tuples(acc, symbol, str(expiry), strike)
-        if tuples:
-            ph = ",".join(["(%s,%s,%s,%s)"] * len(tuples))
-            flat: List[Any] = []
-            for t in tuples:
-                flat.extend(t)
-            where_leg = (
-                f"(e.symbol, e.expiry, COALESCE(e.strike::text,''), e.account_id) IN ({ph}) "
-                "AND upper(trim(COALESCE(e.sec_type,''))) = 'OPT'"
-            )
-            rows = _run_sql(where_leg, flat)
-
-    r0 = (option_right or "").strip().upper()[:1]
-    if r0 in ("C", "P") and rows:
-        rows = [
-            x
-            for x in rows
-            if str((x.get("option_right") or "")).strip().upper().startswith(r0)
-        ]
-
-    seen: Dict[Any, Dict[str, Any]] = {}
-    for x in rows:
-        eid = x.get("account_executions_id")
-        if eid is not None and eid not in seen:
-            seen[eid] = x
-    out = list(seen.values())
-    out.sort(key=lambda z: float(z.get("time") or 0), reverse=True)
-    return out[:lim]
 
 
 def get_executions_with_opt_pairs(

@@ -491,20 +491,6 @@ def test_delete_template_strict_outcomes() -> None:
         template_write.delete_template_strict(FakeConn([("FOR UPDATE", Reply(raises=DB_DOWN))]), 2)
 
 
-def test_delete_structure_strict_is_soft_and_says_so() -> None:
-    conn = FakeConn(
-        [
-            ("SELECT is_active FROM strategy_structure", Reply(one=(True,))),
-            ("UPDATE settings SET active_strategy_structure_id = NULL", Reply(rowcount=1)),
-        ]
-    )
-    out = structure_write.delete_structure_strict(conn, 8)
-    assert out == {"deleted": "soft", "strategy_structure_id": 8, "was_active": True, "cleared_daemon_setting": True}
-    assert conn.ran("SET is_active = false") and not conn.ran("DELETE")
-    with pytest.raises(WriteNotFound, match="No structure 8"):
-        structure_write.delete_structure_strict(FakeConn([("SELECT is_active", Reply(one=None))]), 8)
-
-
 @pytest.mark.parametrize(
     ("fn", "key", "in_use", "reason"),
     [

@@ -1,8 +1,8 @@
 """Write strategy_structure and child tables. Used by POST/PUT structures API.
 
-``patch_structure`` and ``delete_structure_strict`` (core 0.33.0, TD-15) raise the
-``Write*`` outcomes; ``update_structure`` / ``deactivate_structure`` keep their
-behaviour for one release."""
+``patch_structure`` (core 0.33.0, TD-15) raises the ``Write*`` outcomes;
+``update_structure`` / ``deactivate_structure`` keep their behaviour for one release.
+``delete_structure_strict`` left in core 0.46.0 with its route (TD-80)."""
 
 import json
 import logging
@@ -370,8 +370,8 @@ def patch_structure(conn_or_config: Any, strategy_structure_id: int, fields: Dic
     ``name`` NOT NULL text · ``version`` NOT NULL whole number >= 1 · ``is_active`` boolean ·
     ``notes`` nullable text · ``meta`` replaces meta_json ([{meta_key, meta_value_text}]; ``[]``
     empties it). The template and legs are not patchable (legs come from the template).
-    ``is_active: false`` here only flips the column; ``delete_structure_strict`` also
-    clears the daemon's active-structure setting. Raises WriteInvalid, WriteNotFound, WriteFailed.
+    ``is_active: false`` here only flips the column (the daemon's active-structure setting
+    is left as it is). Raises WriteInvalid, WriteNotFound, WriteFailed.
     """
     what = f"structure {strategy_structure_id}"
     fields = ws.check_fields(fields, STRUCTURE_PATCHABLE, "structure")
@@ -399,39 +399,3 @@ def patch_structure(conn_or_config: Any, strategy_structure_id: int, fields: Dic
         if row is None:
             raise WriteFailed(f"{what} was changed but could not be read back; nothing was saved.")
     return row
-
-
-def delete_structure_strict(conn_or_config: Any, strategy_structure_id: int) -> Dict[str, Any]:
-    """Soft-delete: ``is_active = false``, and the daemon's settings stop pointing at it.
-
-    Returns ``{"deleted": "soft", "strategy_structure_id", "was_active", "cleared_daemon_setting"}``.
-    Structures are the one soft delete: opportunities and plans keep referencing the
-    row. Nothing refuses it (no in-use check, as today). Raises WriteNotFound, WriteFailed.
-    """
-    what = f"structure {strategy_structure_id}"
-    with ws.write_connection(conn_or_config, what) as conn, ws.write_transaction(conn, what):
-        with conn.cursor() as cur:
-            cur.execute(
-                "SELECT is_active FROM strategy_structure WHERE strategy_structure_id = %s FOR UPDATE",
-                (strategy_structure_id,),
-            )
-            row = cur.fetchone()
-            if row is None:
-                raise WriteNotFound(f"No structure {strategy_structure_id}.")
-            was_active = bool(row[0])
-            cur.execute(
-                "UPDATE strategy_structure SET is_active = false, updated_at = now() WHERE strategy_structure_id = %s",
-                (strategy_structure_id,),
-            )
-            cur.execute(
-                "UPDATE settings SET active_strategy_structure_id = NULL "
-                "WHERE id = 1 AND active_strategy_structure_id = %s",
-                (strategy_structure_id,),
-            )
-            cleared = cur.rowcount > 0
-    return {
-        "deleted": "soft",
-        "strategy_structure_id": strategy_structure_id,
-        "was_active": was_active,
-        "cleared_daemon_setting": cleared,
-    }

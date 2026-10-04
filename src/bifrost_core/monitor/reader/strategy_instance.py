@@ -1,22 +1,18 @@
-"""Strategy instance CRUD: list, get, create, update, open-legs. Used for trade attribution (SI.2).
+"""Strategy instance CRUD: list, get, create, patch, strict delete. Used for trade attribution (SI.2).
 
 ``patch_instance`` and ``delete_instance_strict`` (core 0.33.0, TD-15) raise the
-``Write*`` outcomes; ``update_instance`` / ``delete_instance`` keep answering a
-bool for one release."""
+``Write*`` outcomes. The bool writers ``update_instance`` / ``delete_instance`` and
+``get_instance_open_option_legs`` left in core 0.46.0 (TD-80: no caller)."""
 
 import logging
-import math
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 from psycopg2.extras import RealDictCursor
 
-from bifrost_core.portfolio.quote_freshness import fresh_quote_sql
 
 from bifrost_core.persistence.postgres.brokerage_tables import (
-    CONTRACT_QUOTE_LIVE,
     EXECUTIONS_FINAL,
-    POSITIONS,
     TRADE_EXECUTION,
     TRADE_FILL_SPLITS,
 )
@@ -210,149 +206,6 @@ def create_instance(
             except Exception:
                 pass
         return None
-
-
-def delete_instance(conn: Any, strategy_instance_id: int) -> bool:
-    """Delete a trade by id. Returns True if deleted, False if not found or has linked executions."""
-    if conn is None:
-        return False
-    try:
-        with conn.cursor() as cur:
-            cur.execute(
-                "DELETE FROM trade WHERE trade_id = %s",
-                (strategy_instance_id,),
-            )
-            deleted = cur.rowcount > 0
-        conn.commit()
-        return deleted
-    except Exception as e:
-        logger.warning("delete_instance failed: %s", e)
-        if conn is not None:
-            try:
-                conn.rollback()
-            except Exception:
-                pass
-        return False
-
-
-def update_instance(
-    conn: Any,
-    strategy_instance_id: int,
-    label: Optional[str] = None,
-    created_at: Optional[Any] = None,
-    opened_at: Optional[Any] = None,
-) -> bool:
-    """Update label, created_at, and/or opened_at of a strategy instance. created_at/opened_at: datetime or Unix timestamp. Returns True if a row was updated."""
-    if conn is None:
-        return False
-    updates = []
-    values: List[Any] = []
-    if label is not None:
-        updates.append("label = %s")
-        values.append(label.strip() if isinstance(label, str) else label)
-    if created_at is not None:
-        if isinstance(created_at, (int, float)):
-            try:
-                created_dt = datetime.fromtimestamp(float(created_at), tz=timezone.utc)
-            except (TypeError, ValueError, OSError):
-                created_dt = None
-            if created_dt is not None:
-                updates.append("created_at = %s")
-                values.append(created_dt)
-        elif hasattr(created_at, "timestamp"):
-            updates.append("created_at = %s")
-            values.append(created_at)
-    if opened_at is not None:
-        opened_dt = None
-        if isinstance(opened_at, (int, float)):
-            try:
-                opened_dt = datetime.fromtimestamp(float(opened_at), tz=timezone.utc)
-            except (TypeError, ValueError, OSError):
-                pass
-        elif hasattr(opened_at, "timestamp"):
-            opened_dt = opened_at
-        if opened_dt is not None:
-            updates.append("opened_at = %s")
-            values.append(opened_dt)
-    if not updates:
-        return True
-    updates.append("updated_at = now()")
-    values.append(strategy_instance_id)
-    try:
-        with conn.cursor() as cur:
-            cur.execute(
-                f"UPDATE trade SET {', '.join(updates)} WHERE trade_id = %s",
-                values,
-            )
-            if cur.rowcount == 0:
-                return False
-        conn.commit()
-        return True
-    except Exception as e:
-        logger.warning("update_instance failed: %s", e)
-        if conn is not None:
-            try:
-                conn.rollback()
-            except Exception:
-                pass
-        return False
-
-
-def get_instance_open_option_legs(conn: Any, strategy_instance_id: int) -> List[Dict[str, Any]]:
-    """Return current open OPT positions that have executions linked to this instance.
-    Intersects account_executions (instance tagged) with account_positions (position != 0)."""
-    if conn is None:
-        return []
-    try:
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute(
-                f"""
-                SELECT ap.account_id, ap.contract_key, ap.symbol, ap.sec_type,
-                       ap.position, ap.avg_cost, ap.expiry, ap.strike, ap.option_right,
-                       ip.mid AS price_mid, ip.last AS price_last, ip.updated_at AS price_updated_at
-                FROM {POSITIONS} ap
-                INNER JOIN (
-                    SELECT DISTINCT account_id, contract_key
-                    FROM {_EXEC_READ_TABLE}
-                    WHERE trade_id = %s
-                      AND upper(trim(COALESCE(sec_type, ''))) = 'OPT'
-                ) tagged ON ap.account_id = tagged.account_id AND ap.contract_key = tagged.contract_key
-                LEFT JOIN {CONTRACT_QUOTE_LIVE} ip
-                    ON ap.contract_key = ip.contract_key AND {fresh_quote_sql('ip')}
-                WHERE ap.position IS NOT NULL AND ap.position != 0
-                ORDER BY ap.contract_key
-                """,
-                (strategy_instance_id,),
-            )
-            rows = cur.fetchall()
-        result: List[Dict[str, Any]] = []
-        for r in rows:
-            d: Dict[str, Any] = {
-                "account_id": r.get("account_id") or "",
-                "contract_key": r.get("contract_key") or "",
-                "symbol": r.get("symbol") or "",
-                "sec_type": r.get("sec_type") or "",
-                "position": r.get("position"),
-                "avg_cost": r.get("avg_cost"),
-                "expiry": r.get("expiry"),
-                "strike": r.get("strike"),
-                "option_right": r.get("option_right"),
-            }
-            for price_key in ("price_mid", "price_last"):
-                v = r.get(price_key)
-                if v is not None:
-                    try:
-                        fv = float(v)
-                        if math.isfinite(fv) and fv > 0:
-                            d["price"] = fv
-                            break
-                    except (TypeError, ValueError):
-                        pass
-            result.append(d)
-        return result
-    except Exception as e:
-        logger.warning("get_instance_open_option_legs failed: %s", e)
-        return []
 
 
 # --- TD-15 writers (core 0.33.0): return the row / raise Write* --------------------

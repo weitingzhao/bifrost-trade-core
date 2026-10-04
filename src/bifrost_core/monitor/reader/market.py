@@ -35,30 +35,6 @@ def _minute_period_db(period: str) -> str:
 
 # ----- Conn-based (for common.StatusReader delegation) -----
 
-def get_is_us_trading_day_conn(conn: Any, date_str: str) -> bool:
-    """Return True if the given date (YYYY-MM-DD) is a US (NYSE) trading day."""
-    try:
-        d = date.fromisoformat(date_str)
-        if d.weekday() >= 5:
-            return False
-    except (ValueError, TypeError):
-        return False
-    try:
-        with conn.cursor() as cur:
-            cur.execute(
-                """SELECT 1 FROM market.us_market_holiday
-                   WHERE exchange = 'NYSE' AND holiday_date = %s
-                     AND status = 'closed'
-                   LIMIT 1""",
-                (d,),
-            )
-            row = cur.fetchone()
-        return row is None
-    except Exception as e:
-        logger.debug("get_is_us_trading_day_conn failed: %s", e)
-        return True
-
-
 def get_market_holidays_conn(
     conn: Any, exchange: Optional[str] = None, year: Optional[int] = None
 ) -> List[Dict[str, Any]]:
@@ -110,40 +86,6 @@ def get_bars(
         return rows
     except Exception as e:
         logger.debug("get_bars via plugin failed: %s", e)
-        return []
-
-
-def get_bars_latest(conn: Any, symbol: Optional[str] = None, period: str = "1 D") -> Optional[float]:
-    """Return Unix time of the latest bar for symbol+period via Plugin API, or None if no data."""
-    if not symbol or not symbol.strip():
-        return None
-    try:
-        from bifrost_core.monitor.market_read_client import get_bars_latest_via_plugin
-
-        return get_bars_latest_via_plugin(symbol.strip(), period=period)
-    except Exception as e:
-        logger.debug("get_bars_latest via plugin failed: %s", e)
-        return None
-
-
-def get_bar_times_in_range(
-    conn: Any,
-    symbol: Optional[str] = None,
-    period: str = "1 D",
-    start_ts: Optional[float] = None,
-    end_ts: Optional[float] = None,
-) -> List[float]:
-    """Return bar timestamps within [start_ts, end_ts] ordered ascending via Plugin API."""
-    if not symbol or not symbol.strip() or start_ts is None or end_ts is None:
-        return []
-    try:
-        from bifrost_core.monitor.market_read_client import get_bar_times_in_range_via_plugin
-
-        return get_bar_times_in_range_via_plugin(
-            symbol.strip(), period=period, start_ts=float(start_ts), end_ts=float(end_ts)
-        )
-    except Exception as e:
-        logger.debug("get_bar_times_in_range via plugin failed: %s", e)
         return []
 
 
@@ -276,18 +218,6 @@ def _coverage_day_iso(v: Any) -> Optional[str]:
     return s[:10] if len(s) >= 10 else (s or None)
 
 
-def _ordered_unique_symbols(symbols: Optional[List[str]]) -> List[str]:
-    out: List[str] = []
-    seen: set[str] = set()
-    for s in symbols or []:
-        t = (s or "").strip()
-        if not t or t in seen:
-            continue
-        seen.add(t)
-        out.append(t)
-    return out
-
-
 def distinct_caret_symbols_in_stock_bars_tables(conn: Any) -> List[str]:
     """Symbols starting with ``^`` via Plugin API."""
     try:
@@ -299,45 +229,7 @@ def distinct_caret_symbols_in_stock_bars_tables(conn: Any) -> List[str]:
         return []
 
 
-def get_bars_coverage(conn: Any, symbols: Optional[List[str]] = None) -> List[Dict[str, Any]]:
-    """Return per-symbol coverage via Plugin API.
-
-    Response keys keep legacy names (``stock_day`` / ``stock_min``) for API compatibility.
-    """
-    sym_list = _ordered_unique_symbols(list(symbols) if symbols else None)
-    if not sym_list:
-        return []
-    try:
-        from bifrost_core.monitor.market_read_client import get_bars_coverage_via_plugin
-
-        return get_bars_coverage_via_plugin(sym_list)
-    except Exception as e:
-        logger.debug("get_bars_coverage via plugin failed: %s", e)
-        return []
-
-
 # ----- Module-level (status_config) for re-export -----
-
-def get_is_us_trading_day(status_config: dict, date_str: str) -> bool:
-    """Return True if the given date (YYYY-MM-DD) is a US (NYSE) trading day."""
-    try:
-        d = date.fromisoformat(date_str)
-        if d.weekday() >= 5:
-            return False
-    except (ValueError, TypeError):
-        return False
-    if not status_config or (status_config.get("sink") != "postgres" and not status_config.get("postgres")):
-        return True
-    try:
-        conn = ws.open_conn(status_config)
-        try:
-            return get_is_us_trading_day_conn(conn, date_str)
-        finally:
-            conn.close()
-    except Exception as e:
-        logger.debug("get_is_us_trading_day failed: %s", e)
-        return True
-
 
 def get_market_holidays(status_config: dict, exchange: Optional[str] = None, year: Optional[int] = None) -> List[Dict[str, Any]]:
     """Return list of holidays from market.us_market_holiday. exchange=None returns all exchanges."""
@@ -355,6 +247,5 @@ def get_market_holidays(status_config: dict, exchange: Optional[str] = None, yea
 
 
 __all__ = [
-    "get_is_us_trading_day",
     "get_market_holidays",
 ]

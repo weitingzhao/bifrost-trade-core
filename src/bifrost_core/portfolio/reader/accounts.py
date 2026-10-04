@@ -1607,78 +1607,6 @@ def delete_one_execution(status_config: dict, account_executions_id: int) -> boo
 
 
 
-def batch_update_execution_strategy(
-    conn: Any,
-    account_id: str,
-    contract_key: Optional[str],
-    execution_ids: Optional[List[int]],
-    strategy_opportunity_id: Optional[int],
-    strategy_instance_id: Optional[int],
-) -> int:
-    """Batch strategy attribution, by contract_key (every matching raw row) or by an
-    explicit account_executions_id list, written to this env's trade_execution
-    (TD-09). Returns the raw rows matched; -1 when one of them is split; 0 when nothing
-    matched, the instance is not on the account, only an opportunity was sent, or the
-    write failed."""
-    if not conn or not (account_id or "").strip():
-        return 0
-    acc = str(account_id).strip()
-    if strategy_instance_id is None and strategy_opportunity_id is not None:
-        logger.warning("batch_update_execution_strategy refused: %s", OPPORTUNITY_ONLY)
-        return 0
-    try:
-        with conn.cursor() as cur:
-            if strategy_instance_id is not None:
-                problem = _instance_problem(cur, int(strategy_instance_id), acc, strategy_opportunity_id)
-                if problem is not None:
-                    logger.warning("batch_update_execution_strategy refused: %s", problem)
-                    conn.rollback()
-                    return 0
-            exec_ids: List[str] = []
-            if execution_ids:
-                for eid in execution_ids:
-                    try:
-                        raw_tbl, pk_col, pk_val = _raw_table_pk_for_account_executions_id(int(eid), golden=False)
-                    except (TypeError, ValueError):
-                        continue
-                    cur.execute(
-                        f"SELECT exec_id FROM {raw_tbl} WHERE account_id = %s AND {pk_col} = %s",
-                        (acc, pk_val),
-                    )
-                    exec_ids.extend((r[0] or "").strip() for r in cur.fetchall() or [])
-            elif contract_key and contract_key.strip():
-                ck = contract_key.strip()
-                for raw_tbl in (EXECUTIONS_RAW_TWS, EXECUTIONS_RAW_FLEX, EXECUTIONS_RAW_JOURNAL):
-                    cur.execute(
-                        f"SELECT exec_id FROM {raw_tbl} WHERE account_id = %s AND contract_key = %s",
-                        (acc, ck),
-                    )
-                    exec_ids.extend((r[0] or "").strip() for r in cur.fetchall() or [])
-            else:
-                return 0
-            keys = sorted({e for e in exec_ids if e})
-            if keys:
-                cur.execute(
-                    f"SELECT 1 FROM {TRADE_EXECUTION} WHERE account_id = %s AND exec_id = ANY(%s) "
-                    "AND split_quantity IS NOT NULL LIMIT 1",
-                    (acc, keys),
-                )
-                if cur.fetchone():
-                    conn.rollback()
-                    return -1
-            for exec_id in keys:
-                _set_whole_attribution(cur, acc, exec_id, strategy_instance_id)
-        conn.commit()
-        return sum(1 for e in exec_ids if e)
-    except Exception as e:
-        logger.warning("batch_update_execution_strategy failed: %s", e)
-        try:
-            conn.rollback()
-        except Exception:
-            pass
-        return 0
-
-
 # --- TD-15 writers (core 0.33.0): return what was written / raise Write* ----------------
 #
 # An execution spans two databases: its raw row on Golden Source (raw_broker.*) and its
@@ -1887,7 +1815,6 @@ __all__ = [
     "upsert_account_transactions",
     "update_one_execution",
     "delete_one_execution",
-    "batch_update_execution_strategy",
     "patch_execution",
     "delete_execution_strict",
 ]

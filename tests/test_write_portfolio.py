@@ -391,50 +391,6 @@ def test_delete_execution_strict_refusals(two_dbs) -> None:
 # --- watchlist ---------------------------------------------------------------------------
 
 
-def test_watchlist_re_add_keeps_category_and_label() -> None:
-    """The Omnibar / Symbol Dock / drop add sends no category_id and no display_label.
-
-    Before 0.33.0 the upsert wrote EXCLUDED.* for both, so re-adding a watched symbol
-    moved it out of its list and dropped its label. Now a None keeps what is stored.
-    """
-    conn = FakeConn()
-    assert watchlist.add_watchlist(conn, "ABCD", source="omnibar") is True
-    sql, params = conn.statement("INSERT INTO watchlist")
-    assert "category_id = COALESCE(%(category_id)s, watchlist.category_id)" in sql
-    assert "display_label = COALESCE(%(display_label)s, watchlist.display_label)" in sql
-    assert "optionable = COALESCE(%(optionable)s, watchlist.optionable)" in sql
-    assert "EXCLUDED.category_id" not in sql and "EXCLUDED.display_label" not in sql
-    assert params["contract_key"] == "ABCD|STK|||" and params["category_id"] is None
-    assert params["symbol"] == "ABCD" and params["sec_type"] == "STK"
-    assert conn.commits == 1
-
-
-def test_watchlist_add_can_still_move_a_row_out_of_its_list() -> None:
-    """The Watchlist page's "None" category sends category_id: null on purpose: the API names it in clear."""
-    conn = FakeConn()
-    watchlist.add_watchlist(conn, "ABCD|STK|||", category_id=None, clear=("category_id",))
-    sql, _ = conn.statement("INSERT INTO watchlist")
-    assert "category_id = NULL" in sql
-    assert "display_label = COALESCE(%(display_label)s, watchlist.display_label)" in sql
-    conn = FakeConn()
-    watchlist.add_watchlist(conn, "ABCD|STK|||", category_id=7, clear=("category_id",))
-    sql, params = conn.statement("INSERT INTO watchlist")
-    assert "category_id = COALESCE(%(category_id)s" in sql and params["category_id"] == 7
-
-
-def test_watchlist_add_new_row_defaults_source_to_manual() -> None:
-    conn = FakeConn()
-    watchlist.add_watchlist(conn, "ABCD|STK|||")
-    sql, params = conn.statement("INSERT INTO watchlist")
-    assert "COALESCE(%(source)s, 'manual')" in sql and params["source"] is None
-
-
-def test_watchlist_add_failure_rolls_back_and_answers_false() -> None:
-    conn = FakeConn([("INSERT INTO watchlist", Reply(raises=DB_DOWN))])
-    assert watchlist.add_watchlist(conn, "ABCD") is False
-    assert conn.rollbacks == 1
-
-
 _WATCH_ROW = {"contract_key": "ABCD|STK|||", "symbol": "ABCD", "category_id": 3, "display_label": "Core", "optionable": True}
 
 
@@ -493,20 +449,3 @@ def test_delete_watchlist_strict() -> None:
         watchlist.delete_watchlist_strict(FakeConn([("DELETE", Reply(rowcount=0))]), "ABCD|STK|||")
     with pytest.raises(WriteFailed, match="not configured"):
         watchlist.delete_watchlist_strict(None, "ABCD|STK|||")
-
-
-def test_status_reader_add_watchlist_passes_clear_through(monkeypatch: pytest.MonkeyPatch) -> None:
-    from bifrost_core.monitor.reader.common import StatusReader
-
-    seen = {}
-
-    def fake_add(conn, *args, clear=()):
-        seen["args"], seen["clear"] = args, tuple(clear)
-        return True
-
-    reader = StatusReader({"sink": "postgres"})
-    monkeypatch.setattr(reader, "_connect", lambda: True)
-    monkeypatch.setattr(watchlist, "add_watchlist", fake_add)
-    assert reader.add_watchlist("ABCD", category_id=None, clear=["category_id"]) is True
-    assert seen["clear"] == ("category_id",)
-    assert seen["args"][6] is None  # source: None keeps the stored one

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock
 
-from bifrost_core.monitor.integrations.daemon_ib_edge import (
+from bifrost_core.monitor.integrations.platform_ib_gateway import (
     derive_daemon_ib_heartbeat_from_redis,
 )
 

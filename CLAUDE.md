@@ -1,5 +1,5 @@
 <!--
-parity-ids: core-versioning-v5
+parity-ids: core-versioning-v6
 对等文件: .cursor/rules/versioning.mdc
 改任一侧必须同步另一侧并 bump 两侧版本号；校验: bash ../scripts/check-agent-config-parity.sh
 -->
@@ -50,7 +50,7 @@ make db-init        # 初始化/刷新 PostgreSQL schema
 
 ## 架构关键点
 
-- `persistence/postgres/postgres_sink.py` — `TradingDaemonSink`（0.39.0 前叫 `PostgreSQLSink`，旧名保留一版作别名，TD-75），`StatusSink` 的唯一实现：daemon 状态快照写 per-env Redis，
+- `persistence/postgres/postgres_sink.py` — `TradingDaemonSink`（0.39.0 前叫 `PostgreSQLSink`，旧名别名已在 0.46.0 删除，TD-75），`StatusSink` 的唯一实现：daemon 状态快照写 per-env Redis，
   账户 / 持仓 / 成交 / `contract_quote_live` 写 Golden Source `raw_broker.*`。连接时不跑 DDL、不终止别的 backend
   （TD-45，0.35.0）；表只由发布的 db-init Job 建，缺表时写入失败并记 error
 - `portfolio/` 的模型被 API 后端 (`bifrost-trade-api`) 直接 import

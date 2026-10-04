@@ -94,15 +94,8 @@ def _seed_rule_chain(db: _Savepointed) -> dict:
     return {"tpl": tpl, "struct": struct, "gate": gate, "opp": opp, "inst": inst, "alloc": alloc}
 
 
-def test_watchlist_re_add_keeps_category_and_label_in_postgres(db) -> None:
+def test_watchlist_upsert_keeps_category_and_label_in_postgres(db) -> None:
     cat = _one(db, "INSERT INTO preference_position_categories (name) VALUES ('TD15 list') RETURNING id")[0]
-    assert watchlist.add_watchlist(db, "TDXV", display_label="Core", category_id=cat, optionable=True)
-    assert watchlist.add_watchlist(db, "TDXV", source="omnibar")  # the Omnibar re-add
-    row = _one(db, "SELECT category_id, display_label, optionable, source FROM watchlist WHERE contract_key = 'TDXV|STK|||'")
-    assert row == (cat, "Core", True, "omnibar")
-    assert watchlist.add_watchlist(db, "TDXV", clear=("category_id",))
-    assert _one(db, "SELECT category_id, display_label FROM watchlist WHERE contract_key = 'TDXV|STK|||'") == (None, "Core")
-
     out = watchlist.upsert_watchlist(db, "TDXW", {"category_id": cat})
     assert out["category"] == "TD15 list" and out["source"] == "manual" and out["symbol"] == "TDXW"
     out = watchlist.upsert_watchlist(db, "TDXW", {"optionable": True})
@@ -181,7 +174,6 @@ def test_strict_deletes_in_postgres(db) -> None:
         rules.delete_opportunity_strict(db, ids["opp"])
     with pytest.raises(WriteConflict, match="use it"):
         rules.delete_gate_safety_strict(db, ids["gate"])
-    assert structure_write.delete_structure_strict(db, ids["struct"])["deleted"] == "soft"
     assert rules.delete_allocation_strict(db, ids["alloc"]) == {"deleted": "hard", "strategy_allocation_id": ids["alloc"]}
     with pytest.raises(WriteNotFound):
         rules.delete_allocation_strict(db, ids["alloc"])

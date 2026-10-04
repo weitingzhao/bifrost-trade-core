@@ -141,73 +141,6 @@ def create_position_category(
         return None, msg or "Database error."
 
 
-def update_position_category(
-    conn: Any,
-    category_id: int,
-    name: Optional[str] = None,
-    description: Optional[str] = None,
-    sort_order: Optional[int] = None,
-) -> bool:
-    if conn is None:
-        return False
-    new_name = (str(name).strip() or None) if name is not None else None
-    if new_name is not None:
-        check_category_name(new_name)
-    try:
-        updates = ["updated_at = now()"]
-        vals: List[Any] = []
-        if name is not None:
-            updates.append("name = %s")
-            vals.append(new_name)
-        if description is not None:
-            updates.append("description = %s")
-            vals.append(str(description).strip() or None)
-        if sort_order is not None:
-            updates.append("sort_order = %s")
-            vals.append(sort_order)
-        if not vals:
-            return True
-        vals.append(category_id)
-        with conn.cursor() as cur:
-            cur.execute("SELECT name FROM preference_position_categories WHERE id = %s FOR UPDATE", (category_id,))
-            old = cur.fetchone()
-            cur.execute(
-                f"UPDATE preference_position_categories SET {', '.join(updates)} WHERE id = %s",
-                tuple(vals),
-            )
-            if old is not None and new_name is not None:
-                _carry_symbol_order(cur, old[0], new_name)
-        conn.commit()
-        return True
-    except Exception as e:
-        logger.debug("update_position_category failed: %s", e)
-        try:
-            conn.rollback()
-        except Exception:
-            pass
-        return False
-
-
-def delete_position_category(conn: Any, category_id: int) -> bool:
-    if conn is None:
-        return False
-    try:
-        with conn.cursor() as cur:
-            cur.execute("DELETE FROM preference_position_categories WHERE id = %s RETURNING name", (category_id,))
-            gone = cur.fetchone()
-            if gone is not None:
-                _carry_symbol_order(cur, gone[0], None)
-        conn.commit()
-        return True
-    except Exception as e:
-        logger.debug("delete_position_category failed: %s", e)
-        try:
-            conn.rollback()
-        except Exception:
-            pass
-        return False
-
-
 def set_position_category_tag(
     conn: Any,
     account_id: str,
@@ -321,7 +254,7 @@ def patch_position_category(conn_or_config: Any, category_id: int, fields: Dict[
     """Change the fields the client sent; return the row in ``get_position_categories``' shape.
 
     ``name`` NOT NULL text · ``description`` nullable text (null clears; blank is refused,
-    where ``update_position_category`` stored it as NULL) · ``sort_order`` nullable whole
+    where the old ``update_position_category`` stored it as NULL) · ``sort_order`` nullable whole
     number. A new name carries the category's symbol order with it, in the same transaction
     (TD-56); the reserved ``Uncategorized`` is WriteInvalid, a name in use WriteConflict.
     Raises WriteInvalid, WriteNotFound, WriteConflict, WriteFailed.

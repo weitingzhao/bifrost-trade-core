@@ -1,7 +1,7 @@
 """The trading daemon's StatusSink (``TradingDaemonSink``). See docs/DATABASE.md.
 
-Named ``PostgreSQLSink`` until core 0.39.0 (TD-75); the old name stays as an alias for one
-version. The module path is unchanged.
+Named ``PostgreSQLSink`` until core 0.39.0 (TD-75); the alias left in core 0.46.0. The module
+path is unchanged.
 """
 
 import logging
@@ -827,8 +827,3 @@ class TradingDaemonSink(StatusSink):
                 pass
             self._golden_conn = None
         self._redis = None
-
-
-# Deprecated alias (0.39.0, TD-75): the class was named for Postgres while most of what it
-# writes goes to Redis. Removed in the next core version once api / worker import the new name.
-PostgreSQLSink = TradingDaemonSink

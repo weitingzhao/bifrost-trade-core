@@ -15,19 +15,21 @@ def test_postgres_sink_has_write_snapshot():
     assert hasattr(TradingDaemonSink, "write_snapshot")
 
 
-def test_old_sink_name_is_an_alias_for_one_version():
-    """TD-75 (0.39.0): PostgreSQLSink stays importable until api / worker use the new name."""
-    from bifrost_core.persistence.postgres.postgres_sink import PostgreSQLSink
+def test_old_sink_name_is_gone():
+    """TD-75: PostgreSQLSink was a one-version alias (0.39.0); 0.46.0 removed it."""
+    from bifrost_core.persistence.postgres import postgres_sink
 
-    assert PostgreSQLSink is TradingDaemonSink
+    assert not hasattr(postgres_sink, "PostgreSQLSink")
 
 
 def test_daemon_health_key_renamed_not_revalued():
-    """TD-75 (0.39.0): only the Python name changed; the value is a live Redis key."""
+    """TD-75 (0.39.0): only the Python name changed; the value is a live Redis key.
+    The old name's one-version alias left in 0.46.0; the LEGACY_ key value stays (api normalises it)."""
     from bifrost_core.core import redis_health_keys as k
 
     assert k.BIFROST_HEALTH_DAEMON_STRATEGY_TRADING == "bifrost:health:daemon_strategy_trading"
-    assert k.BIFROST_HEALTH_DAEMON_TRADING_ENGINE is k.BIFROST_HEALTH_DAEMON_STRATEGY_TRADING
+    assert not hasattr(k, "BIFROST_HEALTH_DAEMON_TRADING_ENGINE")
+    assert k.LEGACY_BIFROST_HEALTH_DAEMON_TRADING_ENGINE == "bifrost:health:daemon_trading_engine"
     assert not hasattr(k, "BIFROST_OPS_TRADING_ENGINE_META")
 
 

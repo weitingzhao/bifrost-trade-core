@@ -1,6 +1,7 @@
 """HTTP write client for Plugin Market Data API (ingest job enqueue).
 
-Used by monitor/services/market_jobs.py and monitor/integrations/index_data_client.py.
+Used by monitor/integrations/index_data_client.py. monitor/services/market_jobs.py (the bars
+backfill enqueue) went with its last caller, api's market-data routes, in core 0.46.0 (TD-80).
 The bars ingest / delete calls went with their only callers, monitor.reader's
 write_ohlc_bars_to_db / write_stock_bars / delete_stock_bars_for_symbol, in core 0.34.0
 (TD-78): nothing in api, worker or Flex called them.

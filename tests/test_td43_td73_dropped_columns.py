@@ -73,8 +73,7 @@ def test_instance_reads_and_create_do_not_name_notes() -> None:
     conn = FakeConn([("FROM trade si", Reply(one=None))])
     assert strategy_instance.get_instance_by_id(conn, 41) is None
     assert "notes" not in conn.statement("FROM trade si")[0]
-    for fn in (strategy_instance.create_instance, strategy_instance.update_instance,
-               StatusReader.create_strategy_instance, StatusReader.update_strategy_instance):
+    for fn in (strategy_instance.create_instance, StatusReader.create_strategy_instance):
         assert "notes" not in inspect.signature(fn).parameters, fn.__qualname__
 
 

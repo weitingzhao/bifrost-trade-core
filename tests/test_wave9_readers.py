@@ -54,5 +54,4 @@ def test_dims_come_from_the_catalog_without_a_database(monkeypatch):
     grouped = reader.list_dims_grouped()
     assert grouped == strategy_dim_catalog.list_dims_grouped()
     assert {"strategy_dim_id", "dim_type", "code", "display_label", "sort_order"} <= set(grouped["direction"][0])
-    assert reader.list_dims_for_type("direction") == grouped["direction"]
     assert not hasattr(template_config, "list_dims_grouped")

@@ -3,7 +3,7 @@
 import pytest
 from pathlib import Path
 
-from bifrost_core.config.startup import normalize_server_config, read_config
+from bifrost_core.config.yaml_config import normalize_server_config, read_config
 
 _FULL_SERVER_YAML = """
   architecture:

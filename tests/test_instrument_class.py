@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from bifrost_core.portfolio.reader.instrument_class import (
     INSTRUMENT_CLASSES,
-    delete_instrument_class,
     normalize_instrument_class,
     set_instrument_class,
 )
@@ -25,4 +24,3 @@ def test_refuses_before_touching_the_database():
     ok, err = set_instrument_class(None, "AAA", "bond")
     assert not ok and "must be one of" in (err or "")
     assert set_instrument_class(None, "AAA", "stock") == (False, "No database connection.")
-    assert delete_instrument_class(None, "AAA") is False

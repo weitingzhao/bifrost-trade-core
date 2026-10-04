@@ -141,7 +141,6 @@ def test_trade_plan_and_review_round_trip(db) -> None:
     row = strategy_instance.get_instance_by_id(db, inst)
     assert row["label"] == "ZZQ Oct 40P" and "notes" not in row
     assert [r["strategy_instance_id"] for r in strategy_instance.list_instances(db, account_id=ACCT)] == [inst]
-    assert strategy_instance.update_instance(db, inst, label="ZZQ Oct 40P roll") is True
     row = strategy_instance.patch_instance(CFG, inst, {"label": "ZZQ roll"})
     assert row["label"] == "ZZQ roll"
 

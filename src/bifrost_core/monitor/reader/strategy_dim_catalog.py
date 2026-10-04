@@ -98,11 +98,6 @@ def list_dims_grouped() -> Dict[str, List[Dict[str, Any]]]:
     return {dt: list(items) for dt, items in _DIM_BY_TYPE.items()}
 
 
-def list_dims_by_type(dim_type: str) -> List[Dict[str, Any]]:
-    key = (dim_type or "").strip()
-    return list(_DIM_BY_TYPE.get(key, []))
-
-
 def is_valid_dim_code(dim_type: str, code: str) -> bool:
     dt = (dim_type or "").strip()
     c = (code or "").strip()
@@ -125,4 +120,3 @@ def validate_dim_fields(payload: Dict[str, Any]) -> None:
         c = str(code).strip()
         if not is_valid_dim_code(dim_type, c):
             raise ValueError(f"Invalid {dim_type} code: {c}")
-

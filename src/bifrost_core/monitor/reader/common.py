@@ -3,13 +3,13 @@
 import logging
 import threading
 from datetime import date
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import psycopg2
 
 from bifrost_core.persistence.postgres.connection import _get_conn_params
 
-from bifrost_core.config.startup import get_effective_ib_config
+from bifrost_core.config.yaml_config import get_effective_ib_config
 
 from bifrost_core.portfolio.reader import accounts as accounts_module
 from bifrost_core.portfolio.reader import executions as executions_module
@@ -124,15 +124,6 @@ class StatusReader:
             except Exception:
                 self._drop_conn()
 
-    def close(self) -> None:
-        if self._conn:
-            try:
-                self._conn.close()
-            except Exception:
-                pass
-            self._conn = None
-        self._redis = None
-
     # --- Status domain (Redis daemon IPC) ---
     def get_status_current(self) -> Optional[Dict[str, Any]]:
         return status_module.get_status_current(redis_client=self._ensure_redis(), status_config=self._config)
@@ -142,17 +133,6 @@ class StatusReader:
 
     def get_daemon_heartbeat(self) -> Optional[Dict[str, Any]]:
         return status_module.get_daemon_heartbeat(redis_client=self._ensure_redis(), status_config=self._config)
-
-    def get_operations(
-        self,
-        since_ts: Optional[float] = None,
-        until_ts: Optional[float] = None,
-        type_filter: Optional[str] = None,
-        limit: int = 100,
-    ) -> List[Dict[str, Any]]:
-        return status_module.get_operations(
-            None, since_ts=since_ts, until_ts=until_ts, type_filter=type_filter, limit=limit
-        )
 
     def get_data_probe(self) -> Dict[str, Any]:
         """Activity, a sample count, the clone groups and the optionable watchlist of this
@@ -181,53 +161,7 @@ class StatusReader:
         self._end_read_txn()
         return result
 
-    def add_watchlist(
-        self,
-        contract_key: str,
-        symbol: Optional[str] = None,
-        sec_type: Optional[str] = None,
-        expiry: Optional[str] = None,
-        strike: Optional[float] = None,
-        option_right: Optional[str] = None,
-        display_label: Optional[str] = None,
-        source: Optional[str] = None,
-        category_id: Optional[int] = None,
-        optionable: Optional[bool] = None,
-        *,
-        clear: Iterable[str] = (),
-    ) -> bool:
-        """Upsert by contract_key; on update a None keeps the stored value, ``clear`` names
-        columns to set NULL (core 0.33.0 -- see ``watchlist.add_watchlist``)."""
-        if not self._connect():
-            return False
-        return watchlist_module.add_watchlist(
-            self._conn,
-            contract_key,
-            symbol,
-            sec_type,
-            expiry,
-            strike,
-            option_right,
-            display_label,
-            source,
-            category_id,
-            optionable,
-            clear=clear,
-        )
-
-    def delete_watchlist(self, contract_key: Optional[str] = None) -> bool:
-        if not self._connect():
-            return False
-        return watchlist_module.delete_watchlist(self._conn, contract_key=contract_key)
-
     # --- Market domain (delegate to market module) ---
-    def get_is_us_trading_day(self, date_str: str) -> bool:
-        if not self._connect():
-            return True
-        result = market_module.get_is_us_trading_day_conn(self._conn, date_str)
-        self._end_read_txn()
-        return result
-
     def get_market_holidays(self, exchange: Optional[str] = None, year: Optional[int] = None) -> List[Dict[str, Any]]:
         if not self._connect():
             return []
@@ -252,28 +186,6 @@ class StatusReader:
         if not self._connect():
             return []
         result = market_module.get_bars(self._conn, symbol=symbol, period=period, limit=limit)
-        self._end_read_txn()
-        return result
-
-    def get_bars_latest(self, symbol: Optional[str] = None, period: str = "1 D") -> Optional[float]:
-        if not self._connect():
-            return None
-        result = market_module.get_bars_latest(self._conn, symbol=symbol, period=period)
-        self._end_read_txn()
-        return result
-
-    def get_bar_times_in_range(
-        self,
-        symbol: Optional[str] = None,
-        period: str = "1 D",
-        start_ts: Optional[float] = None,
-        end_ts: Optional[float] = None,
-    ) -> List[float]:
-        if not self._connect():
-            return []
-        result = market_module.get_bar_times_in_range(
-            self._conn, symbol=symbol, period=period, start_ts=start_ts, end_ts=end_ts
-        )
         self._end_read_txn()
         return result
 
@@ -325,13 +237,6 @@ class StatusReader:
             limit=limit,
         )
 
-    def get_bars_coverage(self, symbols: Optional[List[str]] = None) -> List[Dict[str, Any]]:
-        if not self._connect():
-            return []
-        result = market_module.get_bars_coverage(self._conn, symbols=symbols)
-        self._end_read_txn()
-        return result
-
     def get_distinct_caret_bar_symbols(self) -> List[str]:
         """Symbols starting with ``^`` present in ``market.stock_daily`` / ``market.stock_minute``."""
         if not self._connect():
@@ -364,14 +269,6 @@ class StatusReader:
         return merged
 
     # --- Gate safety (strategy & safety boundary from DB) ---
-    def get_gates_by_id(self, gate_safety_strategy_id: int) -> Optional[Dict[str, Any]]:
-        """Return gates dict (shape of config['gates']) for the given boundary set id. None if missing."""
-        if not self._connect():
-            return None
-        result = gate_safety_module.get_gates_by_id(self._conn, gate_safety_strategy_id)
-        self._end_read_txn()
-        return result
-
     def get_active_gate_safety_strategy_id(self) -> Optional[int]:
         """Return settings.active_gate_safety_strategy_id for id=1, or None."""
         if not self._connect():
@@ -443,9 +340,6 @@ class StatusReader:
     def list_dims_grouped(self) -> Dict[str, List[Dict[str, Any]]]:
         """Strategy dims from the in-code catalog (the dim_*_t enums); no database read."""
         return strategy_dim_catalog.list_dims_grouped()
-
-    def list_dims_for_type(self, dim_type: str) -> List[Dict[str, Any]]:
-        return strategy_dim_catalog.list_dims_by_type(dim_type)
 
     def list_templates(self, active_only: bool = True) -> List[Dict[str, Any]]:
         if not self._connect():
@@ -547,34 +441,6 @@ class StatusReader:
             label=label,
         )
 
-    def update_strategy_instance(
-        self,
-        strategy_instance_id: int,
-        label: Optional[str] = None,
-        created_at: Optional[Any] = None,
-        opened_at: Optional[Any] = None,
-    ) -> bool:
-        """Update label, created_at, and/or opened_at of a strategy instance. Returns True if updated."""
-        if not self._connect():
-            return False
-        return strategy_instance_module.update_instance(
-            self._conn, strategy_instance_id, label=label, created_at=created_at, opened_at=opened_at
-        )
-
-    def delete_strategy_instance(self, strategy_instance_id: int) -> bool:
-        """Delete a strategy_instance by id. Returns True if deleted."""
-        if not self._connect():
-            return False
-        return strategy_instance_module.delete_instance(self._conn, strategy_instance_id)
-
-    def get_instance_open_option_legs(self, strategy_instance_id: int) -> list:
-        """Return open OPT positions linked to a strategy instance (via executions)."""
-        if not self._connect():
-            return []
-        result = strategy_instance_module.get_instance_open_option_legs(self._conn, strategy_instance_id)
-        self._end_read_txn()
-        return result
-
     def get_strategy_win_rate(
         self,
         since_ts: Optional[float] = None,
@@ -656,31 +522,6 @@ class StatusReader:
         return result
 
     # --- Executions / transactions / performance (delegate to executions module) ---
-    def get_executions(
-        self,
-        since_ts: Optional[float] = None,
-        until_ts: Optional[float] = None,
-        account_id: Optional[str] = None,
-        limit: Optional[int] = 200,
-        strategy_opportunity_id: Optional[int] = None,
-        strategy_instance_id: Optional[int] = None,
-        source_scope: Optional[str] = None,
-    ) -> List[Dict[str, Any]]:
-        if not self._connect():
-            return []
-        result = executions_module.get_executions(
-            self._conn,
-            since_ts=since_ts,
-            until_ts=until_ts,
-            account_id=account_id,
-            limit=limit,
-            strategy_opportunity_id=strategy_opportunity_id,
-            strategy_instance_id=strategy_instance_id,
-            source_scope=source_scope,
-        )
-        self._end_read_txn()
-        return result
-
     def get_executions_page(
         self,
         since_ts: Optional[float] = None,
@@ -716,43 +557,6 @@ class StatusReader:
         if not self._connect():
             return []
         result = executions_module.get_executions_freshness(self._conn)
-        self._end_read_txn()
-        return result
-
-    def get_executions_by_contract_keys(
-        self,
-        contract_keys: List[Tuple[str, str, str, str]],
-        account_id: Optional[str] = None,
-        limit: int = 5000,
-    ) -> List[Dict[str, Any]]:
-        if not self._connect():
-            return []
-        result = executions_module.get_executions_by_contract_keys(self._conn, contract_keys=contract_keys, account_id=account_id, limit=limit)
-        self._end_read_txn()
-        return result
-
-    def get_executions_for_strategy_link(
-        self,
-        account_id: str,
-        contract_key: Optional[str] = None,
-        symbol: Optional[str] = None,
-        expiry: Optional[str] = None,
-        strike: Optional[Any] = None,
-        option_right: Optional[str] = None,
-        limit: int = 200,
-    ) -> List[Dict[str, Any]]:
-        if not self._connect():
-            return []
-        result = executions_module.get_executions_for_strategy_link(
-            self._conn,
-            account_id=account_id,
-            contract_key=contract_key,
-            symbol=symbol,
-            expiry=expiry,
-            strike=strike,
-            option_right=option_right,
-            limit=limit,
-        )
         self._end_read_txn()
         return result
 
@@ -822,52 +626,6 @@ class StatusReader:
             strategy_instance_id=strategy_instance_id,
             source_scope=source_scope,
         )
-        self._end_read_txn()
-        return result
-
-    def get_executions_with_opt_pairs_single_query(
-        self,
-        since_ts: Optional[float] = None,
-        until_ts: Optional[float] = None,
-        account_id: Optional[str] = None,
-        limit: int = 5000,
-        source_scope: Optional[str] = None,
-    ) -> List[Dict[str, Any]]:
-        if not self._connect():
-            return []
-        result = executions_module.get_executions_with_opt_pairs_single_query(
-            self._conn,
-            since_ts=since_ts,
-            until_ts=until_ts,
-            account_id=account_id,
-            limit=limit,
-            source_scope=source_scope,
-        )
-        self._end_read_txn()
-        return result
-
-    def get_net_cash_flow(
-        self,
-        since_ts: Optional[float] = None,
-        until_ts: Optional[float] = None,
-        account_id: Optional[str] = None,
-    ) -> float:
-        if not self._connect():
-            return 0.0
-        result = executions_module.get_net_cash_flow(self._conn, since_ts=since_ts, until_ts=until_ts, account_id=account_id)
-        self._end_read_txn()
-        return result
-
-    def get_transactions(
-        self,
-        since_ts: Optional[float] = None,
-        until_ts: Optional[float] = None,
-        account_id: Optional[str] = None,
-        limit: int = 500,
-    ) -> List[Dict[str, Any]]:
-        if not self._connect():
-            return []
-        result = executions_module.get_transactions(self._conn, since_ts=since_ts, until_ts=until_ts, account_id=account_id, limit=limit)
         self._end_read_txn()
         return result
 
@@ -975,22 +733,6 @@ class StatusReader:
             self._conn, name=name, description=description, sort_order=sort_order
         )
 
-    def update_position_category(
-        self,
-        category_id: int,
-        name: Optional[str] = None,
-        description: Optional[str] = None,
-        sort_order: Optional[int] = None,
-    ) -> bool:
-        if not self._connect():
-            return False
-        return position_categories_module.update_position_category(self._conn, category_id=category_id, name=name, description=description, sort_order=sort_order)
-
-    def delete_position_category(self, category_id: int) -> bool:
-        if not self._connect():
-            return False
-        return position_categories_module.delete_position_category(self._conn, category_id)
-
     def set_position_category_tag(
         self,
         account_id: str,
@@ -1025,31 +767,6 @@ class StatusReader:
             instrument_class=instrument_class,
             note=note,
             keep_note=keep_note,
-        )
-
-    def delete_instrument_class(self, contract_key: str) -> bool:
-        if not self._connect():
-            return False
-        return instrument_class_module.delete_instrument_class(self._conn, contract_key)
-
-    def batch_update_execution_strategy(
-        self,
-        account_id: str,
-        contract_key: Optional[str],
-        execution_ids: Optional[list],
-        strategy_opportunity_id: Optional[int],
-        strategy_instance_id: Optional[int],
-    ) -> int:
-        """Batch update strategy attribution on account_executions (by contract_key or execution_ids). Returns updated count."""
-        if not self._connect():
-            return 0
-        return accounts_module.batch_update_execution_strategy(
-            self._conn,
-            account_id=account_id,
-            contract_key=contract_key,
-            execution_ids=execution_ids,
-            strategy_opportunity_id=strategy_opportunity_id,
-            strategy_instance_id=strategy_instance_id,
         )
 
     def get_market_streams_symbol_order(self) -> Dict[str, Any]:

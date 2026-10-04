@@ -37,7 +37,7 @@ def main() -> int:
             config_path = str(_PROJECT_ROOT / config_path)
         config_path = str(Path(config_path).resolve())
     else:
-        from bifrost_core.config.startup import resolve_startup_config_path
+        from bifrost_core.config.yaml_config import resolve_startup_config_path
 
         config_path, _ = resolve_startup_config_path(str(_PROJECT_ROOT), argv_remainder)
 

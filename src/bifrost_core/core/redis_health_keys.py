@@ -45,10 +45,8 @@ BIFROST_HEALTH_IB_ACCOUNT_AGENT = "bifrost:health:ws_ib_account_agent"
 # Dev/Prod lease fields (``bifrost_ops_control_*``, ``engine_ops_active``) on the same key —
 # NOT migrated to a separate lease key (different lifecycle).
 # The value is a live Redis key (redis-ib ACL allows ``~bifrost:health:daemon_*``): do not change it.
+# Named BIFROST_HEALTH_DAEMON_TRADING_ENGINE before core 0.39.0 (TD-75); that alias left in 0.46.0.
 BIFROST_HEALTH_DAEMON_STRATEGY_TRADING = "bifrost:health:daemon_strategy_trading"
-# Deprecated alias (0.39.0, TD-75): the old name said trading_engine while the value says
-# strategy_trading. Kept for one core version so api / worker can switch; then removed.
-BIFROST_HEALTH_DAEMON_TRADING_ENGINE = BIFROST_HEALTH_DAEMON_STRATEGY_TRADING
 # Earlier key names, only normalized away in api ``market_ingest_config`` (Ops YAML meta_key).
 # Neither key exists in redis-dev / redis-live-stg / redis-live-prod (checked 2026-10-03).
 LEGACY_BIFROST_HEALTH_DAEMON_TRADING_ENGINE = "bifrost:health:daemon_trading_engine"

@@ -97,25 +97,6 @@ def set_instrument_class(
         return False, "Failed to save the instrument class."
 
 
-def delete_instrument_class(conn: Any, contract_key: str) -> bool:
-    """Drop the registration; the instrument reads as a stock again."""
-    ck = str(contract_key or "").strip()
-    if not ck or conn is None:
-        return False
-    try:
-        with conn.cursor() as cur:
-            cur.execute("DELETE FROM preference_instrument_class WHERE contract_key = %s", (ck,))
-        conn.commit()
-        return True
-    except Exception as e:
-        logger.debug("delete_instrument_class failed: %s", e)
-        try:
-            conn.rollback()
-        except Exception:
-            pass
-        return False
-
-
 # --- TD-15 writers (core 0.33.0): return the row / raise Write* ---------------------
 
 INSTRUMENT_CLASS_PATCHABLE = ("instrument_class", "note")
@@ -164,7 +145,7 @@ def patch_instrument_class(conn_or_config: Any, contract_key: str, fields: Dict[
 
 def delete_instrument_class_strict(conn_or_config: Any, contract_key: str) -> Dict[str, Any]:
     """Drop the registration. Returns ``{"deleted": "hard", "contract_key"}``; WriteNotFound when
-    none was registered (``delete_instrument_class`` answered True), WriteFailed on a DB failure."""
+    none was registered, WriteFailed on a DB failure."""
     ck = _contract_key(contract_key)
     what = f"the instrument class of {ck}"
     with ws.write_connection(conn_or_config, what) as conn, ws.write_transaction(conn, what):

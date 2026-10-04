@@ -10,7 +10,7 @@ from typing import Any, Dict, Optional
 
 import redis
 
-from bifrost_core.config.startup import get_effective_ib_config
+from bifrost_core.config.yaml_config import get_effective_ib_config
 from bifrost_core.ib_operator.config import effective_ib_operator_settings
 from bifrost_core.ib_operator.health_redis import (
     normalize_operator_health_payload,
