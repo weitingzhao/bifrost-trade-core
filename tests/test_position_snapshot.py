@@ -80,8 +80,12 @@ def test_no_live_quote_leaves_the_mark_empty():
 
 def test_close_on_requires_that_sessions_bar():
     d = date(2026, 10, 5)
+    # The plugin's benchmark route: epoch seconds of the bar date (UTC midnight).
+    assert daily._close_on({"bar_time": 1791158400.0, "close": 10.5}, d) == 10.5
+    assert daily._close_on({"bar_time": 1790899200.0, "close": 10.0}, d) is None  # 10-02
+    assert daily._close_on({"bar_time": 1791158400.0, "close": 0}, d) is None  # no close
+    assert daily._close_on({"bar_time": 0, "close": 0}, d) is None
     assert daily._close_on({"bar_time": "2026-10-05", "close": 10.5}, d) == 10.5
-    assert daily._close_on({"bar_time": "2026-10-02T00:00:00", "close": 10.0}, d) is None
     assert daily._close_on(None, d) is None
 
 
@@ -141,7 +145,7 @@ def test_enrich_fills_greeks_mark_and_closes():
                  "theta": -0.03, "iv": 0.42, "day_close": 1.2, "snapshot_ts": "2026-10-05T20:00:00Z"}]
 
     out = daily.enrich(conn, d, option_rows=option_rows,
-                       closes=lambda syms, as_of: {"ZZZ": {"bar_time": "2026-10-05", "close": 52.0}})
+                       closes=lambda syms, as_of: {"ZZZ": {"bar_time": 1791158400.0, "close": 52.0}})
     assert chain_calls == [("ZZZ", date(2026, 11, 20), d)]  # one chain read per (symbol, expiry)
     assert out == {"rows": 3, "updated": 3, "greeks_missing": 1}
     u = {p["id"]: p for p in conn.store["updates"]}

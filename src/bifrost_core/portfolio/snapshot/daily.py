@@ -21,7 +21,7 @@ from __future__ import annotations
 import logging
 import math
 import re
-from datetime import date
+from datetime import date, datetime, timezone
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Tuple
 
 from psycopg2.extras import RealDictCursor
@@ -262,12 +262,25 @@ def _default_closes(symbols: List[str], as_of: date) -> Dict[str, Dict[str, Any]
 
 
 def _close_on(bar: Optional[Mapping[str, Any]], d: date) -> Optional[float]:
-    """The bar's close when the bar is that session's (a bar from an earlier day is not)."""
+    """The bar's close when the bar is that session's (a bar from an earlier day is not).
+
+    The plugin's ``/stocks/db/bars/benchmark`` sends ``bar_time`` as epoch seconds of the bar
+    date (UTC midnight) and ``close`` 0 when it has none; an ISO date string is accepted too.
+    """
     if not bar:
         return None
-    if str(bar.get("bar_time") or "")[:10] != d.isoformat():
+    raw = bar.get("bar_time")
+    epoch = _finite(raw)
+    if epoch is not None:
+        if epoch <= 0:
+            return None
+        bar_day = datetime.fromtimestamp(epoch, tz=timezone.utc).date()
+    else:
+        bar_day = parse_expiry(raw)
+    if bar_day != d:
         return None
-    return _finite(bar.get("close"))
+    close = _finite(bar.get("close"))
+    return close if close is not None and close > 0 else None
 
 
 _SELECT_TO_ENRICH = f"""
