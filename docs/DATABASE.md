@@ -19,7 +19,7 @@ Authoritative runtime DDL:
 
 | Domain | Module | Database |
 |--------|--------|----------|
-| Per-env Trade (`settings`, `strategy_*`, `trade_review`, `gate_safety_*`, `preference_*`, `watchlist`, bridge tables) | [`ddl.py`](../src/bifrost_core/persistence/postgres/ddl.py) `_ensure_tables()` | `bifrost_{dev,stg,prod}` `public.*` |
+| Per-env Trade (`settings`, `strategy_*`, `trade_review`, `gate_safety_*`, `preference_*`, `watchlist`, bridge tables, daily snapshots) | [`ddl.py`](../src/bifrost_core/persistence/postgres/ddl.py) `_ensure_tables()` | `bifrost_{dev,stg,prod}` `public.*` |
 | Daemon / Account Sync process IPC | [`redis_daemon_state.py`](../src/bifrost_core/persistence/redis_daemon_state.py) — see [DAEMON_IPC_REDIS.md](DAEMON_IPC_REDIS.md) | per-env Redis (`config.redis`) |
 | Brokerage Golden Source (IB account / positions / executions) | [`brokerage_ddl.py`](../src/bifrost_core/persistence/postgres/brokerage_ddl.py) | `bifrost_golden_source` `raw_broker.*` |
 | Market Data (Polygon) | Market Data Plugin | `bifrost_golden_source` `raw_market.*` / `ops_jobs.*` |
@@ -40,7 +40,8 @@ bifrost_golden_source
 
 bifrost_{dev,stg,prod}
 ├── public.*          # settings, strategy_*, trade_review, gate_safety_*, preference_*, watchlist,
-│                     # bridge tables — 18 tables, every column in the appendix below
+│                     # bridge tables — 18 tables, every column in the appendix below;
+│                     # + the 2 daily snapshot tables (core 0.48.0, see "Daily book snapshots")
 ├── brokerage.*       # postgres_fdw foreign tables → raw_broker + local views
 └── market.*          # postgres_fdw foreign tables → raw_market (ticker, us_market_holiday,
                       # ticker_related) + local view v_us_equity_universe
@@ -320,6 +321,55 @@ its scope. Reads guard on `to_regclass`, so an api ahead of the DDL lists none.
 
 Reads and writes: [`saved_search.py`](../src/bifrost_core/monitor/reader/saved_search.py).
 
+## Daily book snapshots (core **0.48.0**, W4)
+
+The broker tables (`brokerage.positions`, `brokerage.account`) hold the current book only, so
+yesterday's positions and NAV exist nowhere unless they are kept. These two tables keep them, one
+session at a time, from the day they ship: they cannot be backfilled. Phase 0 W4; the position
+table was approved 2026-09-30, the NAV table 2026-10-05 (Owner, "加账户级 NAV 行"). DDL:
+[`snapshot_ddl.py`](../src/bifrost_core/persistence/postgres/snapshot_ddl.py), run by `_ensure_tables`
+(`CREATE … IF NOT EXISTS` only; no existing object changes). Writer: the nightly job
+[`portfolio/snapshot`](../src/bifrost_core/portfolio/snapshot/daily.py) (`python -m bifrost_core.portfolio.snapshot
+capture|enrich`, per-env CronJob); nothing else writes them.
+
+### `position_snapshot_daily`
+
+One row per session, account, contract and trade. Natural key UNIQUE NULLS NOT DISTINCT
+`position_snapshot_daily_uq (snapshot_date, account_id, contract_key, trade_id)`; index
+`position_snapshot_daily_trade_ix (trade_id, snapshot_date) WHERE trade_id IS NOT NULL`.
+
+| Column | Meaning |
+|--------|---------|
+| `position_snapshot_daily_id` | PK (bigserial) |
+| `snapshot_date` | The New York session date |
+| `account_id`, `contract_key` | The broker position (`brokerage.positions` keys) |
+| `trade_id` | The trade this row's share belongs to. **No FK**: history must not stop a trade from being deleted. NULL = the part of the position no trade's fills explain (a position with no attributed fill is that row alone) |
+| `symbol`, `sec_type`, `expiry` (date), `strike`, `option_right` | Copied from the position, so a row reads without the contract still existing |
+| `position_qty` | The broker's whole position on the contract (signed) |
+| `trade_qty` | This row's share: the trade's net fills on the contract (`get_position_instance_attribution`'s `open_qty_est`); the NULL-trade row takes the remainder, so a position's rows add up to `position_qty` |
+| `avg_cost` | The broker's average cost (per contract for options, as IB reports it) |
+| `mark`, `mark_source` | `quote_live`: the fresh `contract_quote_live` last (else mid) at capture; `vendor_eod`: filled by enrich from the vendor's session close (option `day_close`, stock daily close) where capture had none |
+| `underlying_close` | The underlying's daily close for the session (market-data plugin `stock_daily`) |
+| `delta`, `gamma`, `vega`, `theta`, `iv` | Vendor EOD values (`raw_market.option_snapshot`, the session's 16:00 anchor, via the plugin); NULL for stock rows and for a contract the vendor has no row for |
+| `greeks_asof` | The vendor snapshot's `snapshot_ts` |
+| `positions_updated_at` | `brokerage.positions.updated_at` when captured — shows a stale broker sync |
+| `captured_at` | Row insert time |
+
+### `account_nav_daily`
+
+One row per session and account (UNIQUE `account_nav_daily_uq (snapshot_date, account_id)`):
+`account_nav_daily_id` (PK), `snapshot_date`, `account_id`, `net_liquidation`, `total_cash`,
+`buying_power` (from `brokerage.account`), `account_updated_at` (that row's `updated_at`),
+`captured_at`. The start-of-range balance that time-weighted return and Sharpe need (Performance
+reads `not recorded` without it; the frontend is not wired to it yet).
+
+**Write rule.** `capture` (after the close) inserts with `ON CONFLICT DO NOTHING`: the first
+capture of a session is kept and a rerun never rewrites it. It refuses (exit 1, nothing written)
+when the broker has open positions but the attribution read returned none. `enrich` (evening)
+only fills NULLs. Weekends and full-day NYSE holidays (`market.us_market_holiday`) are skipped.
+The runtime role `trade_app_<env>` reads and writes both tables through bifrost's default
+privileges in `public` (TD-85); no GRANT is needed.
+
 ## §6 Schema changelog (Wave 1–15)
 
 | Wave | Core version | Change |
@@ -365,7 +415,7 @@ Reads and writes: [`saved_search.py`](../src/bifrost_core/monitor/reader/saved_s
 | Naming R4 | 0.47.0 | **Public interface change; DDL by an Owner step (naming program R4; decision pack 2026-10-03 D4-A / D7-A; TD-80 C3).** **Reader rows carry only the trade names**: `trade_id`, `trade_label`, `trade_opened_at_epoch`, `fill_splits: [{trade_id, quantity, strategy_opportunity_id, trade_label?}]`, `realized_by_trade`, and on `trade_review` rows `trade_id` / `tags_added_json` / `tags_dropped_json` — the R1 keys beside them (`strategy_instance_id`, `strategy_instance_label`, `strategy_instance_opened_at_epoch`, `instance_allocations` with `allocated_quantity`, `realized_by_strategy_instance`, `tags_added` / `tags_dropped`) are gone, and strict deletes answer `{deleted, trade_id}`. **Writers take only the new names**: `patch_execution` refuses `strategy_instance_id` / `instance_allocations` (WriteInvalid, unknown key), `insert_one_execution` / `update_one_execution` ignore them, `patch_review` refuses `tags_added` / `tags_dropped`, `PlanLinkFillBody` reads `trade_id` only; keyword arguments `strategy_instance_id(s)` → `trade_id(s)` on the readers (`list_instances`, `get_executions*`, `get_performance_stats`, …). `monitor.reader.trade_names` is removed; `executions.attach_instance_allocations` → `attach_fill_splits`, `weight_realized_for_strategy_instance` → `weight_realized_for_trade`, `accounts.replace_execution_instance_allocations` → `replace_execution_fill_splits`. **Facade (TD-80 C3):** `StatusReader.list_trades` / `get_trade_by_id` / `create_trade` / `get_trade_win_rate` / `get_performance_trade_summary` / `get_position_trade_attribution`; the instance-era method names stay one version as aliases. **R3 aliases removed:** `brokerage_tables.INSTANCE_EXECUTION` / `INSTANCE_ALLOCATION` / `COMPAT_INSTANCE_ALLOCATIONS` / `LEGACY_INSTANCE_ALLOCATION`, `trade_ddl.STRATEGY_INSTANCE_EXECUTION_DDL`; `data_probe.TRADE_TABLES` is `("trade",)`. **DDL in code:** the env views lose `strategy_instance_id` and their rebuild drops `brokerage.instance_allocations` by name (`brokerage_views.RETIRED_ENV_VIEWS`) — but db-init's FDW step never reaches the rebuild in dev / stg / prod (`must be owner of foreign server`, logged as `FDW setup skipped`), so the R4 step rebuilds them; `ensure_trade_tables` no longer creates `account_execution_instance_allocation`. **DDL, Owner step after the env runs 0.47.0** ([`drop_trade_compat.py`](../src/bifrost_core/persistence/postgres/drop_trade_compat.py), `scripts/db/drop_trade_compat.py --env dev|stg|prod [--commit] [--reverse]`; infra `scripts/release/db-steps.d/2026-10-08-r4-drop-compat.md`): one transaction per env, guards first (database; the compatibility objects are views; every object dropped or rebuilt owned by `bifrost`; no other view depends on them — the rebuild uses CASCADE; the frozen table holds 2 rows and each is in `trade_execution`), then `DROP VIEW public.strategy_instance_execution` / `public.strategy_instance`, the five env views rebuilt as 0.47.0 builds them (dropping `brokerage.instance_allocations`) and `GRANT SELECT` on them to the env's runtime role `trade_app_<env>` (TD-85; the DROP takes their grants with it — bifrost's default privileges would give it back too), and `DROP TABLE account_execution_instance_allocation` after a CSV export; a report RAISEs on a changed count, a left object, a view with `strategy_instance_id` or a rebuilt view `trade_app_<env>` cannot read. `--reverse` puts the objects back (R3 / 0.45.0 / 0.46.x definitions, the table empty; rows from the CSV). Retired: `rename_trade_entity` / `rename_trade_entity_reverse` and `scripts/db/rename_trade_entity.py` (ran on dev / stg / prod 2026-10-04; the SQL stays in infra). Affected downstreams: **api** 0.9.0 (floor `bifrost-core>=0.47.0`; deletes the replaced routes and old names in the same round); worker / Flex — none (they call none of these); Research / frontend / platform — none in core (their old-name reads go in the same round) |
 | — | 0.47.0 | **TD-74: `settings.flex_default_range_days` / `flex_init_range_days` leave the DDL; the drop is an Owner step (infra `scripts/release/db-steps.d/2026-10-10-td74-drop-settings-flex-columns`, when: after; observation gate waived by the Owner 2026-10-04).** `CREATE TABLE settings` no longer declares them and `wave13_migrations` no longer sets them NOT NULL, so a fresh database never has them and db-init never adds them back; core has not read them since 0.39.0 (the Flex Query plugin keeps the range in Golden Source `ops_jobs.flex_settings` since Flex 0.7.0). Core works with the columns present or absent, so it ships before the drop. No reader output named them. |
 | — | 0.47.0 | No DDL, no Redis key. **TD-80 C2-a (Owner 2026-10-04, option C, item 4), additive:** the Write* twins of the POST / PUT writers the `StatusReader` facade still carried — `strategy_instance.create_instance_strict` (returns the row as `get_instance_by_id` reads it; an opportunity that does not exist is `WriteInvalid`), `position_categories.create_position_category_strict` (the row; reserved `Uncategorized` `WriteInvalid`, a name in use `WriteConflict`), `position_categories.set_position_category_tag_strict` (`{account_id, contract_key, category_id, cleared}`; a category that does not exist is `WriteInvalid`; clearing an untagged position is not an error), `position_categories.set_market_streams_symbol_order_strict` (`{category_name, symbols}`; a blank, non-text or repeated symbol is `WriteInvalid` and nothing changes) and `instrument_class.set_instrument_class_strict` (full replace, the row). Each takes a status config or a connection (`write_support.write_connection`), runs in one transaction and raises `WriteInvalid` / `WriteConflict` / `WriteFailed` (`unavailable` when Postgres is not configured or unreachable); blank text is refused, never stored as NULL (as PATCH). The bool / `(id, error)` writers and the five facade write methods (`create_strategy_instance`, `create_position_category`, `set_position_category_tag`, `set_market_streams_symbol_order`, `set_instrument_class`) stay this release; C2-b deletes them once api ≥ 0.9.0 is live everywhere. Affected downstreams: **api** 0.9.0 (floor `bifrost-core>=0.47.0`) calls the new writers from `POST /trades`, `POST /position-categories`, `PUT /position-categories/tag`, `PUT /position-categories/symbol-order` and `PUT /instrument-classes/{contract_key}`; worker / Flex / Research — none |
-
+| W4 | 0.48.0 | **DDL, additive (db-init): `position_snapshot_daily` and `account_nav_daily`** ([`snapshot_ddl.py`](../src/bifrost_core/persistence/postgres/snapshot_ddl.py), `_ensure_tables`; Owner-approved 2026-09-30 / 2026-10-05, PROD DDL list `W4-prod-ddl-plan.md`). New module `portfolio.snapshot` (`capture`, `enrich`, `split_rows`, `vendor_option_ticker`; `python -m bifrost_core.portfolio.snapshot`). No existing table, view, grant or public function changes. Affected downstreams: **api** — none in code; its image carries the job (floor `bifrost-core>=0.48.0` for the CronJob's image only); **infra** — the per-env CronJob `position-snapshot-daily`; worker / Flex / Research / frontend — none (Performance may read `account_nav_daily` later) |
 
 ## Brokerage tables
 

@@ -9,6 +9,7 @@ from bifrost_core.persistence.postgres.wave9_migrations import (
 from bifrost_core.persistence.postgres.wave11_migrations import migrate_wave11_drop_flex_token_columns
 from bifrost_core.persistence.postgres.wave13_migrations import migrate_wave13_reconcile_legacy_schema
 from bifrost_core.persistence.postgres.wave14_migrations import migrate_wave14_trade_invariants
+from bifrost_core.persistence.postgres.snapshot_ddl import ensure_snapshot_tables
 from bifrost_core.persistence.postgres.trade_ddl import (  # noqa: F401 - re-exported
     TRADE_EXECUTION_DDL,
     ensure_trade_tables,
@@ -624,6 +625,9 @@ def _ensure_tables(conn, log=None, log_table=None) -> None:
             "Retired Wave 6 — DROP CASCADE (audit → platform-api)",
         )
         _retire_ops_audit_log(cur)
+
+        # W4 (core 0.48.0): daily position-per-trade and account NAV snapshots.
+        ensure_snapshot_tables(cur, _log_table)
 
         conn.commit()
 
