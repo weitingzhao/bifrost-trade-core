@@ -187,7 +187,8 @@ def test_ensure_trade_tables_no_longer_makes_the_frozen_table() -> None:
     assert not any("account_execution_instance_allocation" in s for s in rec.sql)
 
 
-def test_the_facade_speaks_of_trades_and_keeps_the_old_names_one_version() -> None:
+def test_the_facade_speaks_only_of_trades() -> None:
+    # The instance-era aliases kept one version in 0.47.0 left in 0.48.0 (TD-80 C2-b, Owner 2026-10-04).
     reader = common_reader.StatusReader
     pairs = {
         "list_strategy_instances": "list_trades",
@@ -197,4 +198,5 @@ def test_the_facade_speaks_of_trades_and_keeps_the_old_names_one_version() -> No
         "get_position_instance_attribution": "get_position_trade_attribution",
     }
     for old, new in pairs.items():
-        assert getattr(reader, old) is getattr(reader, new), old
+        assert not hasattr(reader, old), old
+        assert callable(getattr(reader, new)), new

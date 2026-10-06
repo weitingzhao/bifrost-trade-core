@@ -44,7 +44,7 @@ def test_module_reader_raises(read: Any) -> None:
 
 
 @pytest.mark.parametrize(
-    "method", ["list_structures", "list_opportunities", "list_allocations", "list_gate_safety_sets", "list_strategy_instances"]
+    "method", ["list_structures", "list_opportunities", "list_allocations", "list_gate_safety_sets", "list_trades"]
 )
 def test_status_reader_raises_when_it_cannot_connect(monkeypatch: pytest.MonkeyPatch, method: str) -> None:
     reader = StatusReader.__new__(StatusReader)

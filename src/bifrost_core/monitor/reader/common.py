@@ -723,12 +723,3 @@ class StatusReader:
         result = position_categories_module.get_market_streams_symbol_order(self._conn)
         self._end_read_txn()
         return result
-
-    # Naming R4 / TD-80 C3 (core 0.47.0): the facade speaks of trades. The instance-era names
-    # stay one version as aliases (their keyword arguments are the new ones: trade_id /
-    # trade_ids), then go. (``create_strategy_instance`` went with ``create_trade`` in 0.48.0.)
-    list_strategy_instances = list_trades
-    get_strategy_instance_by_id = get_trade_by_id
-    get_strategy_win_rate = get_trade_win_rate
-    get_performance_instance_summary = get_performance_trade_summary
-    get_position_instance_attribution = get_position_trade_attribution

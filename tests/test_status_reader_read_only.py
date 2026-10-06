@@ -4,6 +4,7 @@ Its last five write methods (``create_trade`` and its R4 alias ``create_strategy
 ``create_position_category``, ``set_position_category_tag``, ``set_instrument_class``,
 ``set_market_streams_symbol_order``) and the bool / ``(id, error)`` module writers behind them
 left in this release; the API writes through the ``*_strict`` / ``patch_*`` writers since api 0.9.0.
+The five R4 instance-era read aliases (``list_strategy_instances`` ...) went with them.
 
 Two checks, because a name alone proves little:
 
@@ -95,6 +96,10 @@ def test_the_c2b_writers_are_gone_from_the_facade_and_the_modules() -> None:
 
     for name in ("create_trade", "create_strategy_instance", "create_position_category",
                  "set_position_category_tag", "set_instrument_class", "set_market_streams_symbol_order"):
+        assert not hasattr(StatusReader, name), name
+    # The R4 instance-era read aliases went in the same release (Owner 2026-10-04).
+    for name in ("list_strategy_instances", "get_strategy_instance_by_id", "get_strategy_win_rate",
+                 "get_performance_instance_summary", "get_position_instance_attribution"):
         assert not hasattr(StatusReader, name), name
     gone = {
         strategy_instance: ("create_instance",),
