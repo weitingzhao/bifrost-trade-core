@@ -74,6 +74,45 @@ def _env_attributed(rows_sql: str) -> str:
     )
 
 
+def saved_view_grants(cur: Any, schema: str, names: tuple[str, ...]) -> list[tuple[str, str, str]]:
+    """The grants on ``schema``'s named views, read before a rebuild drops them.
+
+    ``DROP VIEW`` takes the view's ACL with it, so a rebuild keeps only what the code
+    re-grants and the owner's default privileges give back. Roles granted by hand lose
+    their access on every db-init: Research's ``analytics_writer`` lost SELECT on
+    ``raw_broker.executions_final`` (TD-85 D2) and its memory distill failed on
+    2026-10-05. Rows are ``(view, grantee, privilege)``; the owner's own entry is left
+    out, PUBLIC is ``'PUBLIC'``.
+    """
+    cur.execute(
+        """
+        SELECT c.relname,
+               CASE WHEN a.grantee = 0 THEN 'PUBLIC' ELSE a.grantee::regrole::text END,
+               a.privilege_type
+          FROM pg_class c
+          JOIN pg_namespace n ON n.oid = c.relnamespace
+          CROSS JOIN LATERAL aclexplode(c.relacl) a
+         WHERE n.nspname = %s AND c.relname = ANY(%s) AND c.relkind = 'v'
+           AND a.grantee <> c.relowner
+         ORDER BY 1, 2, 3
+        """,
+        (schema, list(names)),
+    )
+    return [(row[0], row[1], row[2]) for row in cur.fetchall()]
+
+
+def restore_view_grants(cur: Any, schema: str, grants: list[tuple[str, str, str]]) -> None:
+    """Give back what :func:`saved_view_grants` read, on the views the rebuild recreated.
+
+    A view the rebuild retired is skipped. Grantee names come from ``regrole`` output,
+    which quotes them where needed; privileges are ``aclexplode``'s keywords.
+    """
+    for view, grantee, privilege in grants:
+        cur.execute("SELECT to_regclass(%s) IS NOT NULL", (f"{schema}.{view}",))
+        if cur.fetchone()[0]:
+            cur.execute(f"GRANT {privilege} ON {schema}.{view} TO {grantee}")
+
+
 def _create_brokerage_views(cur: Any, schema: str, *, env: bool = False) -> None:
     """The execution views over the three raw tables.
 

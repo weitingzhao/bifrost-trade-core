@@ -22,6 +22,8 @@ from bifrost_core.persistence.postgres.brokerage_views import (  # noqa: F401 - 
     _EXEC_CANONICAL_COLS,
     _create_brokerage_views,
     _env_attributed,
+    restore_view_grants,
+    saved_view_grants,
 )
 from bifrost_core.persistence.postgres.market_tables import (
     MARKET_FOREIGN_TABLES,
@@ -423,7 +425,9 @@ def ensure_brokerage_schema(
         )
         _log(f"{physical}.executions_raw_journal")
 
+        grants = saved_view_grants(cur, physical, BROKERAGE_VIEWS)
         _create_brokerage_views(cur, physical)
+        restore_view_grants(cur, physical, grants)
         _log(f"{physical}.executions / executions_final / executions_fly views")
 
         _grant_brokerage_privileges(cur, physical)
@@ -569,6 +573,7 @@ def setup_fdw_foreign_tables(
 
         cur.execute(f"CREATE SCHEMA IF NOT EXISTS {SCHEMA}")
 
+        grants = saved_view_grants(cur, SCHEMA, (*BROKERAGE_ENV_VIEWS, *BROKERAGE_VIEWS))
         for name in (*BROKERAGE_ENV_VIEWS, *BROKERAGE_VIEWS):
             cur.execute(f"DROP VIEW IF EXISTS {SCHEMA}.{name} CASCADE")
         for name in BROKERAGE_PHYSICAL_TABLES:
@@ -589,6 +594,7 @@ def setup_fdw_foreign_tables(
         )
 
         _create_brokerage_views(cur, SCHEMA, env=True)
+        restore_view_grants(cur, SCHEMA, grants)
         _log("local views over foreign tables")
 
         cur.execute(f"GRANT USAGE ON SCHEMA {SCHEMA} TO {local_user}")
