@@ -3,8 +3,12 @@
 Run by the per-env CronJob from the api image, signed in as the env's runtime role:
 
   python -m bifrost_core.portfolio.snapshot capture            # after the close
-  python -m bifrost_core.portfolio.snapshot enrich             # once the vendor EOD is in
+  python -m bifrost_core.portfolio.snapshot all                # evening: stale accounts again, then enrich
   python -m bifrost_core.portfolio.snapshot enrich --date 2026-10-05
+
+``all`` runs enrich even when its capture fails (the failure still exits 1): the evening job is
+first a second chance for accounts that were stale after the close and must not cost the day's
+vendor EOD values when that second chance cannot be taken.
 
 The config is ``$BIFROST_CONFIG`` (default ``/app/config/runtime.yaml``), as db-init reads it;
 connection settings fall back to the PG* environment (core ``connection``). ``capture`` on a
@@ -62,11 +66,22 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps({"date": day.isoformat(), "skipped": "closed session"}))
             return 0
         out: dict = {"date": day.isoformat(), "db": params.get("dbname")}
+        capture_error = None
         if args.step in ("capture", "all"):
-            out["capture"] = capture(conn, day)
+            try:
+                out["capture"] = capture(conn, day)
+            except SnapshotError as e:
+                if args.step == "capture":
+                    raise
+                capture_error = str(e)
+                out["capture_error"] = capture_error
+                conn.rollback()
         if args.step in ("enrich", "all"):
             out["enrich"] = enrich(conn, day)
         print(json.dumps(out))
+        if capture_error:
+            print(f"snapshot failed: {capture_error}", file=sys.stderr)
+            return 1
         return 0
     except SnapshotError as e:
         print(f"snapshot failed: {e}", file=sys.stderr)

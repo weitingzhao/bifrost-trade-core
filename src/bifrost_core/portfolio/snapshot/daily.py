@@ -5,8 +5,12 @@ Two steps, both idempotent for a session date:
 * ``capture`` -- right after the close. Reads the broker's current book (``brokerage.positions``
   and ``brokerage.account``, FDW to Golden Source) and the trade attribution of each position,
   and writes ``position_snapshot_daily`` / ``account_nav_daily``. This is the part that cannot be
-  recovered later: the broker tables hold the current state only. A row already written for the
-  date is kept (``ON CONFLICT DO NOTHING``), so a second run never rewrites what the first saw.
+  recovered later: the broker tables hold the current state only. Per account: an account whose
+  ``brokerage.account.updated_at`` is older than the session's close is stale (its TWS was not
+  connected at the close) and is skipped, NAV and positions alike, and listed in the result; an
+  account that already has its NAV row for the date is kept as written. A later run the same
+  evening (the CronJob's ``all``) therefore picks up only the accounts that were stale, once
+  their broker sync is back after the close (core 0.52.0).
 * ``enrich`` -- later the same evening. Fills the vendor EOD values the market-data plugin has
   for that session (``/options/snapshots?as_of=`` is the 16:00 anchor of the day, whenever it is
   read; ``/stocks/db/bars/benchmark`` the daily close): Greeks, IV, the option's close as the
@@ -170,14 +174,52 @@ def is_closed_session(conn: Any, d: date) -> bool:
         return False
 
 
+def session_close_at(conn: Any, d: date) -> datetime:
+    """The session's close: 16:00 New York, or the NYSE ``early-close`` time in
+    ``market.us_market_holiday`` for that date. Computed by the database clock (the container may
+    lack tzdata); a failed holiday lookup falls back to 16:00.
+    """
+    plain = "SELECT (%s::date + time '16:00') AT TIME ZONE 'America/New_York'"
+    early = (
+        "SELECT COALESCE("
+        "(SELECT min(close_time) FROM market.us_market_holiday "
+        " WHERE holiday_date = %s AND upper(exchange) = 'NYSE' AND lower(status) = 'early-close'), "
+        "(%s::date + time '16:00') AT TIME ZONE 'America/New_York')"
+    )
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT to_regclass('market.us_market_holiday') IS NOT NULL")
+            has_calendar = bool(cur.fetchone()[0])
+            if has_calendar:
+                cur.execute(early, (d, d))
+            else:
+                cur.execute(plain, (d,))
+            return cur.fetchone()[0]
+    except Exception as e:  # FDW unreachable: the regular close is right on all but ~3 days a year
+        conn.rollback()
+        logger.warning("early-close lookup failed (%s); using 16:00 New York for %s", e, d)
+        with conn.cursor() as cur:
+            cur.execute(plain, (d,))
+            return cur.fetchone()[0]
+
+
 # --------------------------------------------------------------------------- capture
+
+_SELECT_ACCOUNTS = f"""
+SELECT trim(account_id) AS account_id, updated_at, net_liquidation, total_cash, buying_power,
+       summary_extra
+FROM {ACCOUNT}
+WHERE NULLIF(trim(account_id), '') IS NOT NULL
+"""
+
+_SELECT_CAPTURED = f"SELECT account_id FROM {ACCOUNT_NAV_DAILY} WHERE snapshot_date = %s"
 
 _INSERT_NAV = f"""
 INSERT INTO {ACCOUNT_NAV_DAILY}
-    (snapshot_date, account_id, net_liquidation, total_cash, buying_power, account_updated_at)
-SELECT %s, account_id, net_liquidation, total_cash, buying_power, updated_at
-FROM {ACCOUNT}
-WHERE NULLIF(trim(account_id), '') IS NOT NULL
+    (snapshot_date, account_id, net_liquidation, total_cash, buying_power, cushion,
+     excess_liquidity, maint_margin_req, account_updated_at)
+VALUES (%(snapshot_date)s, %(account_id)s, %(net_liquidation)s, %(total_cash)s, %(buying_power)s,
+        %(cushion)s, %(excess_liquidity)s, %(maint_margin_req)s, %(updated_at)s)
 ON CONFLICT (snapshot_date, account_id) DO NOTHING
 """
 
@@ -190,6 +232,23 @@ VALUES (%(snapshot_date)s, %(account_id)s, %(contract_key)s, %(trade_id)s, %(sym
         %(trade_qty)s, %(avg_cost)s, %(mark)s, %(mark_source)s, %(positions_updated_at)s)
 ON CONFLICT ON CONSTRAINT position_snapshot_daily_uq DO NOTHING
 """
+
+#: ``account_nav_daily`` column -> IB account-summary tag in ``brokerage.account.summary_extra``.
+SUMMARY_EXTRA_COLUMNS: Tuple[Tuple[str, str], ...] = (
+    ("cushion", "Cushion"),
+    ("excess_liquidity", "ExcessLiquidity"),
+    ("maint_margin_req", "MaintMarginReq"),
+)
+
+
+def summary_extra_values(extra: Any) -> Dict[str, Optional[float]]:
+    """The three margin values from ``summary_extra`` (IB sends strings); missing or non-finite -> None."""
+    src = extra if isinstance(extra, Mapping) else {}
+    return {col: _finite(src.get(tag)) for col, tag in SUMMARY_EXTRA_COLUMNS}
+
+
+def _iso(ts: Any) -> Optional[str]:
+    return ts.isoformat() if hasattr(ts, "isoformat") else (str(ts) if ts is not None else None)
 
 
 def _positions_meta(conn: Any) -> Dict[Tuple[str, str], Any]:
@@ -213,34 +272,102 @@ def attribution_live_marks_only(conn: Any) -> List[Dict[str, Any]]:
     return get_position_instance_attribution(conn, fallback_marks=False)
 
 
+def _accounts(conn: Any) -> List[Dict[str, Any]]:
+    with conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute(_SELECT_ACCOUNTS)
+        return [dict(r) for r in cur.fetchall()]
+
+
+def _captured_accounts(conn: Any, snapshot_date: date) -> set:
+    with conn.cursor() as cur:
+        cur.execute(_SELECT_CAPTURED, (snapshot_date,))
+        return {a for (a,) in cur.fetchall()}
+
+
 def capture(
     conn: Any,
     snapshot_date: date,
     *,
     attribution: Optional[Callable[[Any], List[Dict[str, Any]]]] = None,
-) -> Dict[str, int]:
-    """Write the day's NAV and positions; rows already there for the date are kept.
+) -> Dict[str, Any]:
+    """Write the day's NAV and positions for each account that is fresh and not yet captured.
 
-    Raises SnapshotError when the broker has open positions but the attribution read returned
-    none (that reader logs and answers [] on failure, which must not pass for an empty book).
+    Fresh: ``brokerage.account.updated_at`` at or after the session's close (``session_close_at``).
+    The account row is the freshness signal for the account's positions too: the broker sync writes
+    an account's positions with its account row, while a position row's own ``updated_at`` only
+    moves when that position changes. A stale account (or open positions whose account has no
+    account row) is skipped whole and listed in ``stale_accounts``; that is not a failure. An
+    account with a NAV row for the date already is left as written (``already_captured``), so the
+    first capture of an account is the one kept and a rerun never mixes two reads of its book.
+
+    Raises SnapshotError when an account to be written has open positions but the attribution read
+    returned none for it (that reader logs and answers [] on failure, which must not pass for an
+    empty book). Nothing is written then. When no account is to be written the attribution is not
+    read at all.
     """
     if attribution is None:
         attribution = attribution_live_marks_only
 
+    close_at = session_close_at(conn, snapshot_date)
+    accounts = _accounts(conn)
+    captured = _captured_accounts(conn, snapshot_date)
     open_positions = _positions_meta(conn)
-    attr = attribution(conn) or []
+
+    pending: Dict[str, Dict[str, Any]] = {}
+    stale: Dict[str, Any] = {}
+    for a in accounts:
+        acct = a["account_id"]
+        if acct in captured:
+            continue
+        updated_at = a.get("updated_at")
+        if updated_at is None or updated_at < close_at:
+            stale[acct] = updated_at
+        else:
+            pending[acct] = a
+    for acct, _ in open_positions:
+        if acct not in pending and acct not in captured and acct not in stale:
+            stale[acct] = None  # positions with no account row: no evidence they are current
+
+    result: Dict[str, Any] = {
+        "nav_rows": 0,
+        "position_rows": 0,
+        "position_rows_seen": 0,
+        "session_close": _iso(close_at),
+        "stale_accounts": [{"account_id": k, "updated_at": _iso(v)} for k, v in sorted(stale.items())],
+        "already_captured": sorted(captured),
+    }
+    if not pending:
+        conn.rollback()
+        return result
+
+    pending_positions = [k for k in open_positions if k[0] in pending]
+    attr = [r for r in (attribution(conn) or []) if (r.get("account_id") or "").strip() in pending]
     try:
         conn.rollback()  # the reader leaves its read transaction open
     except Exception:
         pass
-    if open_positions and not attr:
+    if pending_positions and not attr:
         raise SnapshotError(
-            f"{len(open_positions)} open positions but the attribution read returned none; nothing written"
+            f"{len(pending_positions)} open positions in {sorted(pending)} but the attribution read "
+            "returned none; nothing written"
         )
     rows = split_rows(attr)
     with conn.cursor() as cur:
-        cur.execute(_INSERT_NAV, (snapshot_date,))
-        nav = cur.rowcount
+        nav = 0
+        for acct, a in sorted(pending.items()):
+            cur.execute(
+                _INSERT_NAV,
+                {
+                    "snapshot_date": snapshot_date,
+                    "account_id": acct,
+                    "net_liquidation": _finite(a.get("net_liquidation")),
+                    "total_cash": _finite(a.get("total_cash")),
+                    "buying_power": _finite(a.get("buying_power")),
+                    "updated_at": a.get("updated_at"),
+                    **summary_extra_values(a.get("summary_extra")),
+                },
+            )
+            nav += cur.rowcount
         written = 0
         for r in rows:
             cur.execute(
@@ -253,7 +380,8 @@ def capture(
             )
             written += cur.rowcount
     conn.commit()
-    return {"nav_rows": nav, "position_rows": written, "position_rows_seen": len(rows)}
+    result.update({"nav_rows": nav, "position_rows": written, "position_rows_seen": len(rows)})
+    return result
 
 
 # --------------------------------------------------------------------------- enrich

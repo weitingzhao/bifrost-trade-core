@@ -10,9 +10,12 @@ nothing else does.
   row). ``trade_id`` has no FK: a snapshot is history and must not stop a trade from being
   deleted.
 * ``account_nav_daily`` -- one row per session and account: net liquidation, cash, buying power.
-  The start-of-range balance that time-weighted return and Sharpe need.
+  The start-of-range balance that time-weighted return and Sharpe need. Core 0.52.0 adds the
+  margin-pressure history (SNAPSHOT-SPEC 1.1): ``cushion``, ``excess_liquidity``,
+  ``maint_margin_req`` from IB's account summary; rows written before it keep them NULL.
 
-Additive and idempotent: ``CREATE ... IF NOT EXISTS`` only, no change to any existing object.
+Additive and idempotent: ``CREATE ... IF NOT EXISTS`` and ``ADD COLUMN IF NOT EXISTS`` only, no
+change to any existing object or column.
 The runtime role ``trade_app_<env>`` reads and writes them through bifrost's default
 privileges in ``public`` (TD-85).
 """
@@ -72,11 +75,15 @@ SNAPSHOT_DDL: tuple[str, ...] = (
         CONSTRAINT account_nav_daily_uq UNIQUE (snapshot_date, account_id)
     )
     """,
+    # 0.52.0: margin pressure (nullable, no default: no rewrite, no backfill).
+    f"ALTER TABLE {ACCOUNT_NAV_DAILY} ADD COLUMN IF NOT EXISTS cushion double precision",
+    f"ALTER TABLE {ACCOUNT_NAV_DAILY} ADD COLUMN IF NOT EXISTS excess_liquidity double precision",
+    f"ALTER TABLE {ACCOUNT_NAV_DAILY} ADD COLUMN IF NOT EXISTS maint_margin_req double precision",
 )
 
 
 def ensure_snapshot_tables(cur: Any, log_table: Optional[Callable[[str, str], None]] = None) -> None:
-    """Create the two snapshot tables and the index when missing; a no-op otherwise."""
+    """Create the two snapshot tables, the index and the 0.52.0 NAV columns when missing; a no-op otherwise."""
     if callable(log_table):
         log_table(POSITION_SNAPSHOT_DAILY, "Daily position snapshot per trade (W4)")
         log_table(ACCOUNT_NAV_DAILY, "Daily account NAV (W4)")
