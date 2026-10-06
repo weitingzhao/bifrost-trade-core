@@ -187,3 +187,22 @@ def test_list_filters_by_status_and_symbol(plans, pg_conn) -> None:
     assert {r["symbol"] for r in intended} == {"MU"}
     assert plans.list_plans(cfg, symbol="mu", account_id="TEST-PLANS")[0]["strategy_plan_id"] == mu
     pg_conn.rollback()
+
+
+def test_list_filters_by_source_kind_and_ref(plans, pg_conn) -> None:
+    """TD-178 (core 0.53.0): exact match on the stored source_kind / source_ref."""
+    cfg = {"sink": "postgres"}
+    h1 = _draft(plans, source_kind="hypothesis", source_ref="h-1")
+    h2 = _draft(plans, source_kind="hypothesis", source_ref="h-2")
+    manual = _draft(plans, source_ref="h-1")
+    kinds = plans.list_plans(cfg, account_id="TEST-PLANS", source_kind="hypothesis")
+    assert {r["strategy_plan_id"] for r in kinds} == {h1, h2}
+    one = plans.list_plans(cfg, account_id="TEST-PLANS", source_kind="hypothesis", source_ref="h-1")
+    assert [r["strategy_plan_id"] for r in one] == [h1]
+    by_ref = plans.list_plans(cfg, account_id="TEST-PLANS", source_ref="h-1")
+    assert {r["strategy_plan_id"] for r in by_ref} == {h1, manual}
+    # The cap counts filtered rows: the newest manual plan does not take the one slot.
+    capped = plans.list_plans(cfg, account_id="TEST-PLANS", source_kind="hypothesis", limit=1)
+    assert [r["strategy_plan_id"] for r in capped] == [h2]
+    assert plans.list_plans(cfg, account_id="TEST-PLANS", source_kind="roll") == []
+    pg_conn.rollback()

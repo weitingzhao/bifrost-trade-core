@@ -215,8 +215,19 @@ def list_plans(
     symbol: Optional[str] = None,
     account_id: Optional[str] = None,
     limit: int = 200,
+    source_kind: Optional[str] = None,
+    source_ref: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
-    """Plans, newest first. `status` filters the stored status, not the effective one."""
+    """Plans, newest first. `status` filters the stored status, not the effective one.
+
+    `source_kind` and `source_ref` (core 0.53.0, TD-178) match the stored values exactly
+    -- no case folding, as they are written. A `source_kind` outside the column's CHECK
+    raises ValueError: it could never match, and an empty list would read as "none made".
+    `limit` caps the filtered rows, so a caller asking for one kind is not crowded out by
+    the newest plans of every other kind."""
+    kind = str(source_kind).strip() if source_kind is not None else ""
+    if kind and kind not in _SOURCE_KINDS:
+        raise ValueError(f"source_kind must be one of {', '.join(_SOURCE_KINDS)}.")
     conn = _conn_from_config(status_config)
     if conn is None:
         return []
@@ -231,6 +242,12 @@ def list_plans(
     if account_id and str(account_id).strip():
         conditions.append("p.account_id = %s")
         values.append(str(account_id).strip())
+    if kind:
+        conditions.append("p.source_kind = %s")
+        values.append(kind)
+    if source_ref is not None and str(source_ref).strip():
+        conditions.append("p.source_ref = %s")
+        values.append(str(source_ref).strip())
     where = (" WHERE " + " AND ".join(conditions)) if conditions else ""
     values.append(max(1, int(limit)))
     # A failed read raises. Returning [] would tell the desk it has no plans,

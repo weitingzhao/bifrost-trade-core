@@ -307,6 +307,43 @@ def test_list_filters_and_caps(conn) -> None:
     assert params == ["intended", "nvda", "U1", 50]
 
 
+def test_list_filters_by_source_kind_and_ref(conn) -> None:
+    """TD-178 (core 0.53.0): Research reads the plans made from one hypothesis, not the newest
+    500 of every kind; the cap applies after the filter."""
+    fake = conn([[]])
+    strategy_plan.list_plans(CFG, status="filled", source_kind="hypothesis", source_ref="h-17", limit=500)
+    sql, params = fake.cur.executed[0]
+    assert "p.source_kind = %s" in sql and "p.source_ref = %s" in sql
+    assert sql.index("p.source_ref = %s") < sql.index("LIMIT %s")
+    assert params == ["filled", "hypothesis", "h-17", 500]
+    # Values travel as parameters, never into the SQL text.
+    assert "hypothesis" not in sql and "h-17" not in sql
+
+
+def test_list_without_source_filters_reads_as_before(conn) -> None:
+    fake = conn([[]])
+    strategy_plan.list_plans(CFG, status="filled", source_kind="  ", source_ref="")
+    sql, params = fake.cur.executed[0]
+    assert "source_kind" not in sql.split("WHERE", 1)[1] and "source_ref" not in sql.split("WHERE", 1)[1]
+    assert params == ["filled", 200]
+
+
+def test_an_unknown_source_kind_is_refused_before_any_read(conn) -> None:
+    fake = conn([[]])
+    with pytest.raises(ValueError, match="source_kind must be one of"):
+        strategy_plan.list_plans(CFG, source_kind="Hypothesis")
+    assert fake.cur.executed == []
+
+
+def test_source_kinds_match_the_schema_literal() -> None:
+    """The read filter, the write check and the API's enum are one list."""
+    from typing import get_args
+
+    from bifrost_core.monitor.schemas.strategy_plans import SourceKind
+
+    assert strategy_plan._SOURCE_KINDS == get_args(SourceKind)
+
+
 def test_rows_carry_the_status_a_reader_should_see(conn) -> None:
     fake = conn(
         [
