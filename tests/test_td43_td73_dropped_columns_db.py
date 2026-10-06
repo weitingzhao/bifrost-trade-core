@@ -136,8 +136,7 @@ def test_db_init_never_adds_the_columns_back(pg_conn) -> None:
 
 def test_trade_plan_and_review_round_trip(db) -> None:
     opp = _opportunity(db)
-    inst = strategy_instance.create_instance(db, opp, ACCT, OPENED, label="ZZQ Oct 40P")
-    assert inst is not None
+    inst = strategy_instance.create_instance_strict(CFG, opp, ACCT, OPENED, label="ZZQ Oct 40P")["trade_id"]
     row = strategy_instance.get_instance_by_id(db, inst)
     assert row["label"] == "ZZQ Oct 40P" and "notes" not in row
     assert [r["trade_id"] for r in strategy_instance.list_instances(db, account_id=ACCT)] == [inst]
@@ -167,7 +166,7 @@ def test_old_columns_stay_unwritten_while_they_exist(db, pg_conn) -> None:
     if not all(_present(pg_conn).values()):
         pytest.skip("the dropped schema has nothing to check")
     opp = _opportunity(db)
-    inst = strategy_instance.create_instance(db, opp, ACCT, OPENED)
+    inst = strategy_instance.create_instance_strict(CFG, opp, ACCT, OPENED)["trade_id"]
     plan = _one(
         db,
         "INSERT INTO strategy_plan (account_id, symbol, structure_label, qty, status) "

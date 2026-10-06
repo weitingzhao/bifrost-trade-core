@@ -3,10 +3,9 @@
 ``patch_instance`` and ``delete_instance_strict`` (core 0.33.0, TD-15) and
 ``create_instance_strict`` (core 0.47.0, TD-80 C2) raise the ``Write*`` outcomes. The bool
 writers ``update_instance`` / ``delete_instance`` and ``get_instance_open_option_legs`` left
-in core 0.46.0 (TD-80: no caller)."""
+in core 0.46.0 (TD-80: no caller); ``create_instance`` left in core 0.48.0 (TD-80 C2-b)."""
 
 import logging
-from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 from psycopg2.extras import RealDictCursor
@@ -164,53 +163,6 @@ def get_instance_by_id(conn: Any, trade_id: int) -> Optional[Dict[str, Any]]:
         return None
 
 
-def create_instance(
-    conn: Any,
-    strategy_opportunity_id: int,
-    account_id: str,
-    opened_at: Any,
-    label: Optional[str] = None,
-) -> Optional[int]:
-    """Insert one trade (table trade, R3). opened_at: datetime or Unix timestamp. Returns trade_id or None.
-
-    No ``notes`` since core 0.43.0 (TD-73): a trade's notes live in the Research journal."""
-    if conn is None:
-        return None
-    account_id = (account_id or "").strip()
-    if not account_id:
-        return None
-    if isinstance(opened_at, (int, float)):
-        try:
-            opened_dt = datetime.fromtimestamp(float(opened_at), tz=timezone.utc)
-        except (TypeError, ValueError, OSError):
-            return None
-    elif hasattr(opened_at, "timestamp"):
-        opened_dt = opened_at
-    else:
-        return None
-    try:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                INSERT INTO trade (strategy_opportunity_id, account_id, opened_at, label, updated_at)
-                VALUES (%s, %s, %s, %s, now())
-                RETURNING trade_id
-                """,
-                (strategy_opportunity_id, account_id, opened_dt, label or None),
-            )
-            row = cur.fetchone()
-        conn.commit()
-        return int(row[0]) if row and row[0] is not None else None
-    except Exception as e:
-        logger.warning("create_instance failed: %s", e)
-        if conn is not None:
-            try:
-                conn.rollback()
-            except Exception:
-                pass
-        return None
-
-
 # --- TD-15 writers (core 0.33.0): return the row / raise Write* --------------------
 
 
@@ -223,7 +175,7 @@ def create_instance_strict(
 ) -> Dict[str, Any]:
     """Open one trade; return the row as ``get_instance_by_id`` reads it (core 0.47.0, TD-80 C2).
 
-    The ``Write*`` twin of ``create_instance``, which answers None for every failure.
+    It replaced the bool ``create_instance`` (None for every failure; removed in 0.48.0).
     ``strategy_opportunity_id``: an existing opportunity (one that does not exist is
     WriteInvalid -- the body names it) · ``account_id``: required text · ``opened_at``: a
     timestamp (datetime, Unix seconds or ISO 8601) · ``label``: nullable text, blank refused

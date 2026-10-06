@@ -192,7 +192,6 @@ def test_the_facade_speaks_of_trades_and_keeps_the_old_names_one_version() -> No
     pairs = {
         "list_strategy_instances": "list_trades",
         "get_strategy_instance_by_id": "get_trade_by_id",
-        "create_strategy_instance": "create_trade",
         "get_strategy_win_rate": "get_trade_win_rate",
         "get_performance_instance_summary": "get_performance_trade_summary",
         "get_position_instance_attribution": "get_position_trade_attribution",

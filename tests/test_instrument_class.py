@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import pytest
+
+from bifrost_core.monitor.reader.errors import WriteFailed, WriteInvalid
 from bifrost_core.portfolio.reader.instrument_class import (
     INSTRUMENT_CLASSES,
     normalize_instrument_class,
-    set_instrument_class,
+    set_instrument_class_strict,
 )
 
 
@@ -20,7 +23,11 @@ def test_three_classes_in_the_stored_spelling():
 
 
 def test_refuses_before_touching_the_database():
-    assert set_instrument_class(None, "", "stock") == (False, "contract_key is required.")
-    ok, err = set_instrument_class(None, "AAA", "bond")
-    assert not ok and "must be one of" in (err or "")
-    assert set_instrument_class(None, "AAA", "stock") == (False, "No database connection.")
+    # The input rules come before the connection: None here would otherwise be WriteFailed.
+    with pytest.raises(WriteInvalid, match="contract_key is required"):
+        set_instrument_class_strict(None, "", "stock")
+    with pytest.raises(WriteInvalid, match="must be one of"):
+        set_instrument_class_strict(None, "AAA", "bond")
+    with pytest.raises(WriteFailed, match="not configured") as down:
+        set_instrument_class_strict(None, "AAA", "stock")
+    assert down.value.unavailable

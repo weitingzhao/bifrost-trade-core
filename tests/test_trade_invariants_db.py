@@ -244,8 +244,8 @@ def _order(db: _Savepointed, name: str) -> list:
 
 def test_a_rename_carries_the_symbol_order_and_a_delete_removes_it(db) -> None:
     cat = _category(db, "K56 Yield")
-    position_categories.set_market_streams_symbol_order(db, "K56 Yield", ["ZZZQ", "ZZZR"])
-    position_categories.set_market_streams_symbol_order(db, "K56 Income", ["STALE"])  # no category has this name
+    position_categories.set_market_streams_symbol_order_strict(db, "K56 Yield", ["ZZZQ", "ZZZR"])
+    position_categories.set_market_streams_symbol_order_strict(db, "K56 Income", ["STALE"])  # no category has this name
     row = position_categories.patch_position_category(db, cat, {"name": "K56 Income"})
     assert row["name"] == "K56 Income"
     assert _order(db, "K56 Income") == ["ZZZQ", "ZZZR"] and _order(db, "K56 Yield") == []
@@ -259,16 +259,15 @@ def test_a_name_is_unique_and_uncategorized_is_reserved(db) -> None:
         _category(db, "K56 Twin")
     db.rollback()
     with pytest.raises(WriteConflict, match="already exists"):
-        position_categories.create_position_category(db, "K56 Twin")
+        position_categories.create_position_category_strict(db, "K56 Twin")
     other = _category(db, "K56 Other")
     with pytest.raises(WriteConflict, match="already exists"):
         position_categories.patch_position_category(db, other, {"name": "K56 Twin"})
     with pytest.raises(WriteInvalid, match="reserved"):
         position_categories.patch_position_category(db, other, {"name": "Uncategorized"})
     with pytest.raises(WriteInvalid, match="reserved"):
-        position_categories.create_position_category(db, "uncategorized")
-    new_id, err = position_categories.create_position_category(db, "K56 Fresh")
-    assert err is None and new_id is not None
+        position_categories.create_position_category_strict(db, "uncategorized")
+    assert position_categories.create_position_category_strict(db, "K56 Fresh")["name"] == "K56 Fresh"
 
 
 # --- TD-71: scope_type ---------------------------------------------------------------------

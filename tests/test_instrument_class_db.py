@@ -31,10 +31,10 @@ class _NoCommit:
 def test_register_change_and_drop(pg_conn):
     conn = _NoCommit(pg_conn)
     # Invented keys (fixtures are never copied from DEV).
-    assert ic.set_instrument_class(conn, "ZZFI", "fixed_income", note="bond fund") == (True, None)
-    assert ic.set_instrument_class(conn, "ZZFI", "cash_like") == (True, None)
+    assert ic.set_instrument_class_strict(conn, "ZZFI", "fixed_income", note="bond fund")["note"] == "bond fund"
+    assert ic.patch_instrument_class(conn, "ZZFI", {"instrument_class": "cash_like"})["note"] == "bond fund"
     rows = {r["contract_key"]: r for r in ic.list_instrument_classes(conn)}
-    # A change keeps the note it was not given.
+    # A PATCH of the class keeps the note it was not given.
     assert rows["ZZFI"]["instrument_class"] == "cash_like"
     assert rows["ZZFI"]["note"] == "bond fund"
     assert ic.delete_instrument_class_strict(conn, "ZZFI") == {"deleted": "hard", "contract_key": "ZZFI"}
@@ -44,12 +44,12 @@ def test_register_change_and_drop(pg_conn):
 
 def test_a_full_replace_clears_the_note_it_was_not_given(pg_conn):
     conn = _NoCommit(pg_conn)
-    assert ic.set_instrument_class(conn, "ZZFR", "fixed_income", note="bond fund") == (True, None)
+    ic.set_instrument_class_strict(conn, "ZZFR", "fixed_income", note="bond fund")
     # TD-15: PUT /instrument-classes is a full replace -- no note sent, no note kept.
-    assert ic.set_instrument_class(conn, "ZZFR", "cash_like", keep_note=False) == (True, None)
+    ic.set_instrument_class_strict(conn, "ZZFR", "cash_like")
     row = {r["contract_key"]: r for r in ic.list_instrument_classes(conn)}["ZZFR"]
     assert (row["instrument_class"], row["note"]) == ("cash_like", None)
-    assert ic.set_instrument_class(conn, "ZZFR", "stock", note="core", keep_note=False) == (True, None)
+    ic.set_instrument_class_strict(conn, "ZZFR", "stock", note="core")
     row = {r["contract_key"]: r for r in ic.list_instrument_classes(conn)}["ZZFR"]
     assert (row["instrument_class"], row["note"]) == ("stock", "core")
     pg_conn.rollback()

@@ -67,7 +67,7 @@ def test_position_category_names_uncategorized_is_reserved_and_a_taken_name_conf
         with pytest.raises(WriteInvalid, match="reserved"):
             position_categories.patch_position_category(FakeConn(), 3, {"name": name})
         with pytest.raises(WriteInvalid, match="reserved"):
-            position_categories.create_position_category(FakeConn(), name)
+            position_categories.create_position_category_strict(FakeConn(), name)
     taken = [
         ("SELECT name FROM preference_position_categories", Reply(one={"name": "Yield"})),
         ("SELECT 1 FROM preference_position_categories WHERE name", Reply(one=(1,))),
@@ -76,7 +76,7 @@ def test_position_category_names_uncategorized_is_reserved_and_a_taken_name_conf
         position_categories.patch_position_category(FakeConn(taken), 3, {"name": "Income"})
     conn = FakeConn([("SELECT 1 FROM preference_position_categories WHERE name", Reply(one=(1,)))])
     with pytest.raises(WriteConflict, match="already exists"):
-        position_categories.create_position_category(conn, "Income")
+        position_categories.create_position_category_strict(conn, "Income")
     assert not conn.ran("INSERT")
 
 

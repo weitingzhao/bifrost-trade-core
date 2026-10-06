@@ -4,7 +4,7 @@
 TD-15) check the row exists and raise ``Write*``; so do ``create_position_category_strict``,
 ``set_position_category_tag_strict`` and ``set_market_streams_symbol_order_strict`` (core
 0.47.0, TD-80 C2), which the API's POST / PUT call. The bool / ``(id, error)`` writers they
-replace stay one release for the ``StatusReader`` facade, then go.
+replaced left in core 0.48.0 (TD-80 C2-b), with the ``StatusReader`` facade's write methods.
 
 Names (TD-56, core 0.41.0): ``preference_market_streams_symbol_order`` keeps each category's
 symbol order under the category's *name*, so the name is a key -- UNIQUE in the table
@@ -15,10 +15,8 @@ that name, so no category may take it (refused case-insensitively, WriteInvalid)
 already in use is WriteConflict."""
 
 import logging
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
-import psycopg2
-import psycopg2.errors
 from psycopg2.extras import RealDictCursor
 
 from bifrost_core.monitor.reader import write_support as ws
@@ -64,16 +62,6 @@ def _carry_symbol_order(cur: Any, old_name: Optional[str], new_name: Optional[st
     return int(cur.rowcount or 0)
 
 
-def _pg_exc_message(exc: BaseException) -> str:
-    if isinstance(exc, psycopg2.Error):
-        detail = getattr(exc, "diag", None)
-        if detail is not None and getattr(detail, "message_primary", None):
-            return str(detail.message_primary).strip()
-        if getattr(exc, "pgerror", None):
-            return str(exc.pgerror).strip()
-    return str(exc).strip()[:500]
-
-
 def get_position_categories(conn: Any) -> List[Dict[str, Any]]:
     if conn is None:
         return []
@@ -91,93 +79,6 @@ def get_position_categories(conn: Any) -> List[Dict[str, Any]]:
     except Exception as e:
         logger.debug("get_position_categories failed: %s", e)
         return []
-
-
-def create_position_category(
-    conn: Any,
-    name: str,
-    description: Optional[str] = None,
-    sort_order: Optional[int] = None,
-) -> Tuple[Optional[int], Optional[str]]:
-    """Returns (new_id, error_message). error_message is set only on failure.
-
-    Raises WriteInvalid for the reserved name and WriteConflict for a name already in use."""
-    if not name or not str(name).strip() or conn is None:
-        return None, "Invalid name or no database connection."
-    check_category_name(str(name))
-    try:
-        with conn.cursor() as cur:
-            _refuse_taken_name(cur, str(name).strip())
-            cur.execute(
-                """
-                INSERT INTO preference_position_categories (name, description, sort_order, updated_at)
-                VALUES (%s, %s, %s, now())
-                RETURNING id
-                """,
-                (str(name).strip(), (description or "").strip() or None, sort_order),
-            )
-            row = cur.fetchone()
-        conn.commit()
-        if row and row[0] is not None:
-            return int(row[0]), None
-        return None, "Insert returned no id."
-    except WriteConflict:
-        try:
-            conn.rollback()
-        except Exception:
-            pass
-        raise
-    except psycopg2.errors.UniqueViolation:
-        try:
-            conn.rollback()
-        except Exception:
-            pass
-        raise WriteConflict(f"A position category named '{str(name).strip()}' already exists.") from None
-    except Exception as e:
-        msg = _pg_exc_message(e)
-        logger.warning("create_position_category failed: %s", msg)
-        try:
-            conn.rollback()
-        except Exception:
-            pass
-        return None, msg or "Database error."
-
-
-def set_position_category_tag(
-    conn: Any,
-    account_id: str,
-    contract_key: str,
-    category_id: Optional[int],
-) -> bool:
-    if not account_id or not str(account_id).strip() or not contract_key or not str(contract_key).strip() or conn is None:
-        return False
-    try:
-        acc = str(account_id).strip()
-        ck = str(contract_key).strip()
-        with conn.cursor() as cur:
-            if category_id is None:
-                cur.execute(
-                    "DELETE FROM preference_position_category_tags WHERE account_id = %s AND contract_key = %s",
-                    (acc, ck),
-                )
-            else:
-                cur.execute(
-                    """
-                    INSERT INTO preference_position_category_tags (account_id, contract_key, category_id)
-                    VALUES (%s, %s, %s)
-                    ON CONFLICT (account_id, contract_key) DO UPDATE SET category_id = EXCLUDED.category_id
-                    """,
-                    (acc, ck, category_id),
-                )
-        conn.commit()
-        return True
-    except Exception as e:
-        logger.debug("set_position_category_tag failed: %s", e)
-        try:
-            conn.rollback()
-        except Exception:
-            pass
-        return False
 
 
 def get_market_streams_symbol_order(conn: Any) -> Dict[str, List[str]]:
@@ -207,43 +108,6 @@ def get_market_streams_symbol_order(conn: Any) -> Dict[str, List[str]]:
     except Exception as e:
         logger.debug("get_market_streams_symbol_order failed: %s", e)
         return {}
-
-
-def set_market_streams_symbol_order(
-    conn: Any,
-    category_name: str,
-    symbols: List[str],
-) -> bool:
-    """Replace symbol order for one category. symbols = ordered list of symbol strings."""
-    if conn is None:
-        return False
-    cat = (category_name or "").strip()
-    if not cat:
-        return False
-    symbols_clean = [str(s).strip() for s in (symbols or []) if str(s).strip()]
-    try:
-        with conn.cursor() as cur:
-            cur.execute(
-                "DELETE FROM preference_market_streams_symbol_order WHERE category_name = %s",
-                (cat,),
-            )
-            for i, sym in enumerate(symbols_clean):
-                cur.execute(
-                    """
-                    INSERT INTO preference_market_streams_symbol_order (category_name, symbol, sort_order, updated_at)
-                    VALUES (%s, %s, %s, now())
-                    """,
-                    (cat, sym, i),
-                )
-        conn.commit()
-        return True
-    except Exception as e:
-        logger.debug("set_market_streams_symbol_order failed: %s", e)
-        try:
-            conn.rollback()
-        except Exception:
-            pass
-        return False
 
 
 # --- TD-15 writers (core 0.33.0): return the row / raise Write* ---------------------
@@ -324,7 +188,7 @@ def delete_position_category_strict(conn_or_config: Any, category_id: int) -> Di
     }
 
 
-# --- TD-80 C2 writers (core 0.47.0): the POST / PUT twins of the bool writers above --------
+# --- TD-80 C2 writers (core 0.47.0): POST / PUT (the bool writers left in 0.48.0) -----------
 
 
 def create_position_category_strict(

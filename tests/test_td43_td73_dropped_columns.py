@@ -65,16 +65,23 @@ def test_review_columns_and_patchables_drop_note() -> None:
     assert "notes" not in strategy_instance.INSTANCE_PATCHABLE
 
 
-def test_instance_reads_and_create_do_not_name_notes() -> None:
-    conn = FakeConn([("INSERT INTO trade ", Reply(one=(41,)))])
-    assert strategy_instance.create_instance(conn, 7, "U0000001", 1_788_000_000, label="ZZQ put") == 41
+def test_instance_reads_and_create_do_not_name_notes(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(strategy_instance, "get_instance_by_id", lambda conn, tid: {"trade_id": tid})
+    conn = FakeConn(
+        [("SELECT 1 FROM strategy_opportunity", Reply(one=(1,))), ("INSERT INTO trade ", Reply(one=(41,)))]
+    )
+    row = strategy_instance.create_instance_strict(conn, 7, "U0000001", 1_788_000_000, label="ZZQ put")
+    assert row["trade_id"] == 41
     sql, params = conn.statement("INSERT INTO trade ")
     assert "notes" not in sql and len(params) == 4
+    monkeypatch.undo()
     conn = FakeConn([("FROM trade si", Reply(one=None))])
     assert strategy_instance.get_instance_by_id(conn, 41) is None
     assert "notes" not in conn.statement("FROM trade si")[0]
-    for fn in (strategy_instance.create_instance, StatusReader.create_strategy_instance):
-        assert "notes" not in inspect.signature(fn).parameters, fn.__qualname__
+    assert "notes" not in inspect.signature(strategy_instance.create_instance_strict).parameters
+    # The facade no longer writes (TD-80 C2-b, core 0.48.0): no create method left to carry notes.
+    assert not hasattr(StatusReader, "create_strategy_instance")
+    assert not hasattr(StatusReader, "create_trade")
 
 
 @pytest.mark.parametrize("value", ["Rolled early.", None])

@@ -1,4 +1,4 @@
-"""Connection and StatusReader facade. Delegates to domain modules (status, watchlist, market, settings, accounts, executions, position_categories)."""
+"""Connection and the read-only StatusReader facade. Delegates to domain modules (status, watchlist, market, settings, accounts, executions, position_categories)."""
 
 import logging
 import threading
@@ -34,7 +34,13 @@ logger = logging.getLogger(__name__)
 
 
 class StatusReader:
-    """Read status from Redis daemon IPC + PostgreSQL for business tables."""
+    """Read-only facade: status from Redis daemon IPC + PostgreSQL business tables.
+
+    Every public method reads (TD-80 C2-b, core 0.48.0). Writes go through the domain
+    modules' ``Write*`` writers (``*_strict`` / ``patch_*``) with their own connection and
+    transaction, never through this facade; ``tests/test_status_reader_read_only.py``
+    keeps it that way.
+    """
 
     def __init__(self, status_config: dict) -> None:
         self._config = status_config
@@ -423,24 +429,6 @@ class StatusReader:
         self._end_read_txn()
         return result
 
-    def create_trade(
-        self,
-        strategy_opportunity_id: int,
-        account_id: str,
-        opened_at: Any,
-        label: Optional[str] = None,
-    ) -> Optional[int]:
-        """Insert one trade. Returns trade_id or None (no notes since 0.43.0, TD-73)."""
-        if not self._connect():
-            return None
-        return strategy_instance_module.create_instance(
-            self._conn,
-            strategy_opportunity_id=strategy_opportunity_id,
-            account_id=account_id,
-            opened_at=opened_at,
-            label=label,
-        )
-
     def get_trade_win_rate(
         self,
         since_ts: Optional[float] = None,
@@ -721,28 +709,6 @@ class StatusReader:
         self._end_read_txn()
         return result
 
-    def create_position_category(
-        self,
-        name: str,
-        description: Optional[str] = None,
-        sort_order: Optional[int] = None,
-    ) -> Tuple[Optional[int], Optional[str]]:
-        if not self._connect():
-            return None, "Database connection failed."
-        return position_categories_module.create_position_category(
-            self._conn, name=name, description=description, sort_order=sort_order
-        )
-
-    def set_position_category_tag(
-        self,
-        account_id: str,
-        contract_key: str,
-        category_id: Optional[int],
-    ) -> bool:
-        if not self._connect():
-            return False
-        return position_categories_module.set_position_category_tag(self._conn, account_id=account_id, contract_key=contract_key, category_id=category_id)
-
     # --- Instrument class (delegate to instrument_class module, core 0.27.0) ---
     def list_instrument_classes(self) -> List[Dict[str, Any]]:
         if not self._connect():
@@ -751,24 +717,6 @@ class StatusReader:
         self._end_read_txn()
         return result
 
-    def set_instrument_class(
-        self,
-        contract_key: str,
-        instrument_class: str,
-        note: Optional[str] = None,
-        *,
-        keep_note: bool = True,
-    ) -> Tuple[bool, Optional[str]]:
-        if not self._connect():
-            return False, "Database connection failed."
-        return instrument_class_module.set_instrument_class(
-            self._conn,
-            contract_key=contract_key,
-            instrument_class=instrument_class,
-            note=note,
-            keep_note=keep_note,
-        )
-
     def get_market_streams_symbol_order(self) -> Dict[str, Any]:
         if not self._connect():
             return {}
@@ -776,17 +724,11 @@ class StatusReader:
         self._end_read_txn()
         return result
 
-    def set_market_streams_symbol_order(self, category_name: str, symbols: List[str]) -> bool:
-        if not self._connect():
-            return False
-        return position_categories_module.set_market_streams_symbol_order(self._conn, category_name=category_name, symbols=symbols)
-
     # Naming R4 / TD-80 C3 (core 0.47.0): the facade speaks of trades. The instance-era names
     # stay one version as aliases (their keyword arguments are the new ones: trade_id /
-    # trade_ids), then go.
+    # trade_ids), then go. (``create_strategy_instance`` went with ``create_trade`` in 0.48.0.)
     list_strategy_instances = list_trades
     get_strategy_instance_by_id = get_trade_by_id
-    create_strategy_instance = create_trade
     get_strategy_win_rate = get_trade_win_rate
     get_performance_instance_summary = get_performance_trade_summary
     get_position_instance_attribution = get_position_trade_attribution

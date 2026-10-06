@@ -11,8 +11,8 @@ infers a class from the Owner's category.
 
 ``patch_instrument_class`` / ``delete_instrument_class_strict`` (core 0.33.0, TD-15)
 raise ``Write*``; so does ``set_instrument_class_strict`` (core 0.47.0, TD-80 C2), the full
-replace the API's PUT calls. ``set_instrument_class`` (``(ok, error)``) stays one release for
-the ``StatusReader`` facade, then goes.
+replace the API's PUT calls. The ``(ok, error)`` ``set_instrument_class`` it replaced left in
+core 0.48.0 (TD-80 C2-b).
 """
 
 import logging
@@ -53,52 +53,6 @@ def list_instrument_classes(conn: Any) -> List[Dict[str, Any]]:
         return []
 
 
-def set_instrument_class(
-    conn: Any,
-    contract_key: str,
-    instrument_class: str,
-    note: Optional[str] = None,
-    *,
-    keep_note: bool = True,
-) -> Tuple[bool, Optional[str]]:
-    """Register or change one instrument's class. Returns (ok, error_message).
-
-    ``keep_note`` (the default) keeps a stored note when none is sent. ``False`` is a
-    full replace: the row becomes exactly what was sent, so no note clears it (TD-15,
-    PUT /instrument-classes since api 0.6.0)."""
-    ck = str(contract_key or "").strip()
-    cls = normalize_instrument_class(instrument_class)
-    if not ck:
-        return False, "contract_key is required."
-    if cls is None:
-        return False, f"instrument_class must be one of {', '.join(INSTRUMENT_CLASSES)}."
-    if conn is None:
-        return False, "No database connection."
-    try:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                INSERT INTO preference_instrument_class (contract_key, instrument_class, note, updated_at)
-                VALUES (%s, %s, %s, now())
-                ON CONFLICT (contract_key) DO UPDATE
-                SET instrument_class = EXCLUDED.instrument_class,
-                    note = CASE WHEN %s THEN COALESCE(EXCLUDED.note, preference_instrument_class.note)
-                                ELSE EXCLUDED.note END,
-                    updated_at = now()
-                """,
-                (ck, cls, (note or "").strip() or None, bool(keep_note)),
-            )
-        conn.commit()
-        return True, None
-    except Exception as e:
-        logger.warning("set_instrument_class failed: %s", e)
-        try:
-            conn.rollback()
-        except Exception:
-            pass
-        return False, "Failed to save the instrument class."
-
-
 # --- TD-15 writers (core 0.33.0): return the row / raise Write* ---------------------
 
 INSTRUMENT_CLASS_PATCHABLE = ("instrument_class", "note")
@@ -115,7 +69,7 @@ def _contract_key(contract_key: Any) -> str:
 def patch_instrument_class(conn_or_config: Any, contract_key: str, fields: Dict[str, Any]) -> Dict[str, Any]:
     """Change a registered instrument's class or note; return the row in ``list_instrument_classes``' shape.
 
-    Does not insert: an unregistered ``contract_key`` is WriteNotFound (``set_instrument_class``
+    Does not insert: an unregistered ``contract_key`` is WriteNotFound (``set_instrument_class_strict``
     registers). ``instrument_class`` NOT NULL, one of stock / fixed_income / cash_like
     (spelling normalised as ``normalize_instrument_class`` does) · ``note`` nullable text
     (null clears -- the upsert cannot). Raises WriteInvalid, WriteNotFound, WriteFailed.
