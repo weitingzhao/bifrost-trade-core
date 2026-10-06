@@ -437,13 +437,19 @@ def ensure_brokerage_schema(
 
 
 def _grant_brokerage_privileges(cur: Any, schema: str) -> None:
-    """Grant to known roles when present (roles may need superuser to create)."""
-    for role in ("brokerage_writer", "brokerage_reader", "bifrost", "data_writer"):
+    """Grant to known roles when present (roles may need superuser to create).
+
+    ``data_writer`` is not one of them: since TD-85 D6 it is the market-data plugin's
+    login, which never touches ``raw_broker`` (core 0.48.2 stopped granting it). The
+    Flex plugin's ``flex_writer`` and the Trade runtime's ``trade_app_<env>`` get their
+    rights from Owner steps and from bifrost's default privileges.
+    """
+    for role in ("brokerage_writer", "brokerage_reader", "bifrost"):
         cur.execute("SELECT 1 FROM pg_roles WHERE rolname = %s", (role,))
         if not cur.fetchone():
             continue
         cur.execute(f"GRANT USAGE ON SCHEMA {schema} TO {role}")
-        if role in ("brokerage_writer", "bifrost", "data_writer"):
+        if role in ("brokerage_writer", "bifrost"):
             cur.execute(
                 f"GRANT SELECT, INSERT, UPDATE, DELETE, TRUNCATE ON ALL TABLES "
                 f"IN SCHEMA {schema} TO {role}"

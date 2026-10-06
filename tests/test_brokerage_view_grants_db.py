@@ -80,3 +80,20 @@ def test_the_rebuild_still_recreates_the_views(db: Any) -> None:
         cur.execute("SELECT 'raw_broker.executions_final'::regclass::oid")
         after = cur.fetchone()[0]
     assert after != before
+
+
+def test_data_writer_gets_nothing_in_raw_broker(db: Any) -> None:
+    """data_writer is the market-data plugin's login since TD-85 D6; db-init stops granting it."""
+    with db.cursor() as cur:
+        cur.execute("SELECT to_regrole('data_writer') IS NOT NULL")
+        if cur.fetchone()[0]:
+            pytest.skip("data_writer already exists in this test database")
+        cur.execute("CREATE ROLE data_writer NOLOGIN")
+
+    ensure_brokerage_schema(db, log=lambda m: None)
+
+    with db.cursor() as cur:
+        cur.execute("SELECT has_schema_privilege('data_writer', 'raw_broker', 'USAGE')")
+        assert cur.fetchone()[0] is False
+    assert not _can(db, "data_writer", "raw_broker.account", "INSERT")
+    assert not _can(db, "data_writer", "raw_broker.executions_final")
