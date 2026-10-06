@@ -3,14 +3,14 @@
 import logging
 import math
 from datetime import date, datetime, timezone, timedelta
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
 from zoneinfo import ZoneInfo
 
 from psycopg2.extras import RealDictCursor
 
 from bifrost_core.portfolio.contract_key import osi_local_symbol
 from bifrost_core.portfolio.reader import keyset
-from bifrost_core.portfolio.quote_freshness import fresh_quote_sql
+from bifrost_core.portfolio.quote_freshness import MARK_QUOTE_LIVE, MARK_VENDOR_EOD, fresh_quote_sql
 from bifrost_core.portfolio.signed_qty import signed_qty_sql
 
 from bifrost_core.portfolio.units import option_cost_per_share, position_value
@@ -26,6 +26,7 @@ from bifrost_core.persistence.postgres.brokerage_tables import (
     TRANSACTIONS,
 )
 from bifrost_core.persistence.postgres.commissions import commission_read_sql
+from bifrost_core.persistence.postgres.snapshot_ddl import POSITION_SNAPSHOT_DAILY
 from bifrost_core.portfolio.reader.accounts_helpers import (
     _compute_opt_pair_map_and_pairs,
     _compute_opt_realized_calendar,
@@ -1544,6 +1545,9 @@ def get_position_instance_attribution(
     conn: Any,
     account_id: Optional[str] = None,
     sec_type_filter: Optional[str] = None,
+    *,
+    fallback_marks: bool = True,
+    stock_closes: Optional[Callable[[List[str]], Mapping[str, Mapping[str, Any]]]] = None,
 ) -> List[Dict[str, Any]]:
     """Compute Position × Instance attribution.
 
@@ -1555,6 +1559,15 @@ def get_position_instance_attribution(
     (not a proportional split of broker position). PnL estimate scales with
     open_qty_est. All instances with non-zero contribution appear under the
     instance (no same-sign filter that dropped rows).
+
+    Prices (TD-140, core 0.51.0): a fresh ``contract_quote_live`` row gives ``price_mid`` /
+    ``price_last`` with ``mark_source`` ``quote_live``. Without one -- under D10 the daemon that
+    writes that table does not run -- and with ``fallback_marks``, ``price_last`` is the newest
+    vendor session close: the contract's latest ``position_snapshot_daily`` vendor-EOD mark, or
+    for a stock the market-data plugin's daily close when that bar is newer
+    (``stock_closes(symbols)``, default ``/stocks/db/bars/benchmark``); ``mark_source``
+    ``vendor_eod``. ``mark_date`` is the New York date the price belongs to. ``price_mid`` stays a
+    live mid only. The nightly snapshot capture reads with ``fallback_marks=False``.
     """
     if conn is None:
         return []
@@ -1573,7 +1586,8 @@ def get_position_instance_attribution(
         WITH pos AS (
             SELECT ap.account_id, ap.contract_key, ap.symbol, ap.sec_type,
                    ap.position, ap.avg_cost, ap.expiry, ap.strike, ap.option_right,
-                   cql.mid AS price_mid, cql.last AS price_last
+                   cql.mid AS price_mid, cql.last AS price_last,
+                   (cql.updated_at AT TIME ZONE 'America/New_York')::date AS quote_date
             FROM {POSITIONS} ap
             LEFT JOIN {CONTRACT_QUOTE_LIVE} cql
                 ON ap.contract_key = cql.contract_key AND {fresh_quote_sql('cql')}
@@ -1652,7 +1666,7 @@ def get_position_instance_attribution(
         SELECT
             p.account_id, p.contract_key, p.symbol, p.sec_type,
             p.position AS position_qty, p.avg_cost, p.expiry, p.strike, p.option_right,
-            p.price_mid, p.price_last,
+            p.price_mid, p.price_last, p.quote_date,
             eg.trade_id,
             eg.strategy_opportunity_id,
             si.label AS trade_label,
@@ -1677,10 +1691,146 @@ def get_position_instance_attribution(
             cur.execute(sql, pos_vals)
             rows = cur.fetchall()
 
+        label_marks(conn, rows, fallback=fallback_marks, stock_closes=stock_closes)
         return _build_attribution_rows(rows)
     except Exception as e:
         logger.warning("get_position_instance_attribution failed: %s", e)
         return []
+
+
+def _positive_price(*values: Any) -> Optional[float]:
+    for v in values:
+        try:
+            f = float(v)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(f) and f > 0:
+            return f
+    return None
+
+
+def _iso_date(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value.date().isoformat()
+    if isinstance(value, date):
+        return value.isoformat()
+    return str(value)[:10] or None
+
+
+def _vendor_eod_snapshot_marks(conn: Any, contract_keys: List[str]) -> Dict[str, Tuple[float, date]]:
+    """contract_key -> (mark, snapshot_date): the newest vendor-EOD mark the snapshot holds.
+
+    Any account's row: a contract's close is the same in every account. Read failures (the
+    table is missing in an env that has not run db-init 0.48.0) answer {} so the attribution
+    itself still reads.
+    """
+    if not contract_keys:
+        return {}
+    sql = f"""
+        SELECT DISTINCT ON (contract_key) contract_key, mark, snapshot_date
+        FROM {POSITION_SNAPSHOT_DAILY}
+        WHERE contract_key = ANY(%s) AND mark_source = %s AND mark > 0
+        ORDER BY contract_key, snapshot_date DESC
+    """
+    try:
+        with conn.cursor() as cur:
+            cur.execute(sql, (contract_keys, MARK_VENDOR_EOD))
+            return {k: (float(m), d) for k, m, d in cur.fetchall()}
+    except Exception as e:
+        logger.warning("attribution vendor-EOD marks unavailable: %s", e)
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        return {}
+
+
+def _plugin_stock_closes(symbols: List[str]) -> Mapping[str, Mapping[str, Any]]:
+    from bifrost_core.monitor.market_read_client import get_bars_benchmark_via_plugin
+
+    return get_bars_benchmark_via_plugin(symbols, timeout=5)
+
+
+def _bar_close(bar: Optional[Mapping[str, Any]]) -> Optional[Tuple[float, date]]:
+    """A plugin benchmark bar -> (close, bar date). ``bar_time`` is epoch seconds of the bar
+    date (UTC midnight) or an ISO date; a close of 0 is none."""
+    if not bar:
+        return None
+    close = _positive_price(bar.get("close"))
+    raw = bar.get("bar_time")
+    if close is None or raw is None:
+        return None
+    try:
+        epoch = float(raw)
+    except (TypeError, ValueError):
+        epoch = None
+    try:
+        if epoch is not None:
+            if not math.isfinite(epoch) or epoch <= 0:
+                return None
+            day = datetime.fromtimestamp(epoch, tz=timezone.utc).date()
+        else:
+            day = date.fromisoformat(str(raw)[:10])
+    except (ValueError, OverflowError, OSError):
+        return None
+    return close, day
+
+
+def label_marks(
+    conn: Any,
+    rows: List[Dict[str, Any]],
+    *,
+    fallback: bool = True,
+    stock_closes: Optional[Callable[[List[str]], Mapping[str, Mapping[str, Any]]]] = None,
+) -> None:
+    """Set ``mark_source`` / ``mark_date`` on the attribution SQL rows, in place (TD-140).
+
+    A positive live ``price_last`` / ``price_mid`` (the SQL joins fresh quotes only) is
+    ``quote_live``. Otherwise, with ``fallback``, ``price_last`` takes the newest vendor
+    session close (see ``get_position_instance_attribution``) labelled ``vendor_eod``.
+    A row nothing prices keeps ``mark_source`` None.
+    """
+    missing: Dict[str, Tuple[str, str]] = {}  # contract_key -> (sec_type, symbol), rows without a live price
+    for r in rows:
+        r["mark_source"] = None
+        r["mark_date"] = None
+        if _positive_price(r.get("price_last"), r.get("price_mid")) is not None:
+            r["mark_source"] = MARK_QUOTE_LIVE
+            r["mark_date"] = _iso_date(r.get("quote_date"))
+        elif fallback:
+            key = (r.get("contract_key") or "").strip()
+            if key:
+                missing[key] = ((r.get("sec_type") or "").strip().upper(), (r.get("symbol") or "").strip().upper())
+        r.pop("quote_date", None)
+    if not missing:
+        return
+
+    best: Dict[str, Tuple[float, date]] = dict(_vendor_eod_snapshot_marks(conn, sorted(missing)))
+    stock_keys = {k: sym for k, (st, sym) in missing.items() if st == "STK"}
+    symbols = sorted({s for s in stock_keys.values() if s})
+    if symbols:
+        try:
+            bars = (stock_closes or _plugin_stock_closes)(symbols) or {}
+        except Exception as e:
+            logger.warning("attribution stock closes unavailable: %s", e)
+            bars = {}
+        by_symbol = {str(s).strip().upper(): _bar_close(b) for s, b in bars.items()}
+        for key, sym in stock_keys.items():
+            hit = by_symbol.get(sym)
+            if hit is not None and (key not in best or hit[1] > best[key][1]):
+                best[key] = hit
+
+    for r in rows:
+        if r.get("mark_source") is not None:
+            continue
+        hit = best.get((r.get("contract_key") or "").strip())
+        if hit is None:
+            continue
+        r["price_last"] = hit[0]
+        r["mark_source"] = MARK_VENDOR_EOD
+        r["mark_date"] = hit[1].isoformat()
 
 
 def _build_attribution_rows(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -1835,6 +1985,8 @@ def _make_attribution_row(
         "avg_cost": meta.get("avg_cost"),
         "price_mid": meta.get("price_mid"),
         "price_last": meta.get("price_last"),
+        "mark_source": meta.get("mark_source"),
+        "mark_date": meta.get("mark_date"),
         "trade_id": trade_id,
         "trade_label": (trade_label or "").strip() if trade_label else None,
         "strategy_opportunity_id": strategy_opportunity_id,

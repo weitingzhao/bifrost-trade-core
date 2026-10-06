@@ -20,6 +20,7 @@ def _attr(**kw):
         "avg_cost": 120.0,
         "price_last": None,
         "price_mid": 1.25,
+        "mark_source": "quote_live",  # the reader labels a fresh live quote (TD-140)
         "trade_id": None,
         "open_qty_est": -3.0,
     }

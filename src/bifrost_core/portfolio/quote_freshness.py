@@ -27,6 +27,14 @@ from typing import Any, Dict, Optional, Tuple
 
 LIVE_QUOTE_MAX_AGE_SEC = float(os.environ.get("POSITIONS_STK_LIVE_STALE_SEC", str(4 * 3600)))
 
+#: Where a position's mark came from -- the ``mark_source`` vocabulary of
+#: ``position_snapshot_daily`` and of the attribution rows (TD-140, core 0.51.0).
+#: ``quote_live``: a fresh ``contract_quote_live`` row (the window above).
+#: ``vendor_eod``: the vendor's close for a dated session -- the snapshot's enriched mark,
+#: or for a stock the market-data plugin's daily close. Never presented as a live tick.
+MARK_QUOTE_LIVE = "quote_live"
+MARK_VENDOR_EOD = "vendor_eod"
+
 SpotSource = Optional[str]  # "live" | "close" | None
 
 

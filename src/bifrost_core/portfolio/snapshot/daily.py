@@ -28,14 +28,12 @@ from psycopg2.extras import RealDictCursor
 
 from bifrost_core.persistence.postgres.brokerage_tables import ACCOUNT, POSITIONS
 from bifrost_core.persistence.postgres.snapshot_ddl import ACCOUNT_NAV_DAILY, POSITION_SNAPSHOT_DAILY
+from bifrost_core.portfolio.quote_freshness import MARK_QUOTE_LIVE, MARK_VENDOR_EOD  # mark_source values
 
 logger = logging.getLogger(__name__)
 
 #: Below this a split remainder is float noise, not an unattributed position.
 QTY_EPS = 1e-6
-
-MARK_QUOTE_LIVE = "quote_live"
-MARK_VENDOR_EOD = "vendor_eod"
 
 
 class SnapshotError(RuntimeError):
@@ -118,11 +116,17 @@ def split_rows(attribution: Iterable[Mapping[str, Any]]) -> List[Dict[str, Any]]
             "position_qty": position_qty,
             "avg_cost": _finite(meta.get("avg_cost")),
         }
-        mark = _finite(meta.get("price_last"))
-        if mark is None or mark <= 0:
-            mark = _finite(meta.get("price_mid"))
-        if mark is not None and mark <= 0:
-            mark = None
+        # Only a live quote becomes the capture's mark. Since core 0.51.0 (TD-140) the attribution
+        # reader also prices a position from the newest vendor EOD -- this table's own earlier
+        # mark -- and labels it; taking that here would copy yesterday's close into today's row
+        # as if it were today's, and enrich (which fills only NULL marks) would never correct it.
+        mark: Optional[float] = None
+        if meta.get("mark_source") == MARK_QUOTE_LIVE:
+            mark = _finite(meta.get("price_last"))
+            if mark is None or mark <= 0:
+                mark = _finite(meta.get("price_mid"))
+            if mark is not None and mark <= 0:
+                mark = None
         for trade_id, qty in shares:
             out.append(
                 {
@@ -197,6 +201,18 @@ def _positions_meta(conn: Any) -> Dict[Tuple[str, str], Any]:
         return {(a, k): u for a, k, u in cur.fetchall()}
 
 
+def attribution_live_marks_only(conn: Any) -> List[Dict[str, Any]]:
+    """The attribution read capture uses: no vendor-EOD fallback (TD-140).
+
+    The snapshot's mark is the live quote at capture or nothing; enrich fills the session's own
+    close. ``split_rows`` refuses a non-live mark as well, so a caller passing its own reader
+    cannot feed the table its previous mark either.
+    """
+    from bifrost_core.portfolio.reader.executions import get_position_instance_attribution
+
+    return get_position_instance_attribution(conn, fallback_marks=False)
+
+
 def capture(
     conn: Any,
     snapshot_date: date,
@@ -209,9 +225,7 @@ def capture(
     none (that reader logs and answers [] on failure, which must not pass for an empty book).
     """
     if attribution is None:
-        from bifrost_core.portfolio.reader.executions import get_position_instance_attribution
-
-        attribution = get_position_instance_attribution
+        attribution = attribution_live_marks_only
 
     open_positions = _positions_meta(conn)
     attr = attribution(conn) or []

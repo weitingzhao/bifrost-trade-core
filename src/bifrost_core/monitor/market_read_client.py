@@ -55,12 +55,13 @@ def get_bars_via_plugin(
 def get_bars_benchmark_via_plugin(
     symbols: List[str],
     on_or_before: Optional[str] = None,
+    timeout: int = 30,
 ) -> Dict[str, Dict[str, Any]]:
     """GET /stocks/db/bars/benchmark → {ok, data}. Returns {symbol: {bar_time, close, prev_close}}."""
     params: Dict[str, str] = {"symbols": ",".join(symbols)}
     if on_or_before:
         params["on_or_before"] = on_or_before
-    resp = _get_json("/stocks/db/bars/benchmark", params)
+    resp = _get_json("/stocks/db/bars/benchmark", params, timeout=timeout)
     return resp.get("data", {})
 
 
