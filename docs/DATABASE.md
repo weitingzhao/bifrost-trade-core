@@ -321,16 +321,16 @@ its scope. Reads guard on `to_regclass`, so an api ahead of the DDL lists none.
 
 Reads and writes: [`saved_search.py`](../src/bifrost_core/monitor/reader/saved_search.py).
 
-## Daily book snapshots (core **0.48.0**, W4)
+## Daily book snapshots (core **0.48.0**, W4; margin columns and stale-account rule 0.51.0)
 
 The broker tables (`brokerage.positions`, `brokerage.account`) hold the current book only, so
 yesterday's positions and NAV exist nowhere unless they are kept. These two tables keep them, one
 session at a time, from the day they ship: they cannot be backfilled. Phase 0 W4; the position
 table was approved 2026-09-30, the NAV table 2026-10-05 (Owner, "加账户级 NAV 行"). DDL:
 [`snapshot_ddl.py`](../src/bifrost_core/persistence/postgres/snapshot_ddl.py), run by `_ensure_tables`
-(`CREATE … IF NOT EXISTS` only; no existing object changes). Writer: the nightly job
+(`CREATE … IF NOT EXISTS` and, 0.49.0, `ADD COLUMN IF NOT EXISTS` only; no existing object changes). Writer: the nightly job
 [`portfolio/snapshot`](../src/bifrost_core/portfolio/snapshot/daily.py) (`python -m bifrost_core.portfolio.snapshot
-capture|enrich`, per-env CronJob); nothing else writes them.
+capture|enrich|all`, per-env CronJob); nothing else writes them.
 
 ### `position_snapshot_daily`
 
@@ -359,14 +359,29 @@ One row per session, account, contract and trade. Natural key UNIQUE NULLS NOT D
 
 One row per session and account (UNIQUE `account_nav_daily_uq (snapshot_date, account_id)`):
 `account_nav_daily_id` (PK), `snapshot_date`, `account_id`, `net_liquidation`, `total_cash`,
-`buying_power` (from `brokerage.account`), `account_updated_at` (that row's `updated_at`),
-`captured_at`. The start-of-range balance that time-weighted return and Sharpe need (Performance
-reads `not recorded` without it; the frontend is not wired to it yet).
+`buying_power` (from `brokerage.account`), `cushion`, `excess_liquidity`, `maint_margin_req`
+(core 0.51.0: IB's `Cushion` / `ExcessLiquidity` / `MaintMarginReq` from `brokerage.account.summary_extra`,
+which IB sends as strings; missing or non-finite → NULL; NULL on every row written before 0.49.0 —
+no history exists to backfill them), `account_updated_at` (that row's `updated_at`), `captured_at`.
+The start-of-range balance that time-weighted return and Sharpe need (Performance reads `not
+recorded` without it; the frontend is not wired to it yet), and the margin-pressure history
+(design/trade `SNAPSHOT-SPEC.md` §1.1).
 
-**Write rule.** `capture` (after the close) inserts with `ON CONFLICT DO NOTHING`: the first
-capture of a session is kept and a rerun never rewrites it. It refuses (exit 1, nothing written)
-when the broker has open positions but the attribution read returned none. `enrich` (evening)
-only fills NULLs. Weekends and full-day NYSE holidays (`market.us_market_holiday`) are skipped.
+**Write rule (core 0.49.0).** `capture` works per account. An account whose
+`brokerage.account.updated_at` is older than the session's close (16:00 New York, or the NYSE
+`early-close` `close_time` in `market.us_market_holiday`) is **stale** — its TWS was not connected
+at the close (the secondary TWS logs off at 11:00 New York every weekday) — and is skipped whole:
+no NAV row, no position rows. The account row is the freshness signal for its positions too: a
+position row's own `updated_at` moves only when that position changes. Skipped accounts are listed
+in the job's output as `stale_accounts` (account and `updated_at`); that is not a failure. An
+account with a NAV row for the date is left as written (`already_captured`): the first capture of
+an account is kept, and a rerun never mixes two reads of one book. The CronJob runs `capture`
+at 16:20 New York and `all` (capture, then enrich) at 20:30, so an account that was stale at
+16:20 and has synced since the close is taken in the evening. `capture` refuses (exit 1, nothing
+written) when an account it is about to write has open positions but the attribution read returned
+none for it; when every account is captured or stale it does not read the attribution at all.
+`all` still runs enrich when its capture fails, and exits 1. `enrich` only fills NULLs. Weekends
+and full-day NYSE holidays (`market.us_market_holiday`) are skipped.
 The runtime role `trade_app_<env>` reads and writes both tables through bifrost's default
 privileges in `public` (TD-85); no GRANT is needed.
 
@@ -420,6 +435,7 @@ privileges in `public` (TD-85); no GRANT is needed.
 | — | 0.48.2 | No DDL change in what is built. **db-init's view rebuild keeps the grants it did not make (TD-85 D2 follow-up).** `ensure_brokerage_schema` drops and recreates `raw_broker.executions` / `executions_final` / `executions_fly` on every run, and `setup_fdw_foreign_tables` the env views; `DROP VIEW` takes the ACL with it, so a grant made by hand was lost on every release (Research's `analytics_writer` lost SELECT on `raw_broker.executions_final` and its memory distill failed on 2026-10-05). New `brokerage_views.saved_view_grants` / `restore_view_grants`: the grants on those views (the owner's own entry left out) are read before the drop and given back after the rebuild, view by view; a retired view is skipped. **`_grant_brokerage_privileges` no longer grants `data_writer`** (TD-85 D6 made it the market-data plugin's login, which never reads or writes `raw_broker`): db-init stops giving it S/I/U/D/T on every `raw_broker` table, its sequences and bifrost's default privileges there; the grants it already holds are revoked by the Owner step infra `scripts/release/db-steps.d/2026-10-06-td85-raw-broker-data-writer-revoke` after every env runs 0.48.2. Affected downstreams: none in code (the api and worker images run db-init; the market-data plugin names no `raw_broker` object) |
 | — | 0.49.0 | No DDL, no Redis key, no HTTP change. **TD-80 C2-b (Owner 2026-10-04, option C): `StatusReader` is read-only — public Python names removed.** Facade: `create_trade`, its R4 alias `create_strategy_instance`, `create_position_category`, `set_position_category_tag`, `set_instrument_class` and `set_market_streams_symbol_order` (6 names, 5 methods); and the five R4 instance-era read aliases kept one version in 0.47.0 (`list_strategy_instances`, `get_strategy_instance_by_id`, `get_strategy_win_rate`, `get_performance_instance_summary`, `get_position_instance_attribution` — use `list_trades`, `get_trade_by_id`, `get_trade_win_rate`, `get_performance_trade_summary`, `get_position_trade_attribution`; Owner 2026-10-04). Modules: `strategy_instance.create_instance`, `position_categories.create_position_category` / `set_position_category_tag` / `set_market_streams_symbol_order` (and its private `_pg_exc_message`), `instrument_class.set_instrument_class` (with its `keep_note` merge: PUT is the full replace `set_instrument_class_strict`, PATCH `patch_instrument_class` keeps the fields not sent). Use the `*_strict` writers added in 0.47.0. Every remaining public member reads; `tests/test_status_reader_read_only.py` fails on a write-named member, a delegate whose source writes or any of the removed names coming back (SQL write, `commit()`, `write_connection`, Redis write verb). Affected downstreams: none — no caller on origin/main of api 0.9.0, worker 0.2.6, Flex 0.10.0, Research, the platform repos, the plugins or infra scripts (re-checked 2026-10-06); floors unchanged (api `>=0.47.0`, worker `>=0.39.0`, Flex `>=0.34.0`). Prepared as 0.48.0 on 0.47.0, renumbered when 0.48.x went to W4 and TD-85 |
 | — | 0.50.0 | No DDL, no HTTP change. **`raw_broker.commissions` has one stored sign (TD-114).** Every writer stores IB's statement sign (a charge negative, a rebate positive — what Flex sends): the Flex import passes `ibCommission` through; the IB API commissionReport (`update_execution_commission`, `TradingDaemonSink`, gateway fills through `write_account_executions_to_db`) and the `POST`/`PUT /executions` writers (`insert_one_execution`, `update_one_execution`), which receive a cost-positive value, store its negation. The ledger reader (`portfolio.reader.executions`) returns `-commission` for every source; before, it flipped the sign by the execution row's source, so a TWS report or a Ledger edit landing on a Flex-backed exec id read back as a rebate. New module `persistence.postgres.commissions` (`stored_commission`, `commission_read_sql`, `upsert_commission`) holds the one upsert (it was copied six times). Rows stored cost-positive before 0.50.0 (6 on 2026-10-06: 4 TWS, 2 journal) are restated by the Owner step infra `scripts/release/db-steps.d/2026-10-06-td114-commission-sign-restate` after every env runs 0.50.0. Tests: `test_commission_sign.py`, `test_money_writers_db.py` (TD-115: Flex branches of the executions writer, the cash upsert). Affected downstreams: none in code (api, worker and flex-query call the same functions with the same values) |
+| W4 fix | 0.51.0 | **DDL, additive (db-init): three nullable columns on `account_nav_daily`** — `cushion`, `excess_liquidity`, `maint_margin_req` (double precision, no default; `ALTER TABLE … ADD COLUMN IF NOT EXISTS` in [`snapshot_ddl.py`](../src/bifrost_core/persistence/postgres/snapshot_ddl.py), Owner 2026-10-06). Rows already written keep them NULL (no backfill). **Behaviour change, `portfolio.snapshot.capture`:** per account — an account whose `brokerage.account.updated_at` is older than the session's close (new `session_close_at`: 16:00 New York or the NYSE `early-close` time) is skipped with its positions and listed as `stale_accounts`; an account already captured for the date is not touched (`already_captured`); the empty-attribution refusal counts only the accounts being written; no attribution read when nothing is to be written. The result gains `session_close`, `stale_accounts`, `already_captured`. New public names `session_close_at`, `summary_extra_values`, `SUMMARY_EXTRA_COLUMNS`. `python -m bifrost_core.portfolio.snapshot all` runs enrich even when its capture fails (exit 1). Affected downstreams: **api** — none in code; its image carries the job and db-init (the columns appear when db-init runs 0.51.0); **infra** — the evening CronJob `position-snapshot-enrich` runs `all` instead of `enrich` (a second capture for accounts that were stale at 16:20); worker / Flex / Research / frontend — none |
 
 ## Brokerage tables
 
