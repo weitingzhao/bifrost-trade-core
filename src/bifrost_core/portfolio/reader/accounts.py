@@ -12,6 +12,7 @@ import psycopg2
 from psycopg2.extras import RealDictCursor
 
 from bifrost_core.persistence.postgres.accounts_sync import sync_accounts_snapshot_to_tables
+from bifrost_core.persistence.postgres.commissions import stored_commission, upsert_commission
 from bifrost_core.portfolio.units import option_cost_per_share, position_value
 from bifrost_core.persistence.postgres.brokerage_tables import (
     ACCOUNT,
@@ -1024,21 +1025,6 @@ def write_account_executions_to_db(
                     currency = r.get("currency")
                     yield_ = r.get("yield_")
                     yield_redemption_date = r.get("yield_redemption_date")
-                    # 传参时把 0 当作 NULL，避免 SQL 端用 0 覆盖已有值（含类型为 str 的 "0"）
-                    def _null_if_zero(v):
-                        if v is None:
-                            return None
-                        try:
-                            if float(v) == 0:
-                                return None
-                        except (TypeError, ValueError):
-                            pass
-                        return v if (v != "" and v is not None) else None
-                    commission_val = _null_if_zero(commission)
-                    realized_pnl_val = _null_if_zero(realized_pnl)
-                    yield_val = _null_if_zero(yield_)
-                    yield_redemption_date_val = _null_if_zero(yield_redemption_date)
-                    currency_val = currency if (currency and str(currency).strip()) else None
                     # 仅当有至少一个「有意义」的 commission 字段时才写 commission 表，避免 7 天拉取时用空数据覆盖 1 天拉到的有效值
                     has_comm = (
                         _has_meaningful_commission(commission)
@@ -1048,33 +1034,15 @@ def write_account_executions_to_db(
                         or _has_meaningful_commission(yield_redemption_date)
                     )
                     if exec_id and has_comm:
-                        cur.execute(
-                            f"""
-                            INSERT INTO {GOLDEN_COMMISSIONS} (exec_id, commission, currency, realized_pnl, yield_, yield_redemption_date)
-                            VALUES (%s, %s, %s, %s, %s, %s)
-                            ON CONFLICT (exec_id) DO UPDATE SET
-                                commission = CASE
-                                    WHEN EXCLUDED.commission IS NOT NULL AND EXCLUDED.commission != 0 THEN EXCLUDED.commission
-                                    ELSE {GOLDEN_COMMISSIONS}.commission
-                                END,
-                                currency = CASE
-                                    WHEN EXCLUDED.currency IS NOT NULL AND TRIM(COALESCE(EXCLUDED.currency, '')) != '' THEN EXCLUDED.currency
-                                    ELSE {GOLDEN_COMMISSIONS}.currency
-                                END,
-                                realized_pnl = CASE
-                                    WHEN EXCLUDED.realized_pnl IS NOT NULL AND EXCLUDED.realized_pnl != 0 THEN EXCLUDED.realized_pnl
-                                    ELSE {GOLDEN_COMMISSIONS}.realized_pnl
-                                END,
-                                yield_ = CASE
-                                    WHEN EXCLUDED.yield_ IS NOT NULL AND EXCLUDED.yield_ != 0 THEN EXCLUDED.yield_
-                                    ELSE {GOLDEN_COMMISSIONS}.yield_
-                                END,
-                                yield_redemption_date = CASE
-                                    WHEN EXCLUDED.yield_redemption_date IS NOT NULL AND EXCLUDED.yield_redemption_date != 0 THEN EXCLUDED.yield_redemption_date
-                                    ELSE {GOLDEN_COMMISSIONS}.yield_redemption_date
-                                END
-                            """,
-                            (exec_id, commission_val, currency_val, realized_pnl_val, yield_val, yield_redemption_date_val),
+                        # Flex keeps IB's statement sign; TWS / gateway reports are cost-positive (TD-114).
+                        upsert_commission(
+                            cur,
+                            exec_id,
+                            commission=stored_commission(commission, source),
+                            currency=currency,
+                            realized_pnl=realized_pnl,
+                            yield_=yield_,
+                            yield_redemption_date=yield_redemption_date,
                         )
             n_comm = sum(1 for r in rows if r.get("exec_id") and (r.get("commission") is not None or r.get("realized_pnl") is not None or r.get("currency") is not None or r.get("yield_") is not None or r.get("yield_redemption_date") is not None))
             conn.commit()
@@ -1096,54 +1064,25 @@ def update_execution_commission(
     yield_: Optional[float] = None,
     yield_redemption_date: Optional[int] = None,
 ) -> bool:
-    """R-A2: 收到 IB commissionReport 事件时按 exec_id 写入 account_execution_commissions。"""
+    """R-A2: 收到 IB commissionReport 事件时按 exec_id 写入 account_execution_commissions。
+
+    ``commission`` is the IB API's cost-positive value; it is stored in IB's statement sign
+    (negated), the sign Flex stores for the same fill (TD-114).
+    """
     if not exec_id or not status_config or (status_config.get("sink") != "postgres" and not status_config.get("postgres")):
         return False
-    def _nz(v):
-        if v is None:
-            return None
-        try:
-            if float(v) == 0:
-                return None
-        except (TypeError, ValueError):
-            pass
-        return v
-    commission_val = _nz(commission)
-    realized_pnl_val = _nz(realized_pnl)
-    yield_val = _nz(yield_)
-    yield_redemption_date_val = _nz(yield_redemption_date)
-    currency_val = currency if (currency and str(currency).strip()) else None
     try:
         conn = ws.open_conn(status_config, golden=True)
         try:
             with conn.cursor() as cur:
-                cur.execute(
-                    f"""
-                    INSERT INTO {GOLDEN_COMMISSIONS} (exec_id, commission, currency, realized_pnl, yield_, yield_redemption_date)
-                    VALUES (%s, %s, %s, %s, %s, %s)
-                    ON CONFLICT (exec_id) DO UPDATE SET
-                        commission = CASE
-                            WHEN EXCLUDED.commission IS NOT NULL AND EXCLUDED.commission != 0 THEN EXCLUDED.commission
-                            ELSE {GOLDEN_COMMISSIONS}.commission
-                        END,
-                        currency = CASE
-                            WHEN EXCLUDED.currency IS NOT NULL AND TRIM(COALESCE(EXCLUDED.currency, '')) != '' THEN EXCLUDED.currency
-                            ELSE {GOLDEN_COMMISSIONS}.currency
-                        END,
-                        realized_pnl = CASE
-                            WHEN EXCLUDED.realized_pnl IS NOT NULL AND EXCLUDED.realized_pnl != 0 THEN EXCLUDED.realized_pnl
-                            ELSE {GOLDEN_COMMISSIONS}.realized_pnl
-                        END,
-                        yield_ = CASE
-                            WHEN EXCLUDED.yield_ IS NOT NULL AND EXCLUDED.yield_ != 0 THEN EXCLUDED.yield_
-                            ELSE {GOLDEN_COMMISSIONS}.yield_
-                        END,
-                        yield_redemption_date = CASE
-                            WHEN EXCLUDED.yield_redemption_date IS NOT NULL AND EXCLUDED.yield_redemption_date != 0 THEN EXCLUDED.yield_redemption_date
-                            ELSE {GOLDEN_COMMISSIONS}.yield_redemption_date
-                        END
-                    """,
-                    (exec_id, commission_val, currency_val, realized_pnl_val, yield_val, yield_redemption_date_val),
+                upsert_commission(
+                    cur,
+                    exec_id,
+                    commission=stored_commission(commission, None),
+                    currency=currency,
+                    realized_pnl=realized_pnl,
+                    yield_=yield_,
+                    yield_redemption_date=yield_redemption_date,
                 )
             conn.commit()
             return True
@@ -1235,16 +1174,14 @@ def insert_one_execution(status_config: dict, body: Dict[str, Any]) -> Optional[
                 realized_pnl = body.get("realized_pnl")
                 currency = body.get("currency")
                 if commission is not None or realized_pnl is not None or (currency and str(currency).strip()):
-                    cur.execute(
-                        f"""
-                        INSERT INTO {GOLDEN_COMMISSIONS} (exec_id, commission, currency, realized_pnl, yield_, yield_redemption_date)
-                        VALUES (%s, %s, %s, %s, NULL, NULL)
-                        ON CONFLICT (exec_id) DO UPDATE SET
-                            commission = COALESCE(EXCLUDED.commission, {GOLDEN_COMMISSIONS}.commission),
-                            currency = COALESCE(NULLIF(TRIM(COALESCE(EXCLUDED.currency, '')), ''), {GOLDEN_COMMISSIONS}.currency),
-                            realized_pnl = COALESCE(EXCLUDED.realized_pnl, {GOLDEN_COMMISSIONS}.realized_pnl)
-                        """,
-                        (exec_id, commission, currency or None, realized_pnl),
+                    # The form's commission is cost-positive; stored in IB's statement sign (TD-114).
+                    upsert_commission(
+                        cur,
+                        exec_id,
+                        commission=stored_commission(commission, None),
+                        currency=currency,
+                        realized_pnl=realized_pnl,
+                        zero_keeps_existing=False,
                     )
                 if new_id is not None and trade_id is not None:
                     acc_key = str(account_id or "").strip()
@@ -1546,19 +1483,15 @@ def update_one_execution(status_config: dict, account_executions_id: int, body: 
                             f'UPDATE {raw_tbl} SET exec_id = %s WHERE {pk_col} = %s',
                             (exec_id, pk_val),
                         )
-                    comm = body.get("commission")
-                    pnl = body.get("realized_pnl")
-                    cur_ = body.get("currency")
-                    cur.execute(
-                        f"""
-                        INSERT INTO {GOLDEN_COMMISSIONS} (exec_id, commission, currency, realized_pnl, yield_, yield_redemption_date)
-                        VALUES (%s, %s, %s, %s, NULL, NULL)
-                        ON CONFLICT (exec_id) DO UPDATE SET
-                            commission = CASE WHEN EXCLUDED.commission IS NOT NULL THEN EXCLUDED.commission ELSE {GOLDEN_COMMISSIONS}.commission END,
-                            currency = CASE WHEN EXCLUDED.currency IS NOT NULL AND TRIM(EXCLUDED.currency) != '' THEN EXCLUDED.currency ELSE {GOLDEN_COMMISSIONS}.currency END,
-                            realized_pnl = CASE WHEN EXCLUDED.realized_pnl IS NOT NULL THEN EXCLUDED.realized_pnl ELSE {GOLDEN_COMMISSIONS}.realized_pnl END
-                        """,
-                        (exec_id, comm, cur_, pnl),
+                    # The form's commission is cost-positive (what the readers return), whatever
+                    # the row's source; stored in IB's statement sign (TD-114).
+                    upsert_commission(
+                        cur,
+                        exec_id,
+                        commission=stored_commission(body.get("commission"), None),
+                        currency=body.get("currency"),
+                        realized_pnl=body.get("realized_pnl"),
+                        zero_keeps_existing=False,
                     )
             golden.commit()
             env_conn.commit()

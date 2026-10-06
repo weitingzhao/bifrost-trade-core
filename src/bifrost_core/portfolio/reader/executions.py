@@ -25,6 +25,7 @@ from bifrost_core.persistence.postgres.brokerage_tables import (
     TRADE_FILL_SPLITS,
     TRANSACTIONS,
 )
+from bifrost_core.persistence.postgres.commissions import commission_read_sql
 from bifrost_core.portfolio.reader.accounts_helpers import (
     _compute_opt_pair_map_and_pairs,
     _compute_opt_realized_calendar,
@@ -104,12 +105,10 @@ _CREATED_AT_E = "extract(epoch from e.created_at) AS created_at"
 # non-tws_client rows, and Flex / journal store a sell negative, so their sells read back positive.
 _QTY_NORM_E = f"{signed_qty_sql('e')} AS quantity"
 
-# Normalize commission so "cost" convention is consistent. tws_client stores commission as cost (positive);
-# other sources (e.g. flex) may use opposite sign → negate in query when not tws_client.
-_COMM_NORM_E = (
-    "CASE WHEN lower(trim(COALESCE(e.source, ''))) = 'tws_client' THEN c.commission "
-    "WHEN c.commission IS NOT NULL THEN -c.commission ELSE NULL END AS commission"
-)
+# Commission as a cost (positive = paid). raw_broker.commissions holds IB's statement sign for
+# every source since core 0.50.0 (TD-114, persistence.postgres.commissions); before, TWS rows were
+# stored cost-positive and this read flipped the sign by e.source.
+_COMM_NORM_E = f"{commission_read_sql('c')} AS commission"
 
 # CommissionReport.realizedPNL first; else Flex fifoPnlRealized on the execution row (executions_raw_*).
 _REALIZED_PNL_COALESCE_E = "COALESCE(c.realized_pnl, e.fifo_pnl_realized) AS realized_pnl"
