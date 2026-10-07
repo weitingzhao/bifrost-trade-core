@@ -34,9 +34,10 @@ LIVE_QUOTE_MAX_AGE_SEC = float(os.environ.get("POSITIONS_STK_LIVE_STALE_SEC", st
 #: or for a stock the market-data plugin's daily close. Never presented as a live tick.
 MARK_QUOTE_LIVE = "quote_live"
 MARK_VENDOR_EOD = "vendor_eod"
-#: Snapshot only (TD-246, core 0.56.0): the vendor's option close was under the option's
-#: intrinsic value at the underlying's close -- a stale last trade, not that session's price --
-#: so enrich stored something else and says which.
+#: Snapshot only (TD-246, core 0.56.0; TD-250, core 0.57.0): the vendor's option close was not
+#: that session's price -- under the option's intrinsic value at the underlying's close, traded in
+#: an earlier session, or traded well before the close and far from the vendor-IV price -- so
+#: enrich stored something else and says which.
 #: ``vendor_iv_model``: Black-Scholes at the underlying's close with the vendor's own IV for the
 #: session (the IV the vendor's Greeks were computed with; it moves with the quotes while a
 #: thin contract's last trade stands still).

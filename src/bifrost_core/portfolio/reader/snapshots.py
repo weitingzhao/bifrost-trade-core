@@ -23,7 +23,7 @@ Three reads:
 
 * ``vendor``   -- the vendor's Greeks of that session, all five values present, and the mark is
   the vendor's session close, or the price of the vendor's IV that enrich stores in its place
-  when the close is a stale trade under intrinsic (``vendor_iv_model``, TD-246);
+  when the close is a stale trade (``vendor_iv_model``, TD-246 / TD-250);
 * ``degraded`` -- Greeks present but not that session's (``greeks_asof`` on another New York
   date, or none), one of gamma / vega / theta / iv missing, or a mark the Greeks do not describe
   (a live quote at capture, the ``intrinsic_floor``, or none);
@@ -120,15 +120,16 @@ def mark_below_intrinsic(row: Mapping[str, Any]) -> Optional[bool]:
 
 #: Marks the session's vendor Greeks describe: the vendor's close, and (TD-246) the price of the
 #: vendor's own IV at the underlying's close, which enrich stores when the close is a stale trade
-#: under intrinsic -- the Greeks are that price's derivatives, so the attribution reads clean.
+#: (under intrinsic, or an earlier session's / an old one far from that price) -- the Greeks are
+#: that price's derivatives, so the attribution reads clean.
 MARKS_WITH_THE_GREEKS = frozenset({MARK_VENDOR_EOD, MARK_VENDOR_IV_MODEL})
 #: The mark sources the Greeks do not describe. A new ``mark_source`` must land in one of the two
 #: sets (tests/test_snapshot_mark_intrinsic.py), so the grade of a new label is a decision.
 MARKS_WITHOUT_THE_GREEKS = frozenset({MARK_QUOTE_LIVE, MARK_INTRINSIC_FLOOR})
 _DEGRADE_REASON: Dict[str, str] = {
     MARK_INTRINSIC_FLOOR: (
-        "the mark is intrinsic_floor (the vendor's close was a stale trade under intrinsic and its IV "
-        "gave no price above it): no time value, so the Greeks do not describe it"
+        "the mark is intrinsic_floor (the vendor's close was a stale trade and its IV gave no price "
+        "above intrinsic): no time value, so the Greeks do not describe it"
     ),
 }
 

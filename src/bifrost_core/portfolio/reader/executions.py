@@ -1723,7 +1723,7 @@ def _vendor_eod_snapshot_marks(conn: Any, contract_keys: List[str]) -> Dict[str,
     """contract_key -> (mark, snapshot_date): the newest vendor-EOD mark the snapshot holds.
 
     End of day is any of ``MARK_EOD_SOURCES``: the vendor's close, or what enrich stored in its
-    place when that close was a stale trade under intrinsic (TD-246). Reading ``vendor_eod`` only
+    place when that close was a stale trade (TD-246 / TD-250). Reading ``vendor_eod`` only
     would skip that session and fall back to an older close -- the stale one included.
     Any account's row: a contract's close is the same in every account. Read failures (the
     table is missing in an env that has not run db-init 0.48.0) answer {} so the attribution

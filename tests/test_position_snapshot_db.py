@@ -7,7 +7,7 @@ they are FDW tables to Golden Source); everything is rolled back.
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime, timezone
 
 import pytest
 
@@ -211,4 +211,48 @@ def test_enrich_replaces_a_close_under_intrinsic_and_the_fallback_reads_it(pg_co
             (key,),
         )
         assert cur.fetchone()[0] == 1
+    pg_conn.rollback()
+
+
+def test_session_bounds_are_new_york_midnight_and_close(pg_conn):
+    """TD-250: the bounds a last trade is judged against, by the database clock."""
+    start, close = daily.session_bounds_at(pg_conn, date(2026, 10, 5))
+    assert start == datetime(2026, 10, 5, 4, 0, tzinfo=timezone.utc)
+    assert close == datetime(2026, 10, 5, 20, 0, tzinfo=timezone.utc)
+    pg_conn.rollback()
+
+
+def test_enrich_replaces_a_morning_close_far_from_the_vendor_iv_price(pg_conn):
+    """TD-250 against the real table and the real bounds: a close over intrinsic but traded in the
+    morning, a third over the vendor-IV price, is stored as that price; one traded at the close
+    is kept as the vendor's close."""
+    conn = _NoCommit(pg_conn)
+    with pg_conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO position_snapshot_daily (snapshot_date, account_id, contract_key, trade_id, symbol, "
+            "sec_type, expiry, strike, option_right, position_qty, trade_qty, mark, mark_source) VALUES "
+            "('2026-10-05', 'UZZ0001', 'ZZZ|OPT|20270115|280.0|C', 7, 'ZZZ', 'OPT', '2027-01-15', 280, 'C', "
+            " 1, 1, NULL, NULL), "
+            "('2026-10-05', 'UZZ0001', 'ZZZ|OPT|20270115|290.0|C', 7, 'ZZZ', 'OPT', '2027-01-15', 290, 'C', "
+            " 1, 1, NULL, NULL)"
+        )
+    chain = [
+        {"option_ticker": "O:ZZZ270115C00280000", "delta": 0.85, "gamma": 0.002, "vega": 0.4, "theta": -0.08,
+         "iv": 0.65, "day_close": 140.0, "snapshot_ts": "2026-10-05T20:00:00Z",
+         "last_trade_ts": "2026-10-05T13:48:03.112+00:00"},
+        {"option_ticker": "O:ZZZ270115C00290000", "delta": 0.8, "gamma": 0.002, "vega": 0.4, "theta": -0.08,
+         "iv": 0.65, "day_close": 140.0, "snapshot_ts": "2026-10-05T20:00:00Z",
+         "last_trade_ts": "2026-10-05T20:15:03.216+00:00"},
+    ]
+    out = daily.enrich(conn, date(2026, 10, 5), option_rows=lambda s, e, a: chain,
+                       closes=lambda syms, as_of: {"ZZZ": {"bar_time": 1791158400.0, "close": 370.0}})
+    assert out["updated"] == 2
+    with pg_conn.cursor() as cur:
+        cur.execute(
+            "SELECT strike, mark, mark_source FROM position_snapshot_daily "
+            "WHERE snapshot_date = '2026-10-05' AND symbol = 'ZZZ' ORDER BY strike"
+        )
+        (_, m280, s280), (_, m290, s290) = cur.fetchall()
+    assert s280 == "vendor_iv_model" and 90.0 < m280 < 140.0 / 1.2
+    assert (m290, s290) == (140.0, "vendor_eod")
     pg_conn.rollback()

@@ -17,6 +17,8 @@ Two steps, both idempotent for a session date:
   mark where capture had no live quote, and the underlying close. Only NULLs are filled. An
   option close under the option's intrinsic value at the underlying's close is a stale last
   trade, not the session's price: it is not stored (``option_eod_mark``, TD-246, core 0.56.0).
+  Nor is a close traded in an earlier session, or one traded well before the close that is far
+  from the vendor-IV price (the plugin's ``last_trade_ts``, TD-250, core 0.57.0).
 
 Read-only towards the broker and the plugin; writes only the two snapshot tables. No order, no
 Redis, no daemon (D10).
@@ -27,7 +29,7 @@ from __future__ import annotations
 import logging
 import math
 import re
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Tuple
 
 from psycopg2.extras import RealDictCursor
@@ -482,6 +484,89 @@ def intrinsic_value(strike: Any, right: Any, underlying: Any) -> Optional[float]
     return max(0.0, s - k) if r == "C" else max(0.0, k - s)
 
 
+#: TD-250 (core 0.57.0). ``last_trade_ts`` from the plugin (market-data 0.85.0) is the vendor's
+#: day-bar update time; on this plan it runs about 15 minutes behind the trade (equity options read
+#: up to 16:15 New York at the close, SPY / QQQ / IWM up to 16:30). Measured on the 10-02 / 10-05 /
+#: 10-06 anchors (Golden Source, 525k option closes, 206k of them an earlier session's): for a close
+#: stamped at or after 16:00 the vendor-IV price is within 3 % at the median and the 20 % / $0.25
+#: test below would fire on 2.3 % of them (the model's own noise; 5.6 % for contracts with 1-5
+#: trades that day). It fires on 8.7 % of closes stamped 30 minutes or more before the close; an
+#: earlier session's close is 16 % off at the median and is replaced whenever there is a model.
+#: A close stamped this many minutes or more before the session's close is old enough to judge.
+STALE_TRADE_MINUTES = 30
+#: ... and is replaced when it is further than this from the vendor-IV price (fraction of it) ...
+STALE_TRADE_DEVIATION = 0.20
+#: ... and further than this in dollars per share (a few ticks on a cheap contract are not news).
+STALE_TRADE_DEVIATION_MIN = 0.25
+
+
+def _timestamp(value: Any) -> Optional[datetime]:
+    """An aware datetime from a datetime or an ISO string (naive = UTC); None otherwise."""
+    if isinstance(value, datetime):
+        dt = value
+    elif isinstance(value, str) and value.strip():
+        try:
+            dt = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    else:
+        return None
+    return dt if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)
+
+
+def session_bounds_at(conn: Any, d: date) -> Tuple[datetime, datetime]:
+    """``(start, close)`` of session ``d``: New York midnight and ``session_close_at``.
+
+    A last trade before ``start`` belongs to an earlier session. Computed by the database clock
+    (the container may lack tzdata).
+    """
+    with conn.cursor() as cur:
+        cur.execute("SELECT (%s::date)::timestamp AT TIME ZONE 'America/New_York'", (d,))
+        start = cur.fetchone()[0]
+    return start, session_close_at(conn, d)
+
+
+def stale_close(
+    close: float,
+    reference: Optional[float],
+    last_trade_ts: Any,
+    session_bounds: Optional[Tuple[datetime, datetime]],
+) -> bool:
+    """True when the vendor's close is not the session's price by its trade time (TD-250).
+
+    ``reference`` is the vendor-IV price floored at intrinsic. The close is stale when it was
+    traded before the session began (an earlier session's trade, whatever its distance), or at
+    least ``STALE_TRADE_MINUTES`` before the close and further from ``reference`` than
+    ``STALE_TRADE_DEVIATION`` of it and ``STALE_TRADE_DEVIATION_MIN``. Without a reference, a
+    readable trade time or the session's bounds (a plugin older than 0.85.0 sends no
+    ``last_trade_ts``) nothing is judged: False.
+    """
+    traded = _timestamp(last_trade_ts)
+    if reference is None or traded is None or session_bounds is None:
+        return False
+    start, close_at = session_bounds
+    if traded < start:
+        return True
+    if traded > close_at - timedelta(minutes=STALE_TRADE_MINUTES):
+        return False
+    return abs(close - reference) > max(STALE_TRADE_DEVIATION * reference, STALE_TRADE_DEVIATION_MIN)
+
+
+def _vendor_iv_price(
+    iv: Any, strike: Any, right: Any, expiry: Optional[date], underlying_close: Any, session: date
+) -> Optional[float]:
+    """Black-Scholes at the underlying's close with the vendor's IV; None when it cannot be had."""
+    sigma = _finite(iv)
+    days = (expiry - session).days if expiry is not None else 0
+    if sigma is None or sigma <= 0 or days <= 0:
+        return None
+    model = bs_price(
+        float(underlying_close), float(strike), days / 365.0, RATE_POSITIONS_MODEL, sigma,
+        (str(right)).strip().upper()[:1],
+    )
+    return model if math.isfinite(model) else None
+
+
 def option_eod_mark(
     day_close: Any,
     *,
@@ -491,39 +576,48 @@ def option_eod_mark(
     expiry: Optional[date],
     underlying_close: Any,
     session: date,
+    last_trade_ts: Any = None,
+    session_bounds: Optional[Tuple[datetime, datetime]] = None,
 ) -> Tuple[Optional[float], str]:
-    """``(mark, mark_source)`` enrich stores for an option of ``session`` (TD-246).
+    """``(mark, mark_source)`` enrich stores for an option of ``session`` (TD-246, TD-250).
 
     The vendor's ``day_close`` is the contract's last trade, and a thin contract's last trade can
     be days old (DEV 2026-10-05: a LEAP call's close was an 11-day-old trade 16 % under its
-    intrinsic value). A close under intrinsic cannot be that session's price, so it is replaced:
+    intrinsic value) or hours old (DEV 2026-10-06: the same call's close was a morning trade 32 %
+    over the vendor-IV price). Such a close is not that session's price, so it is replaced:
+
+    * when it is under intrinsic (TD-246), or
+    * when ``stale_close`` says so from its ``last_trade_ts`` (TD-250): an earlier session's trade,
+      or one ``STALE_TRADE_MINUTES`` before the close and far from the vendor-IV price.
+
+    The replacement:
 
     * ``vendor_iv_model`` -- Black-Scholes at the underlying's close with the vendor's IV of the
       session (``RATE_POSITIONS_MODEL``, calendar days / 365), floored at intrinsic. The vendor
       has no bid / ask on this plan; its IV is the quote-based number (it moves while the last
-      trade does not), and where a contract did trade near the close its model price is mostly
-      within 4 % of that close (DEV 2026-10-05/06: 19 of 22).
+      trade does not), and where a contract did trade near the close its model price is within
+      3 % of that close at the median (10-02 / 10-05 / 10-06, thin contracts included).
     * ``intrinsic_floor`` -- intrinsic itself, when there is no IV, the contract expires that
       day, or the model price is under intrinsic.
 
-    Otherwise (the close is at or over intrinsic, or intrinsic cannot be computed) the close is
-    stored as ``vendor_eod``, as before. No close -> ``(None, vendor_eod)``: nothing is stored.
+    Otherwise (the close is at or over intrinsic and not judged stale, or intrinsic cannot be
+    computed) the close is stored as ``vendor_eod``, as before. No ``last_trade_ts`` (a plugin
+    before 0.85.0) or no ``session_bounds`` -> the TD-246 rule alone. No close ->
+    ``(None, vendor_eod)``: nothing is stored.
     """
     close = _finite(day_close)
     if close is None:
         return None, MARK_VENDOR_EOD
     intrinsic = intrinsic_value(strike, right, underlying_close)
-    if intrinsic is None or close >= intrinsic - INTRINSIC_TOLERANCE:
+    if intrinsic is None:
         return close, MARK_VENDOR_EOD
-    sigma = _finite(iv)
-    days = (expiry - session).days if expiry is not None else 0
-    if sigma is not None and sigma > 0 and days > 0:
-        model = bs_price(
-            float(underlying_close), float(strike), days / 365.0, RATE_POSITIONS_MODEL, sigma,
-            (str(right)).strip().upper()[:1],
-        )
-        if math.isfinite(model) and model >= intrinsic:
-            return model, MARK_VENDOR_IV_MODEL
+    model = _vendor_iv_price(iv, strike, right, expiry, underlying_close, session)
+    if close >= intrinsic - INTRINSIC_TOLERANCE:
+        reference = max(model, intrinsic) if model is not None else None
+        if not stale_close(close, reference, last_trade_ts, session_bounds):
+            return close, MARK_VENDOR_EOD
+    if model is not None and model >= intrinsic:
+        return model, MARK_VENDOR_IV_MODEL
     return intrinsic, MARK_INTRINSIC_FLOOR
 
 
@@ -557,6 +651,7 @@ def enrich(
     *,
     option_rows: Callable[[str, date, date], List[Dict[str, Any]]] = _default_option_rows,
     closes: Callable[[List[str], date], Dict[str, Dict[str, Any]]] = _default_closes,
+    session_bounds: Callable[[Any, date], Tuple[datetime, datetime]] = session_bounds_at,
 ) -> Dict[str, int]:
     """Fill the vendor EOD values the plugin has for the session; only NULLs change."""
     with conn.cursor(cursor_factory=RealDictCursor) as cur:
@@ -565,6 +660,16 @@ def enrich(
     conn.rollback()
     if not rows:
         return {"rows": 0, "updated": 0, "greeks_missing": 0}
+
+    # Read before any UPDATE: a failed lookup rolls back, which must not undo written rows.
+    bounds: Optional[Tuple[datetime, datetime]] = None
+    if any((r.get("sec_type") or "").upper() == "OPT" for r in rows):
+        try:
+            bounds = session_bounds(conn, snapshot_date)
+        except Exception as e:
+            conn.rollback()
+            logger.warning("session bounds of %s unavailable (%s): closes judged by intrinsic only",
+                           snapshot_date, e)
 
     symbols = sorted({(r["symbol"] or "").strip().upper() for r in rows if r.get("symbol")})
     try:
@@ -621,6 +726,8 @@ def enrich(
                         # The stored close wins over this read's (the UPDATE keeps it).
                         underlying_close=r.get("underlying_close") if r.get("underlying_close") is not None else under_close,
                         session=snapshot_date,
+                        last_trade_ts=hit.get("last_trade_ts"),
+                        session_bounds=bounds,
                     )
                 elif r.get("delta") is None:
                     greeks_missing += 1
