@@ -15,7 +15,7 @@ from typing import Any, Dict, List, Optional
 
 import pytest
 
-from bifrost_core.portfolio.quote_freshness import MARK_QUOTE_LIVE, MARK_VENDOR_EOD
+from bifrost_core.portfolio.quote_freshness import MARK_EOD_SOURCES, MARK_QUOTE_LIVE, MARK_VENDOR_EOD
 from bifrost_core.portfolio.reader import executions
 from bifrost_core.portfolio.reader.executions import _build_attribution_rows, label_marks
 from bifrost_core.portfolio.snapshot import daily
@@ -102,7 +102,8 @@ def test_no_live_quote_takes_the_snapshots_vendor_eod_mark():
     assert (out["mark_source"], out["mark_date"]) == (MARK_VENDOR_EOD, "2031-10-06")
     assert out["unrealized_pnl_est"] == pytest.approx((1.2 - 1.5) * -2 * 100)
     sql, params = conn.queries[0]
-    assert "position_snapshot_daily" in sql and params == ([OPT], MARK_VENDOR_EOD)
+    # Every end-of-day source, not vendor_eod alone: enrich's TD-246 substitutes are that session's EOD.
+    assert "position_snapshot_daily" in sql and params == ([OPT], list(MARK_EOD_SOURCES))
 
 
 def test_a_fresh_live_quote_wins_and_reads_nothing_else():

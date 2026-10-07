@@ -22,10 +22,11 @@ Three reads:
 ``greeks_quality`` (TD-139, derived on read; no column):
 
 * ``vendor``   -- the vendor's Greeks of that session, all five values present, and the mark is
-  the vendor's session close;
+  the vendor's session close, or the price of the vendor's IV that enrich stores in its place
+  when the close is a stale trade under intrinsic (``vendor_iv_model``, TD-246);
 * ``degraded`` -- Greeks present but not that session's (``greeks_asof`` on another New York
-  date, or none), one of gamma / vega / theta / iv missing, or a mark that is not the vendor
-  close (a live quote at capture, or none);
+  date, or none), one of gamma / vega / theta / iv missing, or a mark the Greeks do not describe
+  (a live quote at capture, the ``intrinsic_floor``, or none);
 * ``missing``  -- no delta: the vendor had no row for the contract.
 
 Stock rows carry ``greeks_quality`` null: a share has delta 1 and nothing else to read.
@@ -46,9 +47,21 @@ from psycopg2.extras import RealDictCursor
 
 from bifrost_core.monitor.reader.errors import ReadFailed
 from bifrost_core.persistence.postgres.snapshot_ddl import ACCOUNT_NAV_DAILY, POSITION_SNAPSHOT_DAILY
-from bifrost_core.portfolio.quote_freshness import MARK_VENDOR_EOD
-# One number and one timestamp rule with the writer: its NaN / inf -> None and isoformat helpers.
-from bifrost_core.portfolio.snapshot.daily import _finite, _iso, session_closes_at
+from bifrost_core.portfolio.quote_freshness import (
+    MARK_INTRINSIC_FLOOR,
+    MARK_QUOTE_LIVE,
+    MARK_VENDOR_EOD,
+    MARK_VENDOR_IV_MODEL,
+)
+# One number and one timestamp rule with the writer: its NaN / inf -> None and isoformat helpers,
+# and its intrinsic value and tolerance (TD-246).
+from bifrost_core.portfolio.snapshot.daily import (
+    INTRINSIC_TOLERANCE,
+    _finite,
+    _iso,
+    intrinsic_value,
+    session_closes_at,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -89,20 +102,35 @@ def mark_below_intrinsic(row: Mapping[str, Any]) -> Optional[bool]:
     """True when an option's mark is under its intrinsic value at the underlying's close.
 
     A vendor close is the last trade, and a thin contract's last trade can be days old: a mark
-    under intrinsic cannot be that session's price (SNAPSHOT-SPEC §3, "mark anomaly"). None when
-    it cannot be judged (a stock, or a mark / close / strike / right missing).
+    under intrinsic cannot be that session's price (SNAPSHOT-SPEC §3, "mark anomaly"). Since core
+    0.56.0 (TD-246) enrich no longer stores such a close (``option_eod_mark``), so this flags a
+    live quote at capture or a row written before it. None when it cannot be judged (a stock, or
+    a mark / close / strike / right missing).
     """
     if not _is_option(row):
         return None
-    m, s, k = _finite(row.get("mark")), _finite(row.get("underlying_close")), _finite(row.get("strike"))
-    right = (row.get("option_right") or "").strip().upper()[:1]
-    if m is None or s is None or k is None or right not in ("C", "P"):
+    m = _finite(row.get("mark"))
+    intrinsic = intrinsic_value(row.get("strike"), row.get("option_right"), row.get("underlying_close"))
+    if m is None or intrinsic is None:
         return None
-    intrinsic = max(0.0, s - k) if right == "C" else max(0.0, k - s)
-    return m < intrinsic - 0.01
+    return m < intrinsic - INTRINSIC_TOLERANCE
 
 
 # --------------------------------------------------------------------------- greeks quality
+
+#: Marks the session's vendor Greeks describe: the vendor's close, and (TD-246) the price of the
+#: vendor's own IV at the underlying's close, which enrich stores when the close is a stale trade
+#: under intrinsic -- the Greeks are that price's derivatives, so the attribution reads clean.
+MARKS_WITH_THE_GREEKS = frozenset({MARK_VENDOR_EOD, MARK_VENDOR_IV_MODEL})
+#: The mark sources the Greeks do not describe. A new ``mark_source`` must land in one of the two
+#: sets (tests/test_snapshot_mark_intrinsic.py), so the grade of a new label is a decision.
+MARKS_WITHOUT_THE_GREEKS = frozenset({MARK_QUOTE_LIVE, MARK_INTRINSIC_FLOOR})
+_DEGRADE_REASON: Dict[str, str] = {
+    MARK_INTRINSIC_FLOOR: (
+        "the mark is intrinsic_floor (the vendor's close was a stale trade under intrinsic and its IV "
+        "gave no price above it): no time value, so the Greeks do not describe it"
+    ),
+}
 
 
 def greeks_quality(row: Mapping[str, Any], session_date: date) -> Tuple[Optional[str], Optional[str]]:
@@ -123,10 +151,12 @@ def greeks_quality(row: Mapping[str, Any], session_date: date) -> Tuple[Optional
         return GREEKS_DEGRADED, "the Greeks carry no as-of time"
     if gs != session_date:
         return GREEKS_DEGRADED, f"the Greeks are as of {_iso(gs)}, not this session"
-    if row.get("mark_source") != MARK_VENDOR_EOD:
-        src = row.get("mark_source") or "no mark"
-        return GREEKS_DEGRADED, f"the mark is {src}, not the vendor's session close the Greeks belong to"
-    return GREEKS_VENDOR, None
+    src = row.get("mark_source")
+    if src in MARKS_WITH_THE_GREEKS:
+        return GREEKS_VENDOR, None
+    return GREEKS_DEGRADED, _DEGRADE_REASON.get(
+        src, f"the mark is {src or 'no mark'}, not the vendor's session close the Greeks belong to"
+    )
 
 
 def _quality_counts(qualities: Iterable[Optional[str]]) -> Dict[str, int]:

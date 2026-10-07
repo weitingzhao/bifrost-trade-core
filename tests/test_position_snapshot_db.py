@@ -170,3 +170,45 @@ def test_attribution_reads_the_newest_vendor_eod_mark_and_capture_does_not_keep_
         )
         assert cur.fetchall() == [(None, None)]  # left for enrich to fill with 10-05's own close
     pg_conn.rollback()
+
+
+def test_enrich_replaces_a_close_under_intrinsic_and_the_fallback_reads_it(pg_conn):
+    """TD-246 against the real table: enrich stores the vendor-IV price with its own label, and
+    the attribution fallback takes that session's mark over an older vendor close."""
+    from bifrost_core.portfolio.reader.executions import _vendor_eod_snapshot_marks
+
+    conn = _NoCommit(pg_conn)
+    key = "ZZZ|OPT|20270115|280.0|C"
+    with pg_conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO position_snapshot_daily (snapshot_date, account_id, contract_key, trade_id, symbol, "
+            "sec_type, expiry, strike, option_right, position_qty, trade_qty, mark, mark_source) VALUES "
+            "('2026-10-02', 'UZZ0001', %(k)s, 7, 'ZZZ', 'OPT', '2027-01-15', 280, 'C', 1, 1, 70.0, 'vendor_eod'), "
+            "('2026-10-05', 'UZZ0001', %(k)s, 7, 'ZZZ', 'OPT', '2027-01-15', 280, 'C', 1, 1, NULL, NULL)",
+            {"k": key},
+        )
+    chain = [{"option_ticker": "O:ZZZ270115C00280000", "delta": 0.85, "gamma": 0.002, "vega": 0.4,
+              "theta": -0.08, "iv": 0.65, "day_close": 70.0, "snapshot_ts": "2026-10-05T20:00:00Z"}]
+    out = daily.enrich(conn, date(2026, 10, 5), option_rows=lambda s, e, a: chain,
+                       closes=lambda syms, as_of: {"ZZZ": {"bar_time": 1791158400.0, "close": 370.0}})
+    assert out["updated"] == 1
+    with pg_conn.cursor() as cur:
+        cur.execute(
+            "SELECT mark, mark_source, underlying_close FROM position_snapshot_daily "
+            "WHERE snapshot_date = '2026-10-05' AND contract_key = %s",
+            (key,),
+        )
+        mark, source, under = cur.fetchone()
+    assert source == "vendor_iv_model" and under == 370.0 and mark > 90.0  # intrinsic 90
+    # The fallback reads the newest end-of-day mark, not the stale 70 of 10-02 ...
+    assert _vendor_eod_snapshot_marks(conn, [key]) == {key: (mark, date(2026, 10, 5))}
+    # ... and a second enrich leaves the stored mark alone (only NULLs are filled).
+    daily.enrich(conn, date(2026, 10, 5), option_rows=lambda s, e, a: chain,
+                 closes=lambda syms, as_of: {"ZZZ": {"bar_time": 1791158400.0, "close": 370.0}})
+    with pg_conn.cursor() as cur:
+        cur.execute(
+            "SELECT count(*) FROM position_snapshot_daily WHERE contract_key = %s AND mark_source = 'vendor_iv_model'",
+            (key,),
+        )
+        assert cur.fetchone()[0] == 1
+    pg_conn.rollback()

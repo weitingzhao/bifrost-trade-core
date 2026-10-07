@@ -34,6 +34,21 @@ LIVE_QUOTE_MAX_AGE_SEC = float(os.environ.get("POSITIONS_STK_LIVE_STALE_SEC", st
 #: or for a stock the market-data plugin's daily close. Never presented as a live tick.
 MARK_QUOTE_LIVE = "quote_live"
 MARK_VENDOR_EOD = "vendor_eod"
+#: Snapshot only (TD-246, core 0.56.0): the vendor's option close was under the option's
+#: intrinsic value at the underlying's close -- a stale last trade, not that session's price --
+#: so enrich stored something else and says which.
+#: ``vendor_iv_model``: Black-Scholes at the underlying's close with the vendor's own IV for the
+#: session (the IV the vendor's Greeks were computed with; it moves with the quotes while a
+#: thin contract's last trade stands still).
+#: ``intrinsic_floor``: the intrinsic value itself, when there is no vendor IV or the model
+#: price is under intrinsic (a deep in-the-money put, priced European).
+MARK_VENDOR_IV_MODEL = "vendor_iv_model"
+MARK_INTRINSIC_FLOOR = "intrinsic_floor"
+#: The session's end-of-day value, whichever way enrich got it. The attribution's fallback reads
+#: the newest of these and labels it ``vendor_eod`` (its vocabulary is live vs end of day).
+MARK_EOD_SOURCES: Tuple[str, ...] = (MARK_VENDOR_EOD, MARK_VENDOR_IV_MODEL, MARK_INTRINSIC_FLOOR)
+#: Every ``position_snapshot_daily.mark_source`` a writer may store (NULL aside).
+MARK_SOURCES: Tuple[str, ...] = (MARK_QUOTE_LIVE, *MARK_EOD_SOURCES)
 
 SpotSource = Optional[str]  # "live" | "close" | None
 

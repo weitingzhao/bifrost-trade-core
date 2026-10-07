@@ -14,7 +14,9 @@ Two steps, both idempotent for a session date:
 * ``enrich`` -- later the same evening. Fills the vendor EOD values the market-data plugin has
   for that session (``/options/snapshots?as_of=`` is the 16:00 anchor of the day, whenever it is
   read; ``/stocks/db/bars/benchmark`` the daily close): Greeks, IV, the option's close as the
-  mark where capture had no live quote, and the underlying close. Only NULLs are filled.
+  mark where capture had no live quote, and the underlying close. Only NULLs are filled. An
+  option close under the option's intrinsic value at the underlying's close is a stale last
+  trade, not the session's price: it is not stored (``option_eod_mark``, TD-246, core 0.56.0).
 
 Read-only towards the broker and the plugin; writes only the two snapshot tables. No order, no
 Redis, no daemon (D10).
@@ -32,7 +34,14 @@ from psycopg2.extras import RealDictCursor
 
 from bifrost_core.persistence.postgres.brokerage_tables import ACCOUNT, POSITIONS
 from bifrost_core.persistence.postgres.snapshot_ddl import ACCOUNT_NAV_DAILY, POSITION_SNAPSHOT_DAILY
-from bifrost_core.portfolio.quote_freshness import MARK_QUOTE_LIVE, MARK_VENDOR_EOD  # mark_source values
+from bifrost_core.portfolio.quote_freshness import (  # mark_source values
+    MARK_INTRINSIC_FLOOR,
+    MARK_QUOTE_LIVE,
+    MARK_VENDOR_EOD,
+    MARK_VENDOR_IV_MODEL,
+)
+from bifrost_core.pricing.black_scholes import RATE_POSITIONS_MODEL
+from bifrost_core.pricing.black_scholes import price as bs_price
 
 logger = logging.getLogger(__name__)
 
@@ -459,6 +468,65 @@ def _close_on(bar: Optional[Mapping[str, Any]], d: date) -> Optional[float]:
     return close if close is not None and close > 0 else None
 
 
+#: A mark this far under intrinsic is under it (cents; the reader's ``mark_below_intrinsic`` uses
+#: the same tolerance, so what the writer lets through the reader does not flag).
+INTRINSIC_TOLERANCE = 0.01
+
+
+def intrinsic_value(strike: Any, right: Any, underlying: Any) -> Optional[float]:
+    """Per-share intrinsic value; None when the strike, the right or the underlying is missing."""
+    k, s = _finite(strike), _finite(underlying)
+    r = (str(right or "")).strip().upper()[:1]
+    if k is None or s is None or r not in ("C", "P"):
+        return None
+    return max(0.0, s - k) if r == "C" else max(0.0, k - s)
+
+
+def option_eod_mark(
+    day_close: Any,
+    *,
+    iv: Any,
+    strike: Any,
+    right: Any,
+    expiry: Optional[date],
+    underlying_close: Any,
+    session: date,
+) -> Tuple[Optional[float], str]:
+    """``(mark, mark_source)`` enrich stores for an option of ``session`` (TD-246).
+
+    The vendor's ``day_close`` is the contract's last trade, and a thin contract's last trade can
+    be days old (DEV 2026-10-05: a LEAP call's close was an 11-day-old trade 16 % under its
+    intrinsic value). A close under intrinsic cannot be that session's price, so it is replaced:
+
+    * ``vendor_iv_model`` -- Black-Scholes at the underlying's close with the vendor's IV of the
+      session (``RATE_POSITIONS_MODEL``, calendar days / 365), floored at intrinsic. The vendor
+      has no bid / ask on this plan; its IV is the quote-based number (it moves while the last
+      trade does not), and where a contract did trade near the close its model price is mostly
+      within 4 % of that close (DEV 2026-10-05/06: 19 of 22).
+    * ``intrinsic_floor`` -- intrinsic itself, when there is no IV, the contract expires that
+      day, or the model price is under intrinsic.
+
+    Otherwise (the close is at or over intrinsic, or intrinsic cannot be computed) the close is
+    stored as ``vendor_eod``, as before. No close -> ``(None, vendor_eod)``: nothing is stored.
+    """
+    close = _finite(day_close)
+    if close is None:
+        return None, MARK_VENDOR_EOD
+    intrinsic = intrinsic_value(strike, right, underlying_close)
+    if intrinsic is None or close >= intrinsic - INTRINSIC_TOLERANCE:
+        return close, MARK_VENDOR_EOD
+    sigma = _finite(iv)
+    days = (expiry - session).days if expiry is not None else 0
+    if sigma is not None and sigma > 0 and days > 0:
+        model = bs_price(
+            float(underlying_close), float(strike), days / 365.0, RATE_POSITIONS_MODEL, sigma,
+            (str(right)).strip().upper()[:1],
+        )
+        if math.isfinite(model) and model >= intrinsic:
+            return model, MARK_VENDOR_IV_MODEL
+    return intrinsic, MARK_INTRINSIC_FLOOR
+
+
 _SELECT_TO_ENRICH = f"""
 SELECT position_snapshot_daily_id, symbol, sec_type, expiry, strike, option_right,
        mark, underlying_close, delta, iv
@@ -544,7 +612,16 @@ def enrich(
                     for g in ("delta", "gamma", "vega", "theta", "iv"):
                         vals[g] = _finite(hit.get(g))
                     vals["greeks_asof"] = hit.get("snapshot_ts")
-                    vals["mark"] = _finite(hit.get("day_close"))
+                    vals["mark"], vals["mark_source"] = option_eod_mark(
+                        hit.get("day_close"),
+                        iv=hit.get("iv"),
+                        strike=r.get("strike"),
+                        right=r.get("option_right"),
+                        expiry=parse_expiry(exp),
+                        # The stored close wins over this read's (the UPDATE keeps it).
+                        underlying_close=r.get("underlying_close") if r.get("underlying_close") is not None else under_close,
+                        session=snapshot_date,
+                    )
                 elif r.get("delta") is None:
                     greeks_missing += 1
             else:

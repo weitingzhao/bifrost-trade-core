@@ -10,7 +10,7 @@ from psycopg2.extras import RealDictCursor
 
 from bifrost_core.portfolio.contract_key import osi_local_symbol
 from bifrost_core.portfolio.reader import keyset
-from bifrost_core.portfolio.quote_freshness import MARK_QUOTE_LIVE, MARK_VENDOR_EOD, fresh_quote_sql
+from bifrost_core.portfolio.quote_freshness import MARK_EOD_SOURCES, MARK_QUOTE_LIVE, MARK_VENDOR_EOD, fresh_quote_sql
 from bifrost_core.portfolio.signed_qty import signed_qty_sql
 
 from bifrost_core.portfolio.units import option_cost_per_share, position_value
@@ -1722,6 +1722,9 @@ def _iso_date(value: Any) -> Optional[str]:
 def _vendor_eod_snapshot_marks(conn: Any, contract_keys: List[str]) -> Dict[str, Tuple[float, date]]:
     """contract_key -> (mark, snapshot_date): the newest vendor-EOD mark the snapshot holds.
 
+    End of day is any of ``MARK_EOD_SOURCES``: the vendor's close, or what enrich stored in its
+    place when that close was a stale trade under intrinsic (TD-246). Reading ``vendor_eod`` only
+    would skip that session and fall back to an older close -- the stale one included.
     Any account's row: a contract's close is the same in every account. Read failures (the
     table is missing in an env that has not run db-init 0.48.0) answer {} so the attribution
     itself still reads.
@@ -1731,12 +1734,12 @@ def _vendor_eod_snapshot_marks(conn: Any, contract_keys: List[str]) -> Dict[str,
     sql = f"""
         SELECT DISTINCT ON (contract_key) contract_key, mark, snapshot_date
         FROM {POSITION_SNAPSHOT_DAILY}
-        WHERE contract_key = ANY(%s) AND mark_source = %s AND mark > 0
+        WHERE contract_key = ANY(%s) AND mark_source = ANY(%s) AND mark > 0
         ORDER BY contract_key, snapshot_date DESC
     """
     try:
         with conn.cursor() as cur:
-            cur.execute(sql, (contract_keys, MARK_VENDOR_EOD))
+            cur.execute(sql, (contract_keys, list(MARK_EOD_SOURCES)))
             return {k: (float(m), d) for k, m, d in cur.fetchall()}
     except Exception as e:
         logger.warning("attribution vendor-EOD marks unavailable: %s", e)
@@ -1789,7 +1792,10 @@ def label_marks(
 
     A positive live ``price_last`` / ``price_mid`` (the SQL joins fresh quotes only) is
     ``quote_live``. Otherwise, with ``fallback``, ``price_last`` takes the newest vendor
-    session close (see ``get_position_instance_attribution``) labelled ``vendor_eod``.
+    session close (see ``get_position_instance_attribution``) labelled ``vendor_eod`` -- also
+    when the snapshot's mark for that session is enrich's ``vendor_iv_model`` / ``intrinsic_floor``
+    (TD-246): this label says end of day of ``mark_date`` as against live, and the frontend
+    annotates exactly ``vendor_eod``; the snapshot rows keep the precise source.
     A row nothing prices keeps ``mark_source`` None.
     """
     missing: Dict[str, Tuple[str, str]] = {}  # contract_key -> (sec_type, symbol), rows without a live price
