@@ -25,8 +25,6 @@
     "IB_ACCOUNT_AGENT_HEALTH_KEY": "bifrost:health:ws_ib_account_agent",
     "IB_ACCOUNT_SNAPSHOT_KEY": "ib:account:snapshot:v1",
     "IB_ACCOUNT_NOTIFY_CHANNEL": "ib:account:notify",
-    "IB_ACCOUNT_STREAM_KEY": "ib:account:stream:v1",
-    "IB_ACCOUNT_STREAM_MAXLEN": 1000,
     "IB_OPERATOR_HEALTH_KEY": "bifrost:health:ws_ib_operator",
     "IB_OPERATOR_CMD_STREAM": "ib:operator:cmd",
     "IB_OPERATOR_ENV_CMD_STREAMS": [
@@ -39,5 +37,19 @@
     "IB_GATEWAY_HEALTH_PREFIX": "ib:health:",
     "IB_GATEWAY_SELF_HEAL_KEY": "ib:control:gateway_self_heal",
     "STK_CONTRACT_KEY_SUFFIX": "|STK|||"
+  },
+  "health_hash_fields": {
+    "IB_INGESTER_HEALTH_KEY": [
+      "updated_at",
+      "connected"
+    ],
+    "IB_ACCOUNT_AGENT_HEALTH_KEY": [
+      "updated_at",
+      "host_connected"
+    ],
+    "IB_OPERATOR_HEALTH_KEY": [
+      "updated_at",
+      "host_connected"
+    ]
   }
 }

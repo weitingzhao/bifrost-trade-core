@@ -1217,142 +1217,149 @@ def insert_one_execution(status_config: dict, body: Dict[str, Any]) -> Optional[
 
 
 
-def upsert_account_transactions(status_config: dict, rows: List[Dict[str, Any]]) -> int:
-    """Insert or update account_transactions from Flex cash transaction list. Returns number of rows processed.
+def upsert_account_transactions(status_config: dict, rows: List[Dict[str, Any]]) -> Tuple[int, int]:
+    """Insert or update account_transactions from Flex cash transaction list.
+
+    Returns ``(written, skipped)``. Rows missing account_id, a numeric ts, or report_date
+    are skipped and not written. Database errors propagate: a lost grant, lock timeout,
+    or bad value is not reported as zero rows written (TD-91).
     Each row at minimum: account_id, ts (Unix float), amount, type, currency?, description?.
     Extended fields (when present): flex_transaction_id, flex_type, flex_code, asset_category, asset_subcategory,
     symbol, conid, security_id, security_id_type, listing_exchange, report_date, available_for_trading_date,
     fx_rate_to_base, raw_extra.
-    Uses ON CONFLICT (account_id, ts, amount, type) DO UPDATE to avoid duplicates."""
+    Uses ON CONFLICT (account_id, ts, amount, type, report_date) DO UPDATE to avoid duplicates."""
     if not status_config or (status_config.get("sink") != "postgres" and not status_config.get("postgres")):
-        return 0
+        return (0, 0)
     if not rows:
-        return 0
+        return (0, 0)
+    conn = ws.open_conn(status_config, golden=True)
+    written = 0
+    skipped = 0
     try:
-        conn = ws.open_conn(status_config, golden=True)
-        try:
-            with conn.cursor() as cur:
-                for r in rows:
-                    account_id = (r.get("account_id") or "").strip()
-                    ts = r.get("ts")
-                    amount = r.get("amount")
-                    tx_type = (r.get("type") or "other").strip() or "other"
-                    currency = (r.get("currency") or "").strip() or None
-                    description = (r.get("description") or "").strip() or None
-                    if not account_id:
-                        continue
-                    if ts is None:
-                        continue
-                    try:
-                        ts_float = float(ts)
-                    except (TypeError, ValueError):
-                        continue
-                    if amount is None:
-                        amount = 0.0
-                    try:
-                        amount_float = float(amount)
-                    except (TypeError, ValueError):
-                        amount_float = 0.0
+        with conn.cursor() as cur:
+            for r in rows:
+                account_id = (r.get("account_id") or "").strip()
+                ts = r.get("ts")
+                amount = r.get("amount")
+                tx_type = (r.get("type") or "other").strip() or "other"
+                currency = (r.get("currency") or "").strip() or None
+                description = (r.get("description") or "").strip() or None
+                if not account_id:
+                    skipped += 1
+                    continue
+                if ts is None:
+                    skipped += 1
+                    continue
+                try:
+                    ts_float = float(ts)
+                except (TypeError, ValueError):
+                    skipped += 1
+                    continue
+                if amount is None:
+                    amount = 0.0
+                try:
+                    amount_float = float(amount)
+                except (TypeError, ValueError):
+                    amount_float = 0.0
 
-                    flex_transaction_id = (r.get("flex_transaction_id") or "").strip() or None
-                    flex_type = (r.get("flex_type") or "").strip() or None
-                    flex_code = (r.get("flex_code") or "").strip() or None
-                    asset_category = (r.get("asset_category") or "").strip() or None
-                    asset_subcategory = (r.get("asset_subcategory") or "").strip() or None
-                    symbol = (r.get("symbol") or "").strip() or None
-                    conid = r.get("conid")
-                    try:
-                        conid_int = int(conid) if conid is not None else None
-                    except (TypeError, ValueError):
-                        conid_int = None
-                    security_id = (r.get("security_id") or "").strip() or None
-                    security_id_type = (r.get("security_id_type") or "").strip() or None
-                    listing_exchange = (r.get("listing_exchange") or "").strip() or None
-                    report_date = (r.get("report_date") or "").strip() or None
-                    # Wave 3 D-W3.3: UNIQUE includes report_date — skip unindexable rows.
-                    if not report_date:
-                        logger.warning(
-                            "upsert_account_transactions: skip row without report_date "
-                            "(account_id=%s ts=%s amount=%s type=%s)",
-                            account_id,
-                            ts_float,
-                            amount_float,
-                            tx_type,
-                        )
-                        continue
-                    available_for_trading_date = (r.get("available_for_trading_date") or "").strip() or None
-                    fx_rate_to_base = r.get("fx_rate_to_base")
-                    try:
-                        fx_rate_to_base_float = float(fx_rate_to_base) if fx_rate_to_base is not None else None
-                    except (TypeError, ValueError):
-                        fx_rate_to_base_float = None
-                    raw_extra = r.get("raw_extra")
-
-                    cur.execute(
-                        f"""
-                        INSERT INTO {GOLDEN_TRANSACTIONS} (
-                            account_id, ts, amount, type, currency, description,
-                            flex_transaction_id, flex_type, flex_code,
-                            asset_category, asset_subcategory,
-                            symbol, conid, security_id, security_id_type,
-                            listing_exchange, report_date, available_for_trading_date,
-                            fx_rate_to_base, raw_extra
-                        )
-                        VALUES (
-                            %s, to_timestamp(%s), %s, %s, %s, %s,
-                            %s, %s, %s,
-                            %s, %s,
-                            %s, %s, %s, %s,
-                            %s, %s, %s,
-                            %s, %s
-                        )
-                        ON CONFLICT (account_id, ts, amount, type, report_date) DO UPDATE SET
-                            currency = COALESCE(EXCLUDED.currency, {GOLDEN_TRANSACTIONS}.currency),
-                            description = COALESCE(EXCLUDED.description, {GOLDEN_TRANSACTIONS}.description),
-                            flex_transaction_id = COALESCE(EXCLUDED.flex_transaction_id, {GOLDEN_TRANSACTIONS}.flex_transaction_id),
-                            flex_type = COALESCE(EXCLUDED.flex_type, {GOLDEN_TRANSACTIONS}.flex_type),
-                            flex_code = COALESCE(EXCLUDED.flex_code, {GOLDEN_TRANSACTIONS}.flex_code),
-                            asset_category = COALESCE(EXCLUDED.asset_category, {GOLDEN_TRANSACTIONS}.asset_category),
-                            asset_subcategory = COALESCE(EXCLUDED.asset_subcategory, {GOLDEN_TRANSACTIONS}.asset_subcategory),
-                            symbol = COALESCE(EXCLUDED.symbol, {GOLDEN_TRANSACTIONS}.symbol),
-                            conid = COALESCE(EXCLUDED.conid, {GOLDEN_TRANSACTIONS}.conid),
-                            security_id = COALESCE(EXCLUDED.security_id, {GOLDEN_TRANSACTIONS}.security_id),
-                            security_id_type = COALESCE(EXCLUDED.security_id_type, {GOLDEN_TRANSACTIONS}.security_id_type),
-                            listing_exchange = COALESCE(EXCLUDED.listing_exchange, {GOLDEN_TRANSACTIONS}.listing_exchange),
-                            available_for_trading_date = COALESCE(EXCLUDED.available_for_trading_date, {GOLDEN_TRANSACTIONS}.available_for_trading_date),
-                            fx_rate_to_base = COALESCE(EXCLUDED.fx_rate_to_base, {GOLDEN_TRANSACTIONS}.fx_rate_to_base),
-                            raw_extra = COALESCE(EXCLUDED.raw_extra, {GOLDEN_TRANSACTIONS}.raw_extra)
-                        """,
-                        (
-                            account_id,
-                            ts_float,
-                            amount_float,
-                            tx_type,
-                            currency,
-                            description,
-                            flex_transaction_id,
-                            flex_type,
-                            flex_code,
-                            asset_category,
-                            asset_subcategory,
-                            symbol,
-                            conid_int,
-                            security_id,
-                            security_id_type,
-                            listing_exchange,
-                            report_date,
-                            available_for_trading_date,
-                            fx_rate_to_base_float,
-                            json.dumps(raw_extra) if raw_extra is not None else None,
-                        ),
+                flex_transaction_id = (r.get("flex_transaction_id") or "").strip() or None
+                flex_type = (r.get("flex_type") or "").strip() or None
+                flex_code = (r.get("flex_code") or "").strip() or None
+                asset_category = (r.get("asset_category") or "").strip() or None
+                asset_subcategory = (r.get("asset_subcategory") or "").strip() or None
+                symbol = (r.get("symbol") or "").strip() or None
+                conid = r.get("conid")
+                try:
+                    conid_int = int(conid) if conid is not None else None
+                except (TypeError, ValueError):
+                    conid_int = None
+                security_id = (r.get("security_id") or "").strip() or None
+                security_id_type = (r.get("security_id_type") or "").strip() or None
+                listing_exchange = (r.get("listing_exchange") or "").strip() or None
+                report_date = (r.get("report_date") or "").strip() or None
+                # Wave 3 D-W3.3: UNIQUE includes report_date — skip unindexable rows.
+                if not report_date:
+                    logger.warning(
+                        "upsert_account_transactions: skip row without report_date "
+                        "(account_id=%s ts=%s amount=%s type=%s)",
+                        account_id,
+                        ts_float,
+                        amount_float,
+                        tx_type,
                     )
+                    skipped += 1
+                    continue
+                available_for_trading_date = (r.get("available_for_trading_date") or "").strip() or None
+                fx_rate_to_base = r.get("fx_rate_to_base")
+                try:
+                    fx_rate_to_base_float = float(fx_rate_to_base) if fx_rate_to_base is not None else None
+                except (TypeError, ValueError):
+                    fx_rate_to_base_float = None
+                raw_extra = r.get("raw_extra")
+
+                cur.execute(
+                    f"""
+                    INSERT INTO {GOLDEN_TRANSACTIONS} (
+                        account_id, ts, amount, type, currency, description,
+                        flex_transaction_id, flex_type, flex_code,
+                        asset_category, asset_subcategory,
+                        symbol, conid, security_id, security_id_type,
+                        listing_exchange, report_date, available_for_trading_date,
+                        fx_rate_to_base, raw_extra
+                    )
+                    VALUES (
+                        %s, to_timestamp(%s), %s, %s, %s, %s,
+                        %s, %s, %s,
+                        %s, %s,
+                        %s, %s, %s, %s,
+                        %s, %s, %s,
+                        %s, %s
+                    )
+                    ON CONFLICT (account_id, ts, amount, type, report_date) DO UPDATE SET
+                        currency = COALESCE(EXCLUDED.currency, {GOLDEN_TRANSACTIONS}.currency),
+                        description = COALESCE(EXCLUDED.description, {GOLDEN_TRANSACTIONS}.description),
+                        flex_transaction_id = COALESCE(EXCLUDED.flex_transaction_id, {GOLDEN_TRANSACTIONS}.flex_transaction_id),
+                        flex_type = COALESCE(EXCLUDED.flex_type, {GOLDEN_TRANSACTIONS}.flex_type),
+                        flex_code = COALESCE(EXCLUDED.flex_code, {GOLDEN_TRANSACTIONS}.flex_code),
+                        asset_category = COALESCE(EXCLUDED.asset_category, {GOLDEN_TRANSACTIONS}.asset_category),
+                        asset_subcategory = COALESCE(EXCLUDED.asset_subcategory, {GOLDEN_TRANSACTIONS}.asset_subcategory),
+                        symbol = COALESCE(EXCLUDED.symbol, {GOLDEN_TRANSACTIONS}.symbol),
+                        conid = COALESCE(EXCLUDED.conid, {GOLDEN_TRANSACTIONS}.conid),
+                        security_id = COALESCE(EXCLUDED.security_id, {GOLDEN_TRANSACTIONS}.security_id),
+                        security_id_type = COALESCE(EXCLUDED.security_id_type, {GOLDEN_TRANSACTIONS}.security_id_type),
+                        listing_exchange = COALESCE(EXCLUDED.listing_exchange, {GOLDEN_TRANSACTIONS}.listing_exchange),
+                        available_for_trading_date = COALESCE(EXCLUDED.available_for_trading_date, {GOLDEN_TRANSACTIONS}.available_for_trading_date),
+                        fx_rate_to_base = COALESCE(EXCLUDED.fx_rate_to_base, {GOLDEN_TRANSACTIONS}.fx_rate_to_base),
+                        raw_extra = COALESCE(EXCLUDED.raw_extra, {GOLDEN_TRANSACTIONS}.raw_extra)
+                    """,
+                    (
+                        account_id,
+                        ts_float,
+                        amount_float,
+                        tx_type,
+                        currency,
+                        description,
+                        flex_transaction_id,
+                        flex_type,
+                        flex_code,
+                        asset_category,
+                        asset_subcategory,
+                        symbol,
+                        conid_int,
+                        security_id,
+                        security_id_type,
+                        listing_exchange,
+                        report_date,
+                        available_for_trading_date,
+                        fx_rate_to_base_float,
+                        json.dumps(raw_extra) if raw_extra is not None else None,
+                    ),
+                )
+                written += 1
             conn.commit()
-            return len(rows)
-        finally:
-            conn.close()
-    except Exception as e:
-        logger.warning("upsert_account_transactions failed: %s", e)
-        return 0
+            return (written, skipped)
+    finally:
+        conn.close()
 
 
 def update_one_execution(status_config: dict, account_executions_id: int, body: Dict[str, Any]) -> bool:

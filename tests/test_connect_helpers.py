@@ -115,7 +115,6 @@ _ACCOUNTS_CASES = [
         None,
         [False],
     ),
-    (lambda: accounts.upsert_account_transactions(CFG, [{"account_id": "U0000001"}]), 0, [True]),
     (lambda: accounts.update_one_execution(CFG, 5, {"price": 2.0}), False, [False]),
     (lambda: accounts.delete_one_execution(CFG, 5), False, [False]),
 ]
@@ -127,6 +126,102 @@ def test_accounts_writers_on_connect_failure(case: int, calls: List[Dict[str, An
     assert fn() == expected
     assert [c["_golden"] for c in calls] == golden_flags
     assert all(c["connect_timeout"] == 10 for c in calls)
+
+
+class _Boom(Exception):
+    pass
+
+
+class _RaisingCursor:
+    def __enter__(self) -> "_RaisingCursor":
+        return self
+
+    def __exit__(self, *args: object) -> bool:
+        return False
+
+    def execute(self, *args: object, **kwargs: object) -> None:
+        raise _Boom("write failed")
+
+
+class _RaisingConn:
+    def __init__(self) -> None:
+        self.committed = False
+        self.closed = False
+
+    def cursor(self) -> _RaisingCursor:
+        return _RaisingCursor()
+
+    def commit(self) -> None:
+        self.committed = True
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def test_upsert_account_transactions_connect_failure_propagates(
+    calls: List[Dict[str, Any]],
+) -> None:
+    """TD-91: a refused connect is not turned into a successful 0-row write."""
+    with pytest.raises(_Refused):
+        accounts.upsert_account_transactions(CFG, [{"account_id": "U0000001", "report_date": "20260102"}])
+    assert [c["_golden"] for c in calls] == [True]
+    assert calls[0]["connect_timeout"] == 10
+
+
+def test_upsert_account_transactions_cursor_error_propagates(monkeypatch: pytest.MonkeyPatch) -> None:
+    """TD-91 ratchet: a raising cursor propagates and nothing is committed."""
+    conn = _RaisingConn()
+    monkeypatch.setattr(ws, "open_conn", lambda *args, **kwargs: conn)
+    row = {
+        "account_id": "U0000001",
+        "ts": 1.0,
+        "amount": 1.0,
+        "type": "other",
+        "report_date": "20260102",
+    }
+    with pytest.raises(_Boom):
+        accounts.upsert_account_transactions(CFG, [row])
+    assert conn.committed is False
+    assert conn.closed is True
+
+
+def test_upsert_account_transactions_counts_written_and_skipped(monkeypatch: pytest.MonkeyPatch) -> None:
+    executed: List[Any] = []
+
+    class _Cur:
+        def __enter__(self) -> "_Cur":
+            return self
+
+        def __exit__(self, *args: object) -> bool:
+            return False
+
+        def execute(self, sql: str, params: Any = None) -> None:
+            executed.append(params)
+
+    class _Conn:
+        def __init__(self) -> None:
+            self.committed = False
+
+        def cursor(self) -> _Cur:
+            return _Cur()
+
+        def commit(self) -> None:
+            self.committed = True
+
+        def close(self) -> None:
+            pass
+
+    conn = _Conn()
+    monkeypatch.setattr(ws, "open_conn", lambda *args, **kwargs: conn)
+    rows = [
+        {"account_id": "U0000001", "ts": 1.0, "amount": 1.0, "type": "other", "report_date": "20260102"},
+        {"account_id": "", "ts": 1.0, "amount": 2.0, "type": "other", "report_date": "20260102"},
+        {"account_id": "U0000001", "ts": None, "amount": 3.0, "type": "other", "report_date": "20260102"},
+        {"account_id": "U0000001", "ts": 2.0, "amount": 4.0, "type": "other", "report_date": ""},
+    ]
+    assert accounts.upsert_account_transactions(CFG, rows) == (1, 3)
+    assert len(executed) == 1
+    assert conn.committed is True
 
 
 # --- ratchet: no new inline connect ----------------------------------------------------

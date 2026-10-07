@@ -104,25 +104,34 @@ async def refresh_accounts_from_redis_edge(app: Any) -> None:
     if symbol:
         app._set_active_symbol(app._infer_active_symbol(flat))
 
-    oo = data.get("open_orders") or []
+    # Absent is not empty: a snapshot that never carried open_orders must not TRUNCATE (TD-211).
+    open_orders_note: Any = "absent"
     if not daemon_broker_writes_off():
-        if app._status_sink and hasattr(app._status_sink, "write_open_orders"):
-            try:
-                app._status_sink.write_open_orders(oo)
-            except Exception as e:
-                logger.warning("[ib_edge] write_open_orders: %s", e)
+        if "open_orders" in data:
+            oo = data.get("open_orders")
+            if not isinstance(oo, list):
+                oo = []
+            open_orders_note = len(oo)
+            if app._status_sink and hasattr(app._status_sink, "write_open_orders"):
+                try:
+                    app._status_sink.write_open_orders(oo)
+                except Exception as e:
+                    logger.warning("[ib_edge] write_open_orders: %s", e)
 
-        rows = data.get("last_execution_rows") or []
-        if rows and app._status_sink and hasattr(app._status_sink, "write_account_executions"):
-            try:
-                app._status_sink.write_account_executions(rows)
-            except Exception as e:
-                logger.warning("[ib_edge] write_account_executions: %s", e)
+        if "last_execution_rows" in data:
+            rows = data.get("last_execution_rows") or []
+            if rows and app._status_sink and hasattr(app._status_sink, "write_account_executions"):
+                try:
+                    app._status_sink.write_account_executions(rows)
+                except Exception as e:
+                    logger.warning("[ib_edge] write_account_executions: %s", e)
     else:
+        if isinstance(data.get("open_orders"), list):
+            open_orders_note = len(data["open_orders"])
         logger.debug("[ib_edge] broker writes off (DEV) — open orders and executions not written to the shared Golden Source")
 
     logger.info(
         "[ib_edge] snapshot applied accounts=%s open_orders=%s",
         len(accounts_list),
-        len(oo),
+        open_orders_note,
     )

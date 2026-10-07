@@ -114,10 +114,13 @@ def sync_accounts_snapshot_to_tables(
                 VALUES (%s, now(), %s, %s, %s, %s)
                 ON CONFLICT (account_id) DO UPDATE SET
                     updated_at = now(),
-                    net_liquidation = EXCLUDED.net_liquidation,
-                    total_cash = EXCLUDED.total_cash,
-                    buying_power = EXCLUDED.buying_power,
-                    summary_extra = EXCLUDED.summary_extra
+                    net_liquidation = COALESCE(EXCLUDED.net_liquidation, {GOLDEN_ACCOUNT}.net_liquidation),
+                    total_cash = COALESCE(EXCLUDED.total_cash, {GOLDEN_ACCOUNT}.total_cash),
+                    buying_power = COALESCE(EXCLUDED.buying_power, {GOLDEN_ACCOUNT}.buying_power),
+                    summary_extra = CASE
+                        WHEN EXCLUDED.net_liquidation IS NULL THEN {GOLDEN_ACCOUNT}.summary_extra
+                        ELSE EXCLUDED.summary_extra
+                    END
                 """,
                 (
                     account_id,
@@ -131,6 +134,10 @@ def sync_accounts_snapshot_to_tables(
                     ),
                 ),
             )
+            # Missing `positions`, or a read the plugin marked unsuccessful, is not an
+            # empty book: do not delete the rows already stored (TD-212).
+            if "positions" not in acc or acc.get("positions_ok") is False:
+                continue
             # positions: upsert by (account_id, contract_key); contract_key distinguishes OPT by expiry/strike/right
             positions = acc.get("positions") or []
             seen_keys: List[str] = []

@@ -38,8 +38,8 @@ BIFROST_HEALTH_IB_INGESTOR = "bifrost:health:ws_ib_ingestor"
 BIFROST_HEALTH_IB_OPERATOR = "bifrost:health:ws_ib_operator"
 BIFROST_HEALTH_IB_ACCOUNT_AGENT = "bifrost:health:ws_ib_account_agent"
 
-# Account Sync Daemon: independent process that consumes ib:account:stream:v1 and
-# persists Account / Position / Execution data to PostgreSQL.
+# Account Sync was deleted (TD-22). The daemon reads ib:account:snapshot:v1; the
+# retired ib:account:stream:v1 stream has no writer and no consumer (TD-236).
 
 # Strategy Trading Daemon (Deployment ``daemon``, class ``GsTrading``): health hash + Ops
 # Dev/Prod lease fields (``bifrost_ops_control_*``, ``engine_ops_active``) on the same key —

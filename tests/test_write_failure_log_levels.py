@@ -80,6 +80,34 @@ def test_ib_edge_write_failures_reach_warning(monkeypatch, caplog):
     }
 
 
+def test_missing_open_orders_key_is_not_an_empty_book(monkeypatch):
+    """TD-211: no open_orders key must not call write_open_orders (that TRUNCATEs)."""
+    from bifrost_core.portfolio import ib_edge
+
+    calls: list = []
+
+    class _Recording:
+        def write_open_orders(self, orders):
+            calls.append(list(orders))
+
+        def write_account_executions(self, rows):
+            calls.append(("exec", rows))
+
+    r = MagicMock()
+    r.get.return_value = json.dumps({"accounts_snapshot": []})
+    monkeypatch.setattr(ib_edge, "_redis_sync_client", lambda cfg: r)
+    monkeypatch.setattr(ib_edge, "daemon_broker_writes_off", lambda: False)
+    app = SimpleNamespace(
+        config={},
+        store=MagicMock(),
+        _host_account_id=None,
+        _status_sink=_Recording(),
+        symbol="",
+    )
+    asyncio.run(ib_edge.refresh_accounts_from_redis_edge(app))
+    assert calls == []
+
+
 def test_snapshot_applied_is_info(monkeypatch, caplog):
     """The per-refresh summary stays INFO: visible once the daemon configures logging."""
     from bifrost_core.portfolio import ib_edge

@@ -264,7 +264,7 @@ def _cash_rows(db: _Savepointed) -> List[tuple]:
 def test_cash_rows_are_stored(db) -> None:
     rows = [_cash(), _cash(amount=-3.7, type="withholding", description="ZQY US TAX", flex_transaction_id="990002",
                            raw_extra={"transactionID": "990002"})]
-    assert accounts.upsert_account_transactions(CFG, rows) == 2
+    assert accounts.upsert_account_transactions(CFG, rows) == (2, 0)
     assert _cash_rows(db) == [
         (-3.7, "withholding", "USD", "ZQY US TAX", "990002", 123456, "2026-09-21", "990002"),
         (12.34, "dividend", "USD", "ZQY CASH DIVIDEND", "990001", 123456, "2026-09-21", "990001"),
@@ -272,16 +272,16 @@ def test_cash_rows_are_stored(db) -> None:
 
 
 def test_cash_rerun_updates_instead_of_duplicating(db) -> None:
-    assert accounts.upsert_account_transactions(CFG, [_cash()]) == 1
-    assert accounts.upsert_account_transactions(CFG, [_cash(description="ZQY CASH DIVIDEND USD 0.10")]) == 1
+    assert accounts.upsert_account_transactions(CFG, [_cash()]) == (1, 0)
+    assert accounts.upsert_account_transactions(CFG, [_cash(description="ZQY CASH DIVIDEND USD 0.10")]) == (1, 0)
     rows = _cash_rows(db)
     assert len(rows) == 1 and rows[0][3] == "ZQY CASH DIVIDEND USD 0.10"
 
 
 def test_cash_rows_without_account_ts_or_report_date_are_not_stored(db) -> None:
-    accounts.upsert_account_transactions(
+    assert accounts.upsert_account_transactions(
         CFG, [_cash(account_id=""), _cash(ts=None), _cash(report_date=""), _cash(amount=1.0)]
-    )
+    ) == (1, 3)
     assert [r[0] for r in _cash_rows(db)] == [1.0]
 
 
