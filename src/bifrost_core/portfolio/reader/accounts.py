@@ -1227,7 +1227,11 @@ def upsert_account_transactions(status_config: dict, rows: List[Dict[str, Any]])
     Extended fields (when present): flex_transaction_id, flex_type, flex_code, asset_category, asset_subcategory,
     symbol, conid, security_id, security_id_type, listing_exchange, report_date, available_for_trading_date,
     fx_rate_to_base, raw_extra.
-    Uses ON CONFLICT (account_id, ts, amount, type, report_date) DO UPDATE to avoid duplicates."""
+    A row with flex_transaction_id conflicts on
+    (account_id, flex_transaction_id) WHERE flex_transaction_id IS NOT NULL
+    (partial unique index transactions_account_flex_tx_uidx, which this function does not create).
+    The second write replaces ts, amount, type, and report_date. A row without a transaction id
+    still conflicts on (account_id, ts, amount, type, report_date)."""
     if not status_config or (status_config.get("sink") != "postgres" and not status_config.get("postgres")):
         return (0, 0)
     if not rows:
@@ -1235,6 +1239,57 @@ def upsert_account_transactions(status_config: dict, rows: List[Dict[str, Any]])
     conn = ws.open_conn(status_config, golden=True)
     written = 0
     skipped = 0
+    enrich_set = ",\n".join(
+        (
+            f"currency = COALESCE(EXCLUDED.currency, {GOLDEN_TRANSACTIONS}.currency)",
+            f"description = COALESCE(EXCLUDED.description, {GOLDEN_TRANSACTIONS}.description)",
+            f"flex_transaction_id = COALESCE(EXCLUDED.flex_transaction_id, {GOLDEN_TRANSACTIONS}.flex_transaction_id)",
+            f"flex_type = COALESCE(EXCLUDED.flex_type, {GOLDEN_TRANSACTIONS}.flex_type)",
+            f"flex_code = COALESCE(EXCLUDED.flex_code, {GOLDEN_TRANSACTIONS}.flex_code)",
+            f"asset_category = COALESCE(EXCLUDED.asset_category, {GOLDEN_TRANSACTIONS}.asset_category)",
+            f"asset_subcategory = COALESCE(EXCLUDED.asset_subcategory, {GOLDEN_TRANSACTIONS}.asset_subcategory)",
+            f"symbol = COALESCE(EXCLUDED.symbol, {GOLDEN_TRANSACTIONS}.symbol)",
+            f"conid = COALESCE(EXCLUDED.conid, {GOLDEN_TRANSACTIONS}.conid)",
+            f"security_id = COALESCE(EXCLUDED.security_id, {GOLDEN_TRANSACTIONS}.security_id)",
+            f"security_id_type = COALESCE(EXCLUDED.security_id_type, {GOLDEN_TRANSACTIONS}.security_id_type)",
+            f"listing_exchange = COALESCE(EXCLUDED.listing_exchange, {GOLDEN_TRANSACTIONS}.listing_exchange)",
+            f"available_for_trading_date = COALESCE(EXCLUDED.available_for_trading_date, {GOLDEN_TRANSACTIONS}.available_for_trading_date)",
+            f"fx_rate_to_base = COALESCE(EXCLUDED.fx_rate_to_base, {GOLDEN_TRANSACTIONS}.fx_rate_to_base)",
+            f"raw_extra = COALESCE(EXCLUDED.raw_extra, {GOLDEN_TRANSACTIONS}.raw_extra)",
+        )
+    )
+    insert_sql = f"""
+                    INSERT INTO {GOLDEN_TRANSACTIONS} (
+                        account_id, ts, amount, type, currency, description,
+                        flex_transaction_id, flex_type, flex_code,
+                        asset_category, asset_subcategory,
+                        symbol, conid, security_id, security_id_type,
+                        listing_exchange, report_date, available_for_trading_date,
+                        fx_rate_to_base, raw_extra
+                    )
+                    VALUES (
+                        %s, to_timestamp(%s), %s, %s, %s, %s,
+                        %s, %s, %s,
+                        %s, %s,
+                        %s, %s, %s, %s,
+                        %s, %s, %s,
+                        %s, %s
+                    )
+"""
+    # The partial predicate must match transactions_account_flex_tx_uidx. Postgres
+    # rejects this ON CONFLICT until that index exists.
+    sql_flex_id = insert_sql + f"""
+                    ON CONFLICT (account_id, flex_transaction_id) WHERE flex_transaction_id IS NOT NULL DO UPDATE SET
+                        ts = EXCLUDED.ts,
+                        amount = EXCLUDED.amount,
+                        type = EXCLUDED.type,
+                        report_date = EXCLUDED.report_date,
+                        {enrich_set}
+"""
+    sql_legacy = insert_sql + f"""
+                    ON CONFLICT (account_id, ts, amount, type, report_date) DO UPDATE SET
+                        {enrich_set}
+"""
     try:
         with conn.cursor() as cur:
             for r in rows:
@@ -1298,40 +1353,7 @@ def upsert_account_transactions(status_config: dict, rows: List[Dict[str, Any]])
                 raw_extra = r.get("raw_extra")
 
                 cur.execute(
-                    f"""
-                    INSERT INTO {GOLDEN_TRANSACTIONS} (
-                        account_id, ts, amount, type, currency, description,
-                        flex_transaction_id, flex_type, flex_code,
-                        asset_category, asset_subcategory,
-                        symbol, conid, security_id, security_id_type,
-                        listing_exchange, report_date, available_for_trading_date,
-                        fx_rate_to_base, raw_extra
-                    )
-                    VALUES (
-                        %s, to_timestamp(%s), %s, %s, %s, %s,
-                        %s, %s, %s,
-                        %s, %s,
-                        %s, %s, %s, %s,
-                        %s, %s, %s,
-                        %s, %s
-                    )
-                    ON CONFLICT (account_id, ts, amount, type, report_date) DO UPDATE SET
-                        currency = COALESCE(EXCLUDED.currency, {GOLDEN_TRANSACTIONS}.currency),
-                        description = COALESCE(EXCLUDED.description, {GOLDEN_TRANSACTIONS}.description),
-                        flex_transaction_id = COALESCE(EXCLUDED.flex_transaction_id, {GOLDEN_TRANSACTIONS}.flex_transaction_id),
-                        flex_type = COALESCE(EXCLUDED.flex_type, {GOLDEN_TRANSACTIONS}.flex_type),
-                        flex_code = COALESCE(EXCLUDED.flex_code, {GOLDEN_TRANSACTIONS}.flex_code),
-                        asset_category = COALESCE(EXCLUDED.asset_category, {GOLDEN_TRANSACTIONS}.asset_category),
-                        asset_subcategory = COALESCE(EXCLUDED.asset_subcategory, {GOLDEN_TRANSACTIONS}.asset_subcategory),
-                        symbol = COALESCE(EXCLUDED.symbol, {GOLDEN_TRANSACTIONS}.symbol),
-                        conid = COALESCE(EXCLUDED.conid, {GOLDEN_TRANSACTIONS}.conid),
-                        security_id = COALESCE(EXCLUDED.security_id, {GOLDEN_TRANSACTIONS}.security_id),
-                        security_id_type = COALESCE(EXCLUDED.security_id_type, {GOLDEN_TRANSACTIONS}.security_id_type),
-                        listing_exchange = COALESCE(EXCLUDED.listing_exchange, {GOLDEN_TRANSACTIONS}.listing_exchange),
-                        available_for_trading_date = COALESCE(EXCLUDED.available_for_trading_date, {GOLDEN_TRANSACTIONS}.available_for_trading_date),
-                        fx_rate_to_base = COALESCE(EXCLUDED.fx_rate_to_base, {GOLDEN_TRANSACTIONS}.fx_rate_to_base),
-                        raw_extra = COALESCE(EXCLUDED.raw_extra, {GOLDEN_TRANSACTIONS}.raw_extra)
-                    """,
+                    sql_flex_id if flex_transaction_id else sql_legacy,
                     (
                         account_id,
                         ts_float,

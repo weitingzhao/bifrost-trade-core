@@ -67,6 +67,15 @@ def db(pg_conn, monkeypatch: pytest.MonkeyPatch) -> _Savepointed:
         for t in PASS_THROUGH:
             cur.execute(f"CREATE VIEW brokerage.{t} AS SELECT * FROM raw_broker.{t}")
         _create_brokerage_views(cur, "brokerage", env=True)
+        # Throwaway stand-in for the Owner index. Not CREATE CONCURRENTLY:
+        # this connection is inside the fixture transaction.
+        cur.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS transactions_account_flex_tx_uidx
+                ON raw_broker.transactions (account_id, flex_transaction_id)
+                WHERE flex_transaction_id IS NOT NULL
+            """
+        )
     conn.commit()
     monkeypatch.setattr(ws, "connect", lambda params, golden=False: conn)
     return conn
@@ -299,3 +308,69 @@ def test_a_failed_cash_write_lands_nothing_and_reports_nothing(db) -> None:
     # The writer closes its connection without committing; here that is the savepoint's rollback.
     db.rollback()
     assert _cash_rows(db) == []
+
+
+def test_same_flex_transaction_id_updates_in_place_when_the_partial_index_exists(db) -> None:
+    """TD-103: the second write of one IB transaction id updates that row, even when amount and ts change."""
+    index = _all(
+        db,
+        """
+        SELECT indexdef FROM pg_indexes
+        WHERE schemaname = 'raw_broker' AND indexname = 'transactions_account_flex_tx_uidx'
+        """,
+    )
+    assert len(index) == 1
+    assert "UNIQUE" in index[0][0].upper()
+    assert "(account_id, flex_transaction_id)" in index[0][0]
+    assert "flex_transaction_id IS NOT NULL" in index[0][0]
+
+    acct = "U00011111"
+    first = _cash(
+        account_id=acct,
+        flex_transaction_id="880001",
+        amount=10.0,
+        description="first",
+        raw_extra={"transactionID": "880001"},
+    )
+    second = _cash(
+        account_id=acct,
+        flex_transaction_id="880001",
+        amount=11.5,
+        ts=1789966800.0,
+        type="payment",
+        report_date="20260922",
+        description="second",
+        raw_extra={"transactionID": "880001"},
+    )
+    assert accounts.upsert_account_transactions(CFG, [first]) == (1, 0)
+    assert accounts.upsert_account_transactions(CFG, [second]) == (1, 0)
+    rows = _all(
+        db,
+        """
+        SELECT amount, type, description, report_date::text, extract(epoch FROM ts)::bigint
+        FROM raw_broker.transactions
+        WHERE account_id = %s AND flex_transaction_id = %s
+        """,
+        (acct, "880001"),
+    )
+    assert rows == [(11.5, "payment", "second", "2026-09-22", 1789966800)]
+
+
+def test_cash_without_a_flex_id_still_dedupes_on_the_old_key(db) -> None:
+    """Rows with no transaction id stay on (account_id, ts, amount, type, report_date)."""
+    acct = "U00011111"
+    base = {"account_id": acct, "flex_transaction_id": None, "raw_extra": None}
+    assert accounts.upsert_account_transactions(CFG, [_cash(**base, description="first")]) == (1, 0)
+    assert accounts.upsert_account_transactions(CFG, [_cash(**base, description="second")]) == (1, 0)
+    assert accounts.upsert_account_transactions(CFG, [_cash(**base, amount=9.0, description="other")]) == (1, 0)
+    rows = _all(
+        db,
+        """
+        SELECT amount, description, flex_transaction_id
+        FROM raw_broker.transactions
+        WHERE account_id = %s AND flex_transaction_id IS NULL
+        ORDER BY amount
+        """,
+        (acct,),
+    )
+    assert rows == [(9.0, "other", None), (12.34, "second", None)]

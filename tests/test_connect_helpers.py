@@ -224,6 +224,59 @@ def test_upsert_account_transactions_counts_written_and_skipped(monkeypatch: pyt
     assert conn.committed is True
 
 
+def test_flex_transaction_id_picks_the_partial_conflict_target(monkeypatch: pytest.MonkeyPatch) -> None:
+    """TD-103: a transaction id and a row without one take different ON CONFLICT targets."""
+    executed: List[str] = []
+
+    class _Cur:
+        def __enter__(self) -> "_Cur":
+            return self
+
+        def __exit__(self, *args: object) -> bool:
+            return False
+
+        def execute(self, sql: str, params: Any = None) -> None:
+            executed.append(sql)
+
+    class _Conn:
+        def cursor(self) -> _Cur:
+            return _Cur()
+
+        def commit(self) -> None:
+            return None
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(ws, "open_conn", lambda *args, **kwargs: _Conn())
+    rows = [
+        {
+            "account_id": "U00011111",
+            "ts": 1.0,
+            "amount": 1.0,
+            "type": "other",
+            "report_date": "20260102",
+            "flex_transaction_id": "880001",
+        },
+        {
+            "account_id": "U00011111",
+            "ts": 2.0,
+            "amount": 2.0,
+            "type": "other",
+            "report_date": "20260102",
+        },
+    ]
+    assert accounts.upsert_account_transactions(CFG, rows) == (2, 0)
+    assert len(executed) == 2
+    assert (
+        "ON CONFLICT (account_id, flex_transaction_id) WHERE flex_transaction_id IS NOT NULL"
+        in executed[0]
+    )
+    assert "amount = EXCLUDED.amount" in executed[0]
+    assert "ON CONFLICT (account_id, ts, amount, type, report_date)" in executed[1]
+    assert "flex_transaction_id) WHERE" not in executed[1]
+
+
 # --- ratchet: no new inline connect ----------------------------------------------------
 
 # Modules allowed to call psycopg2.connect directly, and why.
