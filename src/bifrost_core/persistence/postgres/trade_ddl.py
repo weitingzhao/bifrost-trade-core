@@ -121,7 +121,7 @@ CREATE TABLE IF NOT EXISTS strategy_plan (
     exit_by                 date,
     rationale               text,
     source_kind             text        NOT NULL DEFAULT 'manual'
-                                        CHECK (source_kind IN ('manual', 'symbol', 'hypothesis', 'inbox_draft', 'roll')),
+                                        CHECK (source_kind IN ('manual', 'symbol', 'hypothesis', 'inbox_draft', 'roll', 'lens', 'backtest_run')),
     source_ref              text,
     source_json             jsonb       NOT NULL DEFAULT '[]'::jsonb,
     status                  text        NOT NULL DEFAULT 'draft'
