@@ -12,7 +12,7 @@ import asyncio
 import time
 
 import pytest
-from prometheus_client import REGISTRY, CollectorRegistry
+from prometheus_client import REGISTRY, CollectorRegistry, Counter
 from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import JSONResponse, StreamingResponse
@@ -99,12 +99,10 @@ def _v(registry: CollectorRegistry, name: str, **labels: str) -> float:
 
 @pytest.fixture
 def registry():
-    """A fresh registry per test. The instrumentator registers its in-progress gauge on the
-    process-wide REGISTRY whatever registry it is given, so that one is removed afterwards."""
+    """A fresh registry per test; every series, the in-progress gauge too, lands in it."""
+    before = set(REGISTRY._names_to_collectors)
     yield CollectorRegistry()
-    gauge = REGISTRY._names_to_collectors.get("http_requests_inprogress")
-    if gauge is not None:
-        REGISTRY.unregister(gauge)
+    assert set(REGISTRY._names_to_collectors) == before
 
 
 async def test_health_is_counted_but_not_timed(registry):
@@ -163,3 +161,44 @@ def test_the_fine_histogram_reaches_past_the_alert_threshold():
     # scripts/check_http_metrics_coverage.py there asserts its threshold is below 60 s.
     assert max(HIGHR_BUCKETS) == 60
     assert list(HIGHR_BUCKETS) == sorted(HIGHR_BUCKETS)
+
+
+# --- Several instrumented apps in one process (core 0.55.2) ---------------------------------
+# bifrost-trade-api's monitor process builds the docs app (and instruments it) only to copy
+# its routes, then instruments the monitor app. Under 0.55.0 / 0.55.1 the first call held
+# every series and the second got none, so PROD api-monitor exported no http_requests_total.
+
+
+async def test_the_second_app_on_a_registry_records_its_requests(registry):
+    _app(registry)  # instrumented, never served: the docs app in the monitor process
+    served = _app(registry)
+    for _ in range(2):
+        assert await _get(served, "/health") == 200
+    assert await _get(served, "/items/7") == 200
+    assert await _get(served, "/stream") == 200
+
+    total = "http_requests_total"
+    assert _v(registry, total, method="GET", status="2xx", handler="/health") == 2
+    assert _v(registry, total, method="GET", status="2xx", handler="/items/{item_id}") == 1
+    assert _v(registry, total, method="GET", status="2xx", handler="/stream") == 1
+    assert _v(registry, "http_request_duration_highr_seconds_count") == 2
+    assert _v(registry, "http_request_duration_highr_seconds_sum") < STREAM_SECONDS / 3
+    assert _v(registry, "http_requests_inprogress", method="GET", handler="/items/{item_id}") == 0
+
+
+async def test_two_served_apps_share_the_series_and_the_gauge(registry):
+    first, second = _app(registry), _app(registry)
+    assert await _get(first, "/items/1") == 200
+    assert await _get(second, "/items/2") == 200
+    assert await _get(first, "/health") == 200
+
+    total = "http_requests_total"
+    assert _v(registry, total, method="GET", status="2xx", handler="/items/{item_id}") == 2
+    assert _v(registry, total, method="GET", status="2xx", handler="/health") == 1
+    assert _v(registry, "http_requests_inprogress", method="GET", handler="/health") == 0
+
+
+def test_series_owned_by_someone_else_fail_loudly(registry):
+    Counter("http_requests_total", "Not ours.", ["method", "status", "handler"], registry=registry)
+    with pytest.raises(RuntimeError, match="unrecorded"):
+        _app(registry)
