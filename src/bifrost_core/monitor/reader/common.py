@@ -24,6 +24,7 @@ from bifrost_core.monitor.reader import strategy_instance as strategy_instance_m
 from bifrost_core.monitor.reader import strategy_win_rate as strategy_win_rate_module
 from bifrost_core.monitor.reader import template_config as template_config_module
 from bifrost_core.portfolio.reader import position_categories as position_categories_module
+from bifrost_core.portfolio.reader import snapshots as snapshots_module
 from bifrost_core.portfolio.reader import instrument_class as instrument_class_module
 from bifrost_core.monitor.reader import settings as settings_module
 from bifrost_core.monitor.reader import status as status_module
@@ -508,6 +509,57 @@ class StatusReader:
         result = get_short_option_legs_for_accounts(self._conn, account_ids)
         self._end_read_txn()
         return result
+
+    # --- Daily book snapshots (TD-138 / TD-139, core 0.54.0): read-only ---
+    def _snapshot_conn(self) -> Any:
+        if not self._connect():
+            raise ReadFailed("the daily snapshot could not be read: database unavailable")
+        return self._conn
+
+    def get_nav_history(
+        self,
+        account_id: Optional[str] = None,
+        from_date: Optional[date] = None,
+        to_date: Optional[date] = None,
+    ) -> Dict[str, Any]:
+        """``snapshots.nav_history``: closing NAV per session and account; raises ReadFailed / ValueError."""
+        conn = self._snapshot_conn()
+        try:
+            return snapshots_module.nav_history(conn, account_id=account_id, from_date=from_date, to_date=to_date)
+        finally:
+            self._end_read_txn()
+
+    def get_position_snapshots(
+        self,
+        from_date: Optional[date] = None,
+        to_date: Optional[date] = None,
+        account_id: Optional[str] = None,
+        trade_id: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """``snapshots.position_snapshots``: positions per session with greeks_quality and a trade rollup."""
+        conn = self._snapshot_conn()
+        try:
+            return snapshots_module.position_snapshots(
+                conn, from_date=from_date, to_date=to_date, account_id=account_id, trade_id=trade_id
+            )
+        finally:
+            self._end_read_txn()
+
+    def get_pnl_attribution(
+        self,
+        from_date: Optional[date] = None,
+        to_date: Optional[date] = None,
+        account_id: Optional[str] = None,
+        trade_id: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """``snapshots.pnl_attribution``: each session against its prior session (Δ Γ vega θ + unexplained)."""
+        conn = self._snapshot_conn()
+        try:
+            return snapshots_module.pnl_attribution(
+                conn, from_date=from_date, to_date=to_date, account_id=account_id, trade_id=trade_id
+            )
+        finally:
+            self._end_read_txn()
 
     # --- Executions / transactions / performance (delegate to executions module) ---
     def get_executions_page(

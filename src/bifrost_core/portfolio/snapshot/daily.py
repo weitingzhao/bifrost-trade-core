@@ -203,6 +203,40 @@ def session_close_at(conn: Any, d: date) -> datetime:
             return cur.fetchone()[0]
 
 
+def session_closes_at(conn: Any, dates: Iterable[date]) -> Dict[date, datetime]:
+    """``session_close_at`` for many dates in one query (the snapshot reader, core 0.54.0).
+
+    Same rule: 16:00 New York, or the NYSE ``early-close`` time in ``market.us_market_holiday``
+    for that date; a calendar that is missing or unreachable falls back to 16:00.
+    """
+    days = sorted(set(dates))
+    if not days:
+        return {}
+    plain = (
+        "SELECT d, (d + time '16:00') AT TIME ZONE 'America/New_York' "
+        "FROM unnest(%s::date[]) AS d"
+    )
+    early = (
+        "SELECT d, COALESCE("
+        "(SELECT min(close_time) FROM market.us_market_holiday "
+        " WHERE holiday_date = d AND upper(exchange) = 'NYSE' AND lower(status) = 'early-close'), "
+        "(d + time '16:00') AT TIME ZONE 'America/New_York') "
+        "FROM unnest(%s::date[]) AS d"
+    )
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT to_regclass('market.us_market_holiday') IS NOT NULL")
+            has_calendar = bool(cur.fetchone()[0])
+            cur.execute(early if has_calendar else plain, (days,))
+            return {d: close for d, close in cur.fetchall()}
+    except Exception as e:  # FDW unreachable: the regular close is right on all but ~3 days a year
+        conn.rollback()
+        logger.warning("early-close lookup failed (%s); using 16:00 New York", e)
+        with conn.cursor() as cur:
+            cur.execute(plain, (days,))
+            return {d: close for d, close in cur.fetchall()}
+
+
 # --------------------------------------------------------------------------- capture
 
 _SELECT_ACCOUNTS = f"""
