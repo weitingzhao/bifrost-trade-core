@@ -38,7 +38,6 @@ quantities are contracts of 100 shares (``OPTION_MULTIPLIER``).
 from __future__ import annotations
 
 import logging
-import math
 from datetime import date, timedelta
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Set, Tuple
 
@@ -48,7 +47,8 @@ from psycopg2.extras import RealDictCursor
 from bifrost_core.monitor.reader.errors import ReadFailed
 from bifrost_core.persistence.postgres.snapshot_ddl import ACCOUNT_NAV_DAILY, POSITION_SNAPSHOT_DAILY
 from bifrost_core.portfolio.quote_freshness import MARK_VENDOR_EOD
-from bifrost_core.portfolio.snapshot.daily import session_closes_at
+# One number and one timestamp rule with the writer: its NaN / inf -> None and isoformat helpers.
+from bifrost_core.portfolio.snapshot.daily import _finite, _iso, session_closes_at
 
 logger = logging.getLogger(__name__)
 
@@ -72,20 +72,6 @@ ATTR_NO_MARK = "no_mark"  # held through, but a mark (or the underlying's close)
 # Session status.
 SESSION_OK = "ok"
 SESSION_NO_PRIOR = "no_prior_snapshot"
-
-
-def _finite(value: Any) -> Optional[float]:
-    if value is None:
-        return None
-    try:
-        f = float(value)
-    except (TypeError, ValueError):
-        return None
-    return f if math.isfinite(f) else None
-
-
-def _iso(value: Any) -> Optional[str]:
-    return value.isoformat() if hasattr(value, "isoformat") else (str(value) if value is not None else None)
 
 
 def _is_option(row: Mapping[str, Any]) -> bool:
