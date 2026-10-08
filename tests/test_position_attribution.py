@@ -26,7 +26,6 @@ def _pos_row(
     # while it was mixing units against real data.
     position_qty=-5,
     avg_cost=300.0,
-    price_mid=2.5,
     price_last=2.5,
     trade_id=None,
     strategy_opportunity_id=None,
@@ -50,7 +49,6 @@ def _pos_row(
         "sec_type": sec_type,
         "position_qty": position_qty,
         "avg_cost": avg_cost,
-        "price_mid": price_mid,
         "price_last": price_last,
         "trade_id": trade_id,
         "strategy_opportunity_id": strategy_opportunity_id,

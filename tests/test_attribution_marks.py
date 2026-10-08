@@ -1,15 +1,15 @@
 """Attribution prices without a live quote (TD-140, core 0.51.0).
 
-Under D10 nothing writes ``contract_quote_live``, so every attribution row had no price and no
-unrealized P&L. Without a fresh live quote a row now takes the newest vendor session close --
-the snapshot's vendor-EOD mark, or a newer plugin daily close for a stock -- labelled
-``vendor_eod`` with its date. A fresh live quote still wins. The nightly snapshot must not take
+Nothing writes ``contract_quote_live`` (TD-240), so the reader no longer joins it (TD-260). A row
+takes the newest vendor session close -- the snapshot's vendor-EOD mark, or a newer plugin daily
+close for a stock -- labelled ``vendor_eod`` with its date. The nightly snapshot must not take
 that fallback as its own mark: capture reads without it, and ``split_rows`` refuses a non-live
 mark whoever the caller is.
 """
 
 from __future__ import annotations
 
+import inspect
 from datetime import date, datetime, timezone
 from typing import Any, Dict, List, Optional
 
@@ -71,9 +71,6 @@ def _row(contract_key: str = OPT, sec_type: str = "OPT", **kw: Any) -> Dict[str,
         "option_right": "P" if sec_type == "OPT" else "",
         "position_qty": -2.0 if sec_type == "OPT" else 100.0,
         "avg_cost": 150.0 if sec_type == "OPT" else 30.0,  # per contract for options, as IB reports it
-        "price_mid": None,
-        "price_last": None,
-        "quote_date": None,
         "trade_id": 7,
         "net_qty_contribution": -2.0 if sec_type == "OPT" else 100.0,
         "exec_count": 1,
@@ -98,7 +95,8 @@ def test_no_live_quote_takes_the_snapshots_vendor_eod_mark():
     rows = [_row()]
     label_marks(conn, rows, stock_closes=_no_plugin)
     out = _build_attribution_rows(rows)[0]
-    assert (out["price_last"], out["price_mid"]) == (1.2, None)  # a close is not a mid
+    assert out["price_last"] == 1.2
+    assert "price_mid" not in out  # a close is not a mid, and nothing serves a live one
     assert (out["mark_source"], out["mark_date"]) == (MARK_VENDOR_EOD, "2031-10-06")
     assert out["unrealized_pnl_est"] == pytest.approx((1.2 - 1.5) * -2 * 100)
     sql, params = conn.queries[0]
@@ -106,14 +104,16 @@ def test_no_live_quote_takes_the_snapshots_vendor_eod_mark():
     assert "position_snapshot_daily" in sql and params == ([OPT], list(MARK_EOD_SOURCES))
 
 
-def test_a_fresh_live_quote_wins_and_reads_nothing_else():
-    conn = _Conn(snapshot=[(OPT, 1.2, date(2031, 10, 6))])
-    rows = [_row(price_mid=0.9, price_last=0.95, quote_date=date(2031, 10, 7))]
-    label_marks(conn, rows, stock_closes=_no_plugin)
-    out = _build_attribution_rows(rows)[0]
-    assert (out["price_last"], out["price_mid"]) == (0.95, 0.9)
-    assert (out["mark_source"], out["mark_date"]) == (MARK_QUOTE_LIVE, "2031-10-07")
-    assert conn.queries == []
+def test_the_reader_does_not_join_contract_quote_live():
+    """TD-260: the table has no writer; a join could only ever serve March rows or nothing."""
+    src = inspect.getsource(executions.get_position_instance_attribution)
+    assert "CONTRACT_QUOTE_LIVE" not in src and "fresh_quote_sql" not in src
+
+
+def test_a_price_on_the_sql_row_is_not_taken_as_live():
+    rows = [_row(price_last=0.95)]
+    label_marks(_Conn(), rows, stock_closes=_no_plugin)
+    assert (rows[0]["price_last"], rows[0]["mark_source"]) == (None, None)
 
 
 def test_a_stock_takes_the_newer_of_snapshot_and_plugin_close():
@@ -163,10 +163,10 @@ def test_unreadable_sources_leave_the_row_unpriced_not_the_read_failed():
 
 def test_fallback_off_reads_neither_source():
     conn = _Conn(snapshot=[(OPT, 1.2, date(2031, 10, 6))])
-    rows = [_row(), _row(STK, "STK"), _row("ZZR|STK|||", "STK", price_last=12.0, quote_date=date(2031, 10, 7))]
+    rows = [_row(), _row(STK, "STK")]
     label_marks(conn, rows, fallback=False, stock_closes=_no_plugin)
     assert conn.queries == []
-    assert [(r["price_last"], r["mark_source"]) for r in rows] == [(None, None), (None, None), (12.0, MARK_QUOTE_LIVE)]
+    assert [(r["price_last"], r["mark_source"]) for r in rows] == [(None, None), (None, None)]
 
 
 # --------------------------------------------------------------------------- the snapshot guard

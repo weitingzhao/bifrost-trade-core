@@ -230,9 +230,9 @@ def test_option_stock_link_slippage_is_unchanged(pg_conn: Any, book: Dict[str, A
     }
 
 
-def test_attribution_prices_from_a_live_quote_else_the_vendor_eod_mark(pg_conn: Any, book: Dict[str, Any]) -> None:
-    """TD-140 on the real SQL: a fresh live quote wins; without one the snapshot's newest vendor-EOD
-    mark prices the row (labelled, dated); a stale live row is no quote; capture's read takes none."""
+def test_attribution_prices_from_the_vendor_eod_mark_never_contract_quote_live(pg_conn: Any, book: Dict[str, Any]) -> None:
+    """TD-140 / TD-260 on the real SQL: the snapshot's newest vendor-EOD mark prices the row (labelled,
+    dated); a contract_quote_live row, fresh or stale, is not read; capture's read takes no mark."""
     with pg_conn.cursor() as cur:
         cur.execute(
             "INSERT INTO raw_broker.contract_quote_live (contract_key, symbol, sec_type, last, mid, updated_at) "
@@ -249,13 +249,14 @@ def test_attribution_prices_from_a_live_quote_else_the_vendor_eod_mark(pg_conn: 
     rows = executions_reader.get_position_instance_attribution(
         pg_conn, account_id=ACCOUNT, stock_closes=lambda symbols: {}
     )
-    marks = {(r["contract_key"], r["price_last"], r["price_mid"], r["mark_source"]) for r in rows}
-    assert marks == {("TDQA|STK|||", 51.0, 50.9, "quote_live"), ("TDQB|STK|||", 21.5, None, "vendor_eod")}
+    marks = {(r["contract_key"], r["price_last"], r["mark_source"]) for r in rows}
+    assert marks == {("TDQA|STK|||", 48.0, "vendor_eod"), ("TDQB|STK|||", 21.5, "vendor_eod")}
+    assert all("price_mid" not in r for r in rows)
     assert {r["mark_date"] for r in rows if r["contract_key"] == "TDQB|STK|||"} == {"2026-10-02"}
     tdqb_11 = next(r for r in rows if r["contract_key"] == "TDQB|STK|||" and r["trade_id"] == 11)
     assert tdqb_11["unrealized_pnl_est"] == pytest.approx((21.5 - 10.0) * 25)
 
     live_only = executions_reader.get_position_instance_attribution(pg_conn, account_id=ACCOUNT, fallback_marks=False)
     assert {(r["contract_key"], r["price_last"], r["mark_source"]) for r in live_only} == {
-        ("TDQA|STK|||", 51.0, "quote_live"), ("TDQB|STK|||", None, None)
+        ("TDQA|STK|||", None, None), ("TDQB|STK|||", None, None)
     }

@@ -155,7 +155,7 @@ def test_attribution_reads_the_newest_vendor_eod_mark_and_capture_does_not_keep_
     def reader_with_fallback(c):
         rows = [{"account_id": "UZZ0001", "contract_key": key, "symbol": "ZZZ", "sec_type": "OPT",
                  "expiry": "20261120", "strike": 50.0, "option_right": "P", "position_qty": -3.0,
-                 "avg_cost": 120.0, "price_last": None, "price_mid": None, "quote_date": None,
+                 "avg_cost": 120.0,
                  "trade_id": 7, "open_qty_est": -3.0}]
         label_marks(c, rows, stock_closes=lambda s: {})
         assert (rows[0]["price_last"], rows[0]["mark_source"]) == (1.2, "vendor_eod")

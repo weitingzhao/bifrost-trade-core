@@ -2,13 +2,11 @@
 
 from __future__ import annotations
 
-import time
 from typing import Any, Dict, List, Optional, Tuple
 
 import pytest
 
 import bifrost_core.monitor.reader.market as market_module
-from bifrost_core.portfolio.quote_freshness import LIVE_QUOTE_MAX_AGE_SEC
 from bifrost_core.portfolio.services.short_legs import get_short_option_legs
 
 # Invented closes (fixtures are never copied from DEV).
@@ -63,53 +61,31 @@ def _row(**over: Any) -> Dict[str, Any]:
         "option_right": "c",
         "qty": -2,
         "contract_key": "NVDA_20261120_180_C",
-        "stk_mid": 172.15,
-        "stk_last": 172.0,
-        "stk_updated_at": time.time() - 60,
     }
     base.update(over)
     return base
 
 
-def test_normalises_symbol_and_right_and_prefers_mid_over_last() -> None:
+def test_normalises_symbol_and_right() -> None:
     legs = get_short_option_legs(_FakeConn([_row()]))
     assert len(legs) == 1
     leg = legs[0]
     assert leg["symbol"] == "NVDA"
     assert leg["right"] == "C"
     assert leg["qty"] == -2
-    # Mid first, then last -- the same preference the model analysis uses.
-    assert leg["spot"] == 172.15
 
 
-def test_falls_back_to_last_and_reports_no_spot_as_null() -> None:
-    assert get_short_option_legs(_FakeConn([_row(stk_mid=None)]))[0]["spot"] == 172.0
-    # A name with no live quote and no close either. Null, never a guess:
-    # the caller counts it as unpriced rather than as safe.
-    unpriced = _row(symbol="zzzz", stk_mid=None, stk_last=None, stk_updated_at=None)
-    leg = get_short_option_legs(_FakeConn([unpriced]))[0]
+def test_spot_is_the_last_close_and_no_close_is_null() -> None:
+    """TD-260: contract_quote_live has no writer, so the read never takes a live quote from it."""
+    leg = get_short_option_legs(_FakeConn([_row()]))[0]
+    assert (leg["spot"], leg["spot_source"], leg["spot_as_of"]) == (171.5, "close", 1_790_000_000.0)
+    # A name with no close. Null, never a guess: the caller counts it as unpriced rather than as safe.
+    leg = get_short_option_legs(_FakeConn([_row(symbol="zzzz")]))[0]
     assert (leg["spot"], leg["spot_source"], leg["spot_as_of"]) == (None, None, None)
 
 
-def test_a_fresh_quote_is_live() -> None:
-    leg = get_short_option_legs(_FakeConn([_row()]))[0]
-    assert leg["spot_source"] == "live"
-    assert leg["spot_as_of"] is not None
-
-
-def test_a_stale_quote_is_not_a_price_the_last_close_is(_plugin_closes: List[str]) -> None:
-    """TD-02: under D10 the daemon writes no quotes, and March rows were served as today's spot."""
-    stale = _row(stk_updated_at=time.time() - LIVE_QUOTE_MAX_AGE_SEC - 60)
-    leg = get_short_option_legs(_FakeConn([stale]))[0]
-    assert (leg["spot"], leg["spot_source"], leg["spot_as_of"]) == (171.5, "close", 1_790_000_000.0)
-    # A quote with no timestamp is not fresh either, and no quote at all also falls back.
-    assert get_short_option_legs(_FakeConn([_row(stk_updated_at=None)]))[0]["spot_source"] == "close"
-    assert get_short_option_legs(_FakeConn([_row(stk_mid=None, stk_last=None, stk_updated_at=None)]))[0]["spot"] == 171.5
-
-
 def test_the_close_is_read_once_per_symbol(_plugin_closes: List[str]) -> None:
-    old = time.time() - LIVE_QUOTE_MAX_AGE_SEC - 60
-    rows = [_row(strike=180.0, stk_updated_at=old), _row(strike=200.0, stk_updated_at=old)]
+    rows = [_row(strike=180.0), _row(strike=200.0)]
     legs = get_short_option_legs(_FakeConn(rows))
     assert [leg["spot"] for leg in legs] == [171.5, 171.5]
     assert _plugin_closes == ["NVDA"]
@@ -130,7 +106,7 @@ def test_the_query_asks_only_for_short_option_legs() -> None:
     sql = conn.cur.executed[0][0]
     assert "p.sec_type = 'OPT'" in sql
     assert "p.position < 0" in sql
-    assert "q.sec_type = 'STK'" in sql
+    assert "contract_quote_live" not in sql
 
 
 def test_returns_no_cushion_and_no_verdict() -> None:

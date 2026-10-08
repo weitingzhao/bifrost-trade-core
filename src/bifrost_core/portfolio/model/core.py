@@ -60,8 +60,9 @@ def _fetch_positions(conn: Any, account_id: str) -> List[Dict[str, Any]]:
                 cq.mid  AS price_mid,
                 cq.last AS price_last
             FROM {POSITIONS} ap
-            -- Only quotes inside the live window: under D10 the daemon writes none and
-            -- the table's old rows were being modelled as today's prices (TD-02).
+            -- Only quotes inside the live window: the table has no writer (TD-240) and
+            -- its old rows were being modelled as today's prices (TD-02). Option legs
+            -- therefore carry no mid and their Greeks read degraded (TD-260).
             LEFT JOIN {CONTRACT_QUOTE_LIVE} cq
                 ON ap.contract_key = cq.contract_key AND {fresh_quote_sql('cq')}
             WHERE ap.account_id = %s

@@ -16,7 +16,6 @@ from bifrost_core.portfolio.quote_freshness import (
     quote_is_fresh,
     underlying_spot,
 )
-from bifrost_core.portfolio.reader.accounts_helpers import STK_LIVE_STALE_SEC
 
 # Invented close (fixtures are never copied from DEV).
 _CLOSE = (171.5, 1_790_000_000.0, 170.0)
@@ -32,11 +31,6 @@ def closes(monkeypatch: pytest.MonkeyPatch) -> List[str]:
 
     monkeypatch.setattr(market_module, "get_stock_day_fallback_price", fake)
     return asked
-
-
-def test_one_threshold_for_every_reader() -> None:
-    # The Positions page's STK gate and this rule are the same number.
-    assert STK_LIVE_STALE_SEC == LIVE_QUOTE_MAX_AGE_SEC
 
 
 def test_freshness_by_age_and_no_timestamp_is_stale() -> None:

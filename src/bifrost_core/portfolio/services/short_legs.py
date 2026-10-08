@@ -22,7 +22,7 @@ from typing import Any, Dict, List, Optional, Sequence
 
 from psycopg2.extras import RealDictCursor
 
-from bifrost_core.persistence.postgres.brokerage_tables import CONTRACT_QUOTE_LIVE, POSITIONS
+from bifrost_core.persistence.postgres.brokerage_tables import POSITIONS
 from bifrost_core.portfolio.quote_freshness import underlying_spot
 
 logger = logging.getLogger(__name__)
@@ -36,18 +36,8 @@ _SQL = f"""
         p.strike,
         p.option_right,
         p.position AS qty,
-        p.contract_key,
-        stk.mid  AS stk_mid,
-        stk.last AS stk_last,
-        stk.updated_at AS stk_updated_at
+        p.contract_key
     FROM {POSITIONS} p
-    LEFT JOIN LATERAL (
-        SELECT q.mid, q.last, q.updated_at
-        FROM {CONTRACT_QUOTE_LIVE} q
-        WHERE q.symbol = p.symbol AND q.sec_type = 'STK'
-        ORDER BY q.updated_at DESC NULLS LAST
-        LIMIT 1
-    ) stk ON TRUE
     WHERE p.sec_type = 'OPT'
       AND p.position < 0
       AND (%(accounts)s::text[] IS NULL OR p.account_id = ANY(%(accounts)s::text[]))
@@ -61,12 +51,10 @@ def get_short_option_legs(
 ) -> List[Dict[str, Any]]:
     """Every short option leg, with the price its underlying is measured against.
 
-    `spot` is the underlying's live quote when one was written within the live
-    window, else its last daily close (`spot_source` says which, `spot_as_of`
-    when). It is null only when neither exists; the caller counts that as
-    unpriced, never as safe. A live row older than the window is not used:
-    under D10 the daemon writes none, and the table's March rows were being
-    served as today's spot (debt TD-02).
+    `spot` is the underlying's last daily close (`spot_source` ``"close"``,
+    `spot_as_of` the bar). It is null only when there is none; the caller counts
+    that as unpriced, never as safe. No live quote is read here: the browser
+    overlays GET /quotes, and contract_quote_live has no writer (TD-260).
     """
     accounts = list(account_ids) if account_ids else None
     with conn.cursor(cursor_factory=RealDictCursor) as cur:
@@ -76,14 +64,7 @@ def get_short_option_legs(
     legs: List[Dict[str, Any]] = []
     closes: Dict[str, Any] = {}
     for r in rows:
-        spot, source, as_of = underlying_spot(
-            conn,
-            r.get("symbol") or "",
-            mid=r.get("stk_mid"),
-            last=r.get("stk_last"),
-            updated_at=r.get("stk_updated_at"),
-            close_cache=closes,
-        )
+        spot, source, as_of = underlying_spot(conn, r.get("symbol") or "", close_cache=closes)
         legs.append(
             {
                 "account_id": r.get("account_id"),

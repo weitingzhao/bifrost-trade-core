@@ -8,7 +8,6 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from bifrost_core.persistence.postgres.brokerage_tables import ACCOUNT
 from bifrost_core.portfolio.contract_key import read_fallback_opt_key
-from bifrost_core.portfolio.quote_freshness import LIVE_QUOTE_MAX_AGE_SEC
 
 logger = logging.getLogger(__name__)
 
@@ -445,11 +444,6 @@ def _rows_to_executions(rows: Any, cur: Any) -> List[Dict[str, Any]]:
     return out
 
 
-# STK: if contract_quote_live is older than this (sec) or has no NBBO, prefer stock_day close for Last/price.
-# One threshold for every reader of contract_quote_live (portfolio/quote_freshness.py).
-STK_LIVE_STALE_SEC = LIVE_QUOTE_MAX_AGE_SEC
-
-
 def resolve_daily_prev_close_from_fallback(
     close: float,
     bar_time_epoch: float,
@@ -487,24 +481,3 @@ def resolve_daily_prev_close_from_fallback(
         return c
     return None
 
-
-def stk_contract_quote_stale_for_positions(p: Dict[str, Any]) -> bool:
-    """True when NBBO or heartbeat suggests IB live should not drive STK display price."""
-    bid = p.get("price_bid")
-    ask = p.get("price_ask")
-    if bid is None and ask is None:
-        return True
-    pu = p.get("price_updated_at")
-    if pu is None:
-        return True
-    try:
-        if hasattr(pu, "timestamp"):
-            ts = float(pu.timestamp())
-        elif isinstance(pu, (int, float)) and math.isfinite(float(pu)):
-            ts = float(pu)
-        else:
-            return True
-    except (TypeError, ValueError, OSError):
-        return True
-    age = datetime.now(timezone.utc).timestamp() - ts
-    return age > STK_LIVE_STALE_SEC

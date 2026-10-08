@@ -10,13 +10,12 @@ from psycopg2.extras import RealDictCursor
 
 from bifrost_core.portfolio.contract_key import osi_local_symbol
 from bifrost_core.portfolio.reader import keyset
-from bifrost_core.portfolio.quote_freshness import MARK_EOD_SOURCES, MARK_QUOTE_LIVE, MARK_VENDOR_EOD, fresh_quote_sql
+from bifrost_core.portfolio.quote_freshness import MARK_EOD_SOURCES, MARK_VENDOR_EOD
 from bifrost_core.portfolio.signed_qty import signed_qty_sql
 
 from bifrost_core.portfolio.units import option_cost_per_share, position_value
 from bifrost_core.persistence.postgres.brokerage_tables import (
     COMMISSIONS,
-    CONTRACT_QUOTE_LIVE,
     EXECUTIONS,
     EXECUTIONS_FINAL,
     EXECUTIONS_FLY,
@@ -1560,14 +1559,13 @@ def get_position_instance_attribution(
     open_qty_est. All instances with non-zero contribution appear under the
     instance (no same-sign filter that dropped rows).
 
-    Prices (TD-140, core 0.51.0): a fresh ``contract_quote_live`` row gives ``price_mid`` /
-    ``price_last`` with ``mark_source`` ``quote_live``. Without one -- under D10 the daemon that
-    writes that table does not run -- and with ``fallback_marks``, ``price_last`` is the newest
-    vendor session close: the contract's latest ``position_snapshot_daily`` vendor-EOD mark, or
-    for a stock the market-data plugin's daily close when that bar is newer
-    (``stock_closes(symbols)``, default ``/stocks/db/bars/benchmark``); ``mark_source``
-    ``vendor_eod``. ``mark_date`` is the New York date the price belongs to. ``price_mid`` stays a
-    live mid only. The nightly snapshot capture reads with ``fallback_marks=False``.
+    Prices (TD-140, core 0.51.0; TD-260): no live quote is read here -- the browser overlays
+    GET /quotes, and ``contract_quote_live`` has no writer. With ``fallback_marks``,
+    ``price_last`` is the newest vendor session close: the contract's latest
+    ``position_snapshot_daily`` vendor-EOD mark, or for a stock the market-data plugin's daily
+    close when that bar is newer (``stock_closes(symbols)``, default ``/stocks/db/bars/benchmark``);
+    ``mark_source`` ``vendor_eod``, ``mark_date`` the session it belongs to. Without
+    ``fallback_marks`` (the nightly snapshot capture) ``price_last`` and ``mark_source`` are None.
     """
     if conn is None:
         return []
@@ -1585,12 +1583,8 @@ def get_position_instance_attribution(
         sql = f"""
         WITH pos AS (
             SELECT ap.account_id, ap.contract_key, ap.symbol, ap.sec_type,
-                   ap.position, ap.avg_cost, ap.expiry, ap.strike, ap.option_right,
-                   cql.mid AS price_mid, cql.last AS price_last,
-                   (cql.updated_at AT TIME ZONE 'America/New_York')::date AS quote_date
+                   ap.position, ap.avg_cost, ap.expiry, ap.strike, ap.option_right
             FROM {POSITIONS} ap
-            LEFT JOIN {CONTRACT_QUOTE_LIVE} cql
-                ON ap.contract_key = cql.contract_key AND {fresh_quote_sql('cql')}
             WHERE {pos_where}
         ),
         pos_has_final AS (
@@ -1666,7 +1660,6 @@ def get_position_instance_attribution(
         SELECT
             p.account_id, p.contract_key, p.symbol, p.sec_type,
             p.position AS position_qty, p.avg_cost, p.expiry, p.strike, p.option_right,
-            p.price_mid, p.price_last, p.quote_date,
             eg.trade_id,
             eg.strategy_opportunity_id,
             si.label AS trade_label,
@@ -1707,16 +1700,6 @@ def _positive_price(*values: Any) -> Optional[float]:
         if math.isfinite(f) and f > 0:
             return f
     return None
-
-
-def _iso_date(value: Any) -> Optional[str]:
-    if value is None:
-        return None
-    if isinstance(value, datetime):
-        return value.date().isoformat()
-    if isinstance(value, date):
-        return value.isoformat()
-    return str(value)[:10] or None
 
 
 def _vendor_eod_snapshot_marks(conn: Any, contract_keys: List[str]) -> Dict[str, Tuple[float, date]]:
@@ -1788,28 +1771,24 @@ def label_marks(
     fallback: bool = True,
     stock_closes: Optional[Callable[[List[str]], Mapping[str, Mapping[str, Any]]]] = None,
 ) -> None:
-    """Set ``mark_source`` / ``mark_date`` on the attribution SQL rows, in place (TD-140).
+    """Set ``price_last`` / ``mark_source`` / ``mark_date`` on the attribution SQL rows, in place (TD-140).
 
-    A positive live ``price_last`` / ``price_mid`` (the SQL joins fresh quotes only) is
-    ``quote_live``. Otherwise, with ``fallback``, ``price_last`` takes the newest vendor
-    session close (see ``get_position_instance_attribution``) labelled ``vendor_eod`` -- also
-    when the snapshot's mark for that session is enrich's ``vendor_iv_model`` / ``intrinsic_floor``
-    (TD-246): this label says end of day of ``mark_date`` as against live, and the frontend
-    annotates exactly ``vendor_eod``; the snapshot rows keep the precise source.
-    A row nothing prices keeps ``mark_source`` None.
+    With ``fallback``, ``price_last`` takes the newest vendor session close (see
+    ``get_position_instance_attribution``) labelled ``vendor_eod`` -- also when the snapshot's
+    mark for that session is enrich's ``vendor_iv_model`` / ``intrinsic_floor`` (TD-246): this
+    label says end of day of ``mark_date`` as against live, and the frontend annotates exactly
+    ``vendor_eod``; the snapshot rows keep the precise source.
+    A row nothing prices keeps ``price_last`` and ``mark_source`` None.
     """
-    missing: Dict[str, Tuple[str, str]] = {}  # contract_key -> (sec_type, symbol), rows without a live price
+    missing: Dict[str, Tuple[str, str]] = {}  # contract_key -> (sec_type, symbol)
     for r in rows:
+        r["price_last"] = None
         r["mark_source"] = None
         r["mark_date"] = None
-        if _positive_price(r.get("price_last"), r.get("price_mid")) is not None:
-            r["mark_source"] = MARK_QUOTE_LIVE
-            r["mark_date"] = _iso_date(r.get("quote_date"))
-        elif fallback:
+        if fallback:
             key = (r.get("contract_key") or "").strip()
             if key:
                 missing[key] = ((r.get("sec_type") or "").strip().upper(), (r.get("symbol") or "").strip().upper())
-        r.pop("quote_date", None)
     if not missing:
         return
 
@@ -1858,16 +1837,7 @@ def _build_attribution_rows(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         avg_cost = meta.get("avg_cost")
         sec_type = (meta.get("sec_type") or "").strip().upper()
 
-        price_for_pnl: Optional[float] = None
-        for candidate in (meta.get("price_last"), meta.get("price_mid")):
-            if candidate is not None:
-                try:
-                    v = float(candidate)
-                    if math.isfinite(v) and v > 0:
-                        price_for_pnl = v
-                        break
-                except (TypeError, ValueError):
-                    pass
+        price_for_pnl = _positive_price(meta.get("price_last"))
 
         total_unrealized: Optional[float] = None
         if price_for_pnl is not None and pos_qty != 0:
@@ -1989,7 +1959,6 @@ def _make_attribution_row(
         "option_right": (meta.get("option_right") or "").strip(),
         "position_qty": position_qty,
         "avg_cost": meta.get("avg_cost"),
-        "price_mid": meta.get("price_mid"),
         "price_last": meta.get("price_last"),
         "mark_source": meta.get("mark_source"),
         "mark_date": meta.get("mark_date"),

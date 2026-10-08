@@ -5,7 +5,7 @@ import json
 import logging
 import math
 import uuid
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 import psycopg2
@@ -16,7 +16,6 @@ from bifrost_core.persistence.postgres.commissions import stored_commission, ups
 from bifrost_core.portfolio.units import option_cost_per_share, position_value
 from bifrost_core.persistence.postgres.brokerage_tables import (
     ACCOUNT,
-    CONTRACT_QUOTE_LIVE,
     EXECUTIONS,
     EXECUTIONS_RAW_FLEX,
     EXECUTIONS_RAW_JOURNAL,
@@ -41,7 +40,6 @@ from bifrost_core.portfolio.reader.accounts_helpers import (
     _exec_time_to_dt,
     _has_meaningful_commission,
     resolve_daily_prev_close_from_fallback,
-    stk_contract_quote_stale_for_positions,
 )
 
 logger = logging.getLogger(__name__)
@@ -428,18 +426,11 @@ def get_accounts_from_tables(
                         ap.strike,
                         ap.option_right,
                         ap.contract_key,
-                        ip.bid AS price_bid,
-                        ip.ask AS price_ask,
-                        ip.mid AS price_mid,
-                        ip.last AS price_last,
-                        ip.updated_at AS price_updated_at,
                         pct.category_id AS position_category_id,
                         pc.name AS position_category_name,
                         {ic_col},
                         w.optionable AS watchlist_optionable
                     FROM {POSITIONS} ap
-                    LEFT JOIN {CONTRACT_QUOTE_LIVE} ip
-                        ON ap.contract_key = ip.contract_key
                     LEFT JOIN preference_position_category_tags pct
                         ON ap.account_id = pct.account_id AND ap.contract_key = pct.contract_key
                     LEFT JOIN preference_position_categories pc
@@ -523,94 +514,23 @@ def get_accounts_from_tables(
                     except (TypeError, ValueError):
                         pass
 
-                raw_mid = p.get("price_mid")
-                raw_last = p.get("price_last")
+                # A stock's price is its last daily close from the market-data plugin, dated by
+                # the bar. Live ticks are GET /quotes (Redis), which the pages overlay;
+                # contract_quote_live has no writer (TD-260). An option, and a stock on the
+                # light path or without a bar, carries no price and no unrealized_pnl --
+                # absent, never 0.
                 sec_typ = (p.get("sec_type") or "").strip().upper()
-
-                def _live_mid_or_last() -> Optional[float]:
-                    for candidate in (raw_mid, raw_last):
-                        if candidate is None:
-                            continue
-                        try:
-                            v = float(candidate)
-                        except (TypeError, ValueError):
-                            continue
-                        if not math.isfinite(v) or v <= 0:
-                            continue
-                        return v
-                    return None
-
-                from_live = _live_mid_or_last()
-                price_val: Optional[float] = None
-                used_stock_day_price = False
-
-                if sec_typ == "STK":
-                    if light:
-                        price_val = from_live
-                    else:
-                        stale = stk_contract_quote_stale_for_positions(p)
-                        fb = market_module.get_stock_day_fallback_price(conn, p.get("symbol") or "")
-                        if from_live is not None and not stale:
-                            price_val = from_live
-                        elif fb is not None:
-                            price_val = fb[0]
-                            used_stock_day_price = True
-                            pos_dict["price_updated_at"] = fb[1]
-                            # Latest bar today → prev_close is yesterday; otherwise bar close is yesterday.
-                            dpc = resolve_daily_prev_close_from_fallback(fb[0], fb[1], fb[2])
-                            if dpc is not None:
-                                pos_dict["daily_prev_close"] = dpc
-                        elif from_live is not None:
-                            price_val = from_live
-                else:
-                    price_val = from_live
-
-                if price_val is not None:
-                    pos_dict["price"] = price_val
-
-                raw_updated = next(
-                    (p[k] for k in p if k and k.lower() == "price_updated_at"),
-                    p.get("price_updated_at"),
-                )
-                if not used_stock_day_price and raw_updated is not None:
-                    try:
-                        if hasattr(raw_updated, "timestamp"):
-                            pos_dict["price_updated_at"] = raw_updated.timestamp()
-                        elif isinstance(raw_updated, (int, float)) and math.isfinite(float(raw_updated)):
-                            pos_dict["price_updated_at"] = float(raw_updated)
-                        elif isinstance(raw_updated, str) and raw_updated.strip():
-                            s = raw_updated.strip()
-                            parts = s.rsplit(" ", 1)
-                            if len(parts) == 2 and len(parts[1]) == 5 and parts[1][0] in "+-" and parts[1][1:].isdigit():
-                                dt_naive = datetime.strptime(parts[0], "%Y-%m-%d %H:%M:%S.%f")
-                                sign = -1 if parts[1][0] == "-" else 1
-                                hours = sign * int(parts[1][1:3])
-                                mins = sign * int(parts[1][3:5])
-                                dt = dt_naive.replace(tzinfo=timezone(timedelta(hours=hours, minutes=mins)))
-                                pos_dict["price_updated_at"] = dt.timestamp()
-                            else:
-                                dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
-                                pos_dict["price_updated_at"] = dt.timestamp()
-                    except (TypeError, ValueError, OSError):
-                        pass
-
                 price_for_pnl: Optional[float] = None
-                if used_stock_day_price:
-                    price_for_pnl = price_val
-                else:
-                    for candidate in (raw_last, raw_mid):
-                        if candidate is None:
-                            continue
-                        try:
-                            v = float(candidate)
-                        except (TypeError, ValueError):
-                            continue
-                        if not math.isfinite(v) or v <= 0:
-                            continue
-                        price_for_pnl = v
-                        break
-                    if price_for_pnl is None and price_val is not None:
-                        price_for_pnl = price_val
+                if sec_typ == "STK" and not light:
+                    fb = market_module.get_stock_day_fallback_price(conn, p.get("symbol") or "")
+                    if fb is not None:
+                        price_for_pnl = fb[0]
+                        pos_dict["price"] = fb[0]
+                        pos_dict["price_updated_at"] = fb[1]
+                        # Latest bar today → prev_close is yesterday; otherwise bar close is yesterday.
+                        dpc = resolve_daily_prev_close_from_fallback(fb[0], fb[1], fb[2])
+                        if dpc is not None:
+                            pos_dict["daily_prev_close"] = dpc
                 pos_qty = p.get("position")
                 pos_avg = p.get("avg_cost")
                 sec_type = (p.get("sec_type") or "").strip().upper()

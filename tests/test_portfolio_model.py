@@ -265,6 +265,13 @@ class TestGreeks:
         assert g["delta"] is None
         assert g["degraded"] is True
 
+    def test_a_leg_with_no_option_quote_has_no_delta_rather_than_zero(self):
+        """TD-260: no writer feeds contract_quote_live, so every option leg arrives with no mid."""
+        leg = RiskPosition(strike=100, right="C", qty=-1, avg_cost=5.0, expiry=date.today() + timedelta(days=30))
+        g = _compute_greeks_for_group([leg], 100, 50.0, None, {})
+        assert g["per_leg"][0]["delta"] is None
+        assert (g["degraded"], g["degraded_leg_count"]) == (True, 1)
+
 
 class TestOptionCostBasisLoading:
     """The per-contract / per-share boundary, pinned.
