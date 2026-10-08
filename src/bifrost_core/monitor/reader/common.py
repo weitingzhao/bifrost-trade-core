@@ -176,14 +176,6 @@ class StatusReader:
         self._end_read_txn()
         return result
 
-    def get_contract_quotes(self, contract_keys: List[str]) -> List[Dict[str, Any]]:
-        """Return bid/ask/last/mid from contract_quote_live for given contract_keys. Used by GET /quotes for OPT rows."""
-        if not self._connect():
-            return []
-        result = market_module.get_contract_quotes_conn(self._conn, contract_keys)
-        self._end_read_txn()
-        return result
-
     def get_bars(
         self,
         symbol: Optional[str] = None,

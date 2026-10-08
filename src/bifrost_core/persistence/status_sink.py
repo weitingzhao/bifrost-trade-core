@@ -54,11 +54,6 @@ class StatusSink(ABC):
         """No-op: daemon_auto_operations retired (Wave 1). Kept for call-site compatibility."""
         return
 
-    # 可选：按合约写入 contract_quote_live（R-M6，多标的按 contract_key 逐标的拉价 + 写库）
-    # 默认实现为空，具体 sink（如 TradingDaemonSink）可选择性实现。
-    def write_contract_quote_live(self, rows: Any) -> None:  # rows: Iterable[Dict[str, Any]]
-        return
-
     # 可选：写入账户执行/成交记录（R-A2）。默认实现为空。
     def write_account_executions(self, rows: Any) -> None:  # rows: Iterable[Dict[str, Any]]
         return

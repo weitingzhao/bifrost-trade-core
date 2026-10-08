@@ -5,7 +5,6 @@ path is unchanged.
 """
 
 import logging
-import math
 import time
 from typing import Any, Dict, List, Optional
 
@@ -26,8 +25,6 @@ from bifrost_core.persistence.postgres.accounts_sync import (
     sync_accounts_snapshot_to_tables,
 )
 from bifrost_core.persistence.postgres.brokerage_tables import (
-    CONTRACT_QUOTE_LIVE,
-    GOLDEN_CONTRACT_QUOTE_LIVE,
     GOLDEN_EXECUTIONS_RAW_TWS,
     GOLDEN_OPEN_ORDERS,
 )
@@ -211,82 +208,6 @@ class TradingDaemonSink(StatusSink):
     def write_operation(self, record: Dict[str, Any]) -> None:
         """No-op: daemon_auto_operations retired (Wave 1)."""
         return
-
-    def write_contract_quote_live(self, rows):
-        """R-M6: 写入 brokerage.contract_quote_live（按 contract_key upsert）。rows: Iterable[Dict]。
-        过滤 NaN/Null：价格字段若为 NaN、inf 或空则写入 NULL，不污染数据库。若整行无有效价格则跳过该行。"""
-        if not rows:
-            return
-        if not self._ensure_golden_conn():
-            return
-        logger.info("[R-M6] write_contract_quote_live: %s rows received", len(rows))
-
-        def _sanitize(v):
-            if v is None:
-                return None
-            try:
-                f = float(v)
-                return f if math.isfinite(f) else None
-            except (TypeError, ValueError):
-                return None
-
-        try:
-            with self._golden_conn.cursor() as cur:
-                for r in rows:
-                    contract_key = r.get("contract_key")
-                    if not contract_key:
-                        logger.warning(
-                            "[R-M6] write_contract_quote_live: missing contract_key in row: %s",
-                            r,
-                        )
-                        continue
-                    last = _sanitize(r.get("last"))
-                    bid = _sanitize(r.get("bid"))
-                    ask = _sanitize(r.get("ask"))
-                    mid = _sanitize(r.get("mid"))
-                    if last is None and bid is None and ask is None and mid is None:
-                        logger.debug(
-                            "[R-M6] write_contract_quote_live: skip row (all price fields NaN/Null): %s",
-                            contract_key,
-                        )
-                        continue
-                    cur.execute(
-                        f"""
-                        INSERT INTO {GOLDEN_CONTRACT_QUOTE_LIVE} (
-                            contract_key, symbol, sec_type, expiry, strike, option_right,
-                            last, bid, ask, mid, updated_at
-                        )
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, now())
-                        ON CONFLICT (contract_key) DO UPDATE SET
-                            symbol = EXCLUDED.symbol,
-                            sec_type = EXCLUDED.sec_type,
-                            expiry = EXCLUDED.expiry,
-                            strike = EXCLUDED.strike,
-                            option_right = EXCLUDED.option_right,
-                            last = EXCLUDED.last,
-                            bid = EXCLUDED.bid,
-                            ask = EXCLUDED.ask,
-                            mid = EXCLUDED.mid,
-                            updated_at = now()
-                        """,
-                        (
-                            contract_key,
-                            r.get("symbol"),
-                            r.get("sec_type"),
-                            r.get("expiry"),
-                            r.get("strike"),
-                            r.get("option_right"),
-                            last,
-                            bid,
-                            ask,
-                            mid,
-                        ),
-                    )
-            self._golden_conn.commit()
-            logger.info("[R-M6] write_contract_quote_live: commit ok")
-        except Exception as e:
-            self._golden_conn.rollback()
-            _log_write_failure("write_contract_quote_live", e)
 
     def write_account_executions(self, rows: Any) -> None:
         """R-A2: write executions to brokerage.executions_raw_tws; commissions to brokerage.commissions."""
@@ -668,47 +589,6 @@ class TradingDaemonSink(StatusSink):
             self._conn.rollback()
             logger.debug("get_ib_connection_config failed: %s", e)
             return None
-
-    def get_contract_quotes(self, contract_keys: List[str]) -> List[Dict[str, Any]]:
-        """Return bid/ask/last/mid from brokerage.contract_quote_live (via per-env FDW) for given contract_keys."""
-        if not contract_keys or not self._ensure_conn():
-            return []
-        keys = [k for k in contract_keys if k and str(k).strip()]
-        if not keys:
-            return []
-        try:
-            with self._conn.cursor() as cur:
-                placeholders = ", ".join("%s" for _ in keys)
-                cur.execute(
-                    f"""
-                    SELECT contract_key, symbol, sec_type, expiry, strike, option_right, bid, ask, last, mid
-                    FROM {CONTRACT_QUOTE_LIVE}
-                    WHERE contract_key IN (""" + placeholders + """)
-                    """,
-                    tuple(keys),
-                )
-                rows = cur.fetchall()
-            self._conn.rollback()
-            return [
-                {
-                    "contract_key": r[0],
-                    "symbol": r[1],
-                    "sec_type": r[2],
-                    "expiry": r[3],
-                    "strike": r[4],
-                    "option_right": r[5],
-                    "bid": float(r[6]) if r[6] is not None else None,
-                    "ask": float(r[7]) if r[7] is not None else None,
-                    "last": float(r[8]) if r[8] is not None else None,
-                    "mid": float(r[9]) if r[9] is not None else None,
-                }
-                for r in rows
-                if r
-            ]
-        except Exception as e:
-            logger.debug("get_contract_quotes failed: %s", e)
-            self._conn.rollback()
-            return []
 
     def write_daemon_graceful_shutdown(self) -> None:
         """Mark graceful shutdown on Redis trading state (for monitoring)."""

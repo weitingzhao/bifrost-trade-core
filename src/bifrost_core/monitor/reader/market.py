@@ -7,8 +7,6 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from psycopg2.extras import RealDictCursor
 
-from bifrost_core.persistence.postgres.brokerage_tables import CONTRACT_QUOTE_LIVE
-from bifrost_core.portfolio.quote_freshness import fresh_quote_sql
 from bifrost_core.monitor.reader import write_support as ws
 
 logger = logging.getLogger(__name__)
@@ -140,48 +138,6 @@ def get_stock_day_fallback_price(conn: Any, symbol: str) -> Optional[Tuple[float
     except Exception as e:
         logger.debug("get_stock_day_fallback_price via plugin failed: %s", e)
         return None
-
-
-def get_contract_quotes_conn(conn: Any, contract_keys: List[str]) -> List[Dict[str, Any]]:
-    """Return bid/ask/last/mid from contract_quote_live for given contract_keys. Used by GET /quotes for OPT rows."""
-    if not contract_keys:
-        return []
-    keys = [k for k in contract_keys if k and str(k).strip()]
-    if not keys:
-        return []
-    try:
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            placeholders = ", ".join("%s" for _ in keys)
-            cur.execute(
-                f"""
-                SELECT contract_key, symbol, sec_type, expiry, strike, option_right, bid, ask, last, mid,
-                       extract(epoch from updated_at) AS ts
-                FROM {CONTRACT_QUOTE_LIVE} q
-                WHERE contract_key IN (""" + placeholders + """)
-                  AND """ + fresh_quote_sql("q") + """
-                """,
-                tuple(keys),
-            )
-            rows = cur.fetchall()
-        return [
-            {
-                "contract_key": r["contract_key"],
-                "symbol": r["symbol"],
-                "sec_type": r["sec_type"],
-                "expiry": r["expiry"],
-                "strike": r["strike"],
-                "option_right": r["option_right"],
-                "bid": float(r["bid"]) if r["bid"] is not None else None,
-                "ask": float(r["ask"]) if r["ask"] is not None else None,
-                "last": float(r["last"]) if r["last"] is not None else None,
-                "mid": float(r["mid"]) if r["mid"] is not None else None,
-                "ts": float(r["ts"]) if r["ts"] is not None else None,
-            }
-            for r in rows
-        ]
-    except Exception as e:
-        logger.debug("get_contract_quotes_conn failed: %s", e)
-        return []
 
 
 def get_bars_stats(conn: Any, symbol: Optional[str] = None) -> Dict[str, Any]:
