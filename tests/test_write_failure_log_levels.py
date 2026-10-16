@@ -55,7 +55,9 @@ class _Sink:
 def test_ib_edge_write_failures_reach_warning(monkeypatch, caplog):
     from bifrost_core.portfolio import ib_edge
 
-    snapshot = {"accounts_snapshot": [], "open_orders": [], "last_execution_rows": [{"x": 1}]}
+    fill = {"exec_id": "0000.test.01", "account": "U0000001", "symbol": "ZZQ", "sec_type": "STK",
+            "side": "BOT", "shares": 1.0, "price": 1.0, "ts": 1.0}
+    snapshot = {"accounts_snapshot": [], "open_orders": [], "last_execution_rows": [fill]}
     r = MagicMock()
     r.get.return_value = json.dumps(snapshot)
     monkeypatch.setattr(ib_edge, "_redis_sync_client", lambda cfg: r)

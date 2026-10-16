@@ -7,6 +7,7 @@ import logging
 from typing import Any, Dict, List, Optional
 
 from bifrost_core.core.daemon_flags import daemon_broker_writes_off
+from bifrost_core.portfolio.gateway_fills import execution_rows_from_gateway_fills
 
 logger = logging.getLogger(__name__)
 
@@ -119,7 +120,18 @@ async def refresh_accounts_from_redis_edge(app: Any) -> None:
                     logger.warning("[ib_edge] write_open_orders: %s", e)
 
         if "last_execution_rows" in data:
-            rows = data.get("last_execution_rows") or []
+            # The snapshot carries the IB Gateway plugin's fills (account / shares / ts, no
+            # source); the sink reads account_id / quantity / time / source. Passed through
+            # unmapped, a fill was stored with NULL account, quantity, time and source, and
+            # ON CONFLICT (exec_id) DO NOTHING then kept that row (PROD 2026-10-15). Map them
+            # the way POST /executions/fetch does and leave incomplete fills unwritten.
+            rows, refused = execution_rows_from_gateway_fills(data.get("last_execution_rows") or [])
+            if refused:
+                logger.warning(
+                    "[ib_edge] %s fill(s) not written (incomplete): %s",
+                    len(refused),
+                    "; ".join(f"{r.get('exec_id')!r} missing {','.join(r['missing'])}" for r in refused[:20]),
+                )
             if rows and app._status_sink and hasattr(app._status_sink, "write_account_executions"):
                 try:
                     app._status_sink.write_account_executions(rows)
