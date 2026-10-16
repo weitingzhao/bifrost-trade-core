@@ -7,16 +7,21 @@ writer reads ``account_id`` / ``quantity`` / ``time`` / ``source``. So every fet
 was stored with NULL account, quantity, time and source (six rows on Golden Source, from
 2026-08-08; they are left as they are).
 
-The plugin row today (``bifrost_plugin/ib_gateway/ib_ops.py``)::
+The plugin row (``bifrost_plugin/ib_gateway/ib_ops.py``)::
 
     exec_id, account, symbol, sec_type, side, shares, price, commission, realized_pnl, ts
+    + conid, currency, exchange, cum_qty                      (ib-gateway 0.4.1)
+    + expiry, strike, option_right, multiplier for OPT / FOP  (ib-gateway 0.4.1)
 
-It has no option fields (expiry, strike, right, local symbol, conId, multiplier) and its
-``symbol`` is the contract's underlying symbol, so an option fill cannot get a
-``contract_key``. Such a fill is refused rather than written half-empty: the raw TWS insert
-is ``ON CONFLICT (exec_id) DO NOTHING``, so a keyless row would also block the complete row
-for the same fill later. The mapping passes the option fields through once the plugin sends
-them. A stock fill gets ``SYMBOL|STK|||``.
+Its ``symbol`` is the contract's underlying symbol, so an option fill gets its key from expiry /
+strike / option_right (the writer builds it with ``contract_key.tws_execution_opt_key``). Before
+ib-gateway 0.4.1 the plugin sent none of those, and an option fill that still lacks one is
+refused rather than written half-empty: the raw TWS insert is ``ON CONFLICT (exec_id) DO
+NOTHING``, so a keyless row would also block the complete row for the same fill later. The new
+names are passed through as they are. A stock fill gets ``SYMBOL|STK|||``.
+
+The daemon's account refresh (``ib_edge``) goes through this mapping too since core 0.60.1;
+before it wrote the snapshot's fills unmapped, with NULL account / quantity / time / source.
 """
 
 from __future__ import annotations
