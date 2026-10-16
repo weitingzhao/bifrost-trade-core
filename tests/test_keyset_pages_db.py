@@ -1,8 +1,8 @@
 """TD-51 against real Postgres: paging /executions and /transactions with the keyset cursor
 returns every row exactly once, in the unpaged order, through ties and NULLs.
 
-The book has exact ties on (trade_date, exec_time) across Flex, TWS and journal rows,
-microsecond-apart times, a NULL exec_time inside a dated day, NULL trade_dates with and
+The book has exact ties on (trade_date, exec_time) across Flex and journal rows and between
+TWS rows, microsecond-apart times, a NULL exec_time inside a dated day, NULL trade_dates with and
 without an exec_time, and transactions sharing one ts. For every scope and every page size
 from 1 to past the end, the pages concatenated equal the unpaged list, and the first page
 equals what the reader returned before 0.40.0 for that limit.
@@ -29,14 +29,17 @@ ACCOUNT = "U0000051"
 D1 = date(2026, 9, 18)
 D2 = date(2026, 9, 19)
 D0 = date(2026, 9, 17)
+D3 = date(2026, 9, 20)
 T = datetime(2026, 9, 18, 15, 0, 0, 1, tzinfo=timezone.utc)
 T_NEXT = T + timedelta(microseconds=1)
+T3 = datetime(2026, 9, 20, 15, 0, 0, 1, tzinfo=timezone.utc)
 
 _VIEWS = ("executions_raw_tws", "executions_raw_flex", "executions_raw_journal", "commissions", "positions",
           "contract_quote_live", "transactions")
 
-# (table, trade_date, exec_time, contract key suffix) -- the TWS rows have their own
-# contract keys, so the on_the_fly view keeps them.
+# (table, trade_date, exec_time, contract key suffix) -- the TWS rows fall after the last day
+# Flex covers (D2), so the on_the_fly view keeps them (core 0.61.0: pending until Flex has the
+# exec_id, bounded by the account's last Flex day).
 FILLS = [
     ("flex", D1, T, "A"),
     ("flex", D1, T, "A"),
@@ -46,10 +49,10 @@ FILLS = [
     ("flex", None, None, "A"),
     ("flex", None, None, "A"),
     ("flex", D2, T, "A"),
-    ("tws", D1, T, "B"),
-    ("tws", D1, T, "B"),
+    ("tws", D3, T3, "B"),
+    ("tws", D3, T3, "B"),
     ("tws", None, None, "B"),
-    ("tws", D2, None, "B"),
+    ("tws", D3, None, "B"),
     ("journal", D1, T, "A"),
     ("journal", D0, None, "A"),
     ("journal", None, T_NEXT, "A"),
@@ -135,7 +138,9 @@ def test_book_has_the_ties_and_nulls_it_claims(pg_conn: Any, book: None) -> None
     rows = ex.get_executions(pg_conn, account_id=ACCOUNT, limit=None, source_scope="all")
     keys = [(r["trade_date"], r["time"]) for r in rows]
     on_t = [k for k in keys if k[0] == D1 and k[1] is not None and abs(k[1] - T.timestamp()) < 3e-7]
-    assert len(on_t) == 5  # 2 Flex, 2 TWS, 1 journal on one exact key
+    assert len(on_t) == 3  # 2 Flex, 1 journal on one exact key
+    on_t3 = [k for k in keys if k[0] == D3 and k[1] is not None and abs(k[1] - T3.timestamp()) < 3e-7]
+    assert len(on_t3) == 2  # 2 TWS on another
     assert sum(1 for d, t in keys if d is None and t is None) == 3
     assert any(d == D1 and t is None for d, t in keys)
     assert any(d is None and t is not None for d, t in keys)

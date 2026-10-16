@@ -113,6 +113,51 @@ def restore_view_grants(cur: Any, schema: str, grants: list[tuple[str, str, str]
             cur.execute(f"GRANT {privilege} ON {schema}.{view} TO {grantee}")
 
 
+# The trading day of a TWS fill, which carries no trade_date: IB's own session date (US/Eastern).
+_TWS_DAY = (
+    "COALESCE(t.trade_date, (t.exec_time AT TIME ZONE 'America/New_York')::date, "
+    "(t.created_at AT TIME ZONE 'America/New_York')::date)"
+)
+
+
+def fly_rows_sql(schema: str, exec_cols_t: str) -> str:
+    """``executions_fly`` (``source_scope=on_the_fly``): the TWS fills Flex has not confirmed yet.
+
+    A TWS fill is pending while (core 0.61.0)
+      - Flex has no row with its exec_id -- Flex and TWS carry IB's same execID for one fill
+        (16 of 16 pairs since 2026-09); once Flex has it, the fill is in ``executions_final``
+        and leaves this view, so it is never counted twice;
+      - its trading day is after the last day Flex covers for its account (``max(trade_date)``
+        of that account's Flex rows; an account with no Flex row has no bound). This keeps out
+        older TWS rows whose Flex counterpart carries another exec_id (19 such rows, 2026-03..05),
+        and it keeps the fills of an account whose Flex has stopped visible as pending;
+      - it has an account (rows the daemon wrote before core 0.60.1 do not) and is not a BAG.
+
+    Before 0.61.0 a TWS fill counted as confirmed when Flex had any row for the same account and
+    contract (or, for a stock, the same symbol), so a new fill on a contract traded before never
+    showed: on 2026-10-16 an NVDA option fill was missing here while IB's position had moved.
+    """
+    return f"""
+        SELECT -(t.executions_raw_tws_id) AS account_executions_id,
+               {exec_cols_t}
+        FROM {schema}.executions_raw_tws t
+        LEFT JOIN (
+            SELECT account_id, max(trade_date) AS flex_through
+            FROM {schema}.executions_raw_flex
+            GROUP BY account_id
+        ) w ON w.account_id = t.account_id
+        WHERE upper(trim(COALESCE(t.sec_type, ''))) <> 'BAG'
+          AND NULLIF(trim(COALESCE(t.account_id, '')), '') IS NOT NULL
+          AND NOT EXISTS (
+            SELECT 1
+            FROM {schema}.executions_raw_flex f
+            WHERE f.exec_id = t.exec_id
+              AND NULLIF(trim(COALESCE(t.exec_id, '')), '') IS NOT NULL
+          )
+          AND {_TWS_DAY} > COALESCE(w.flex_through, DATE '-infinity')
+        """
+
+
 def _create_brokerage_views(cur: Any, schema: str, *, env: bool = False) -> None:
     """The execution views over the three raw tables.
 
@@ -167,48 +212,7 @@ def _create_brokerage_views(cur: Any, schema: str, *, env: bool = False) -> None
     cur.execute(f"CREATE OR REPLACE VIEW {schema}.executions_final AS {body(final_rows)}")
 
     exec_cols_t = ", ".join(f"t.{c.strip()}" for c in cols.split(",") if c.strip())
-    fly_final_equity = (
-        "'STK', 'EQUITY', 'FUND', 'ETF', 'ETN', 'ADR', 'CORP', 'STOCK', 'REIT', 'WAR'"
-    )
-    fly_f_sec_norm = (
-        "upper(trim(COALESCE("
-        "NULLIF(trim(COALESCE(f.sec_type, '')), ''), "
-        "NULLIF(trim(split_part(COALESCE(f.contract_key, ''), '|', 2)), '')"
-        ")))"
-    )
-    fly_rows = f"""
-        SELECT -(t.executions_raw_tws_id) AS account_executions_id,
-               {exec_cols_t}
-        FROM {schema}.executions_raw_tws t
-        WHERE upper(trim(COALESCE(t.sec_type, ''))) <> 'BAG'
-          AND NOT EXISTS (
-            SELECT 1
-            FROM {schema}.executions_final f
-            WHERE f.account_id IS NOT DISTINCT FROM t.account_id
-              AND (
-                (
-                  NULLIF(trim(COALESCE(t.contract_key, '')), '') IS NOT NULL
-                  AND NULLIF(trim(COALESCE(f.contract_key, '')), '') IS NOT NULL
-                  AND trim(COALESCE(f.contract_key, '')) = trim(COALESCE(t.contract_key, ''))
-                )
-                OR (
-                  upper(trim(COALESCE(t.sec_type, ''))) = 'STK'
-                  AND upper(trim(COALESCE(f.sec_type, ''))) = 'STK'
-                  AND NULLIF(trim(COALESCE(t.contract_key, '')), '') IS NOT NULL
-                  AND NULLIF(trim(COALESCE(f.contract_key, '')), '') IS NOT NULL
-                  AND rtrim(trim(COALESCE(t.contract_key, '')), '|')
-                      = rtrim(trim(COALESCE(f.contract_key, '')), '|')
-                )
-                OR (
-                  upper(trim(COALESCE(t.sec_type, ''))) = 'STK'
-                  AND {fly_f_sec_norm} IN ({fly_final_equity})
-                  AND NULLIF(trim(COALESCE(t.symbol, '')), '') IS NOT NULL
-                  AND upper(trim(COALESCE(t.symbol, ''))) = upper(trim(COALESCE(f.symbol, '')))
-                )
-              )
-        )
-        """
-    cur.execute(f"CREATE OR REPLACE VIEW {schema}.executions_fly AS {body(fly_rows)}")
+    cur.execute(f"CREATE OR REPLACE VIEW {schema}.executions_fly AS {body(fly_rows_sql(schema, exec_cols_t))}")
 
     if not env:
         return
